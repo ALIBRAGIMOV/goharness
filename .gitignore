@@ -1,0 +1,13 @@
+# Provisioned tool binaries. golangci-lint alone is tens of megabytes, and it is
+# reproducible from its pinned checksum: run `goharness setup`.
+/.tools/
+
+# Build and test artefacts.
+/goharness
+/dist/
+*.test
+*.out
+*.prof
+
+# Local overrides that must not travel with the repository.
+/goharness.local.yaml

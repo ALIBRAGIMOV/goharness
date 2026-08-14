@@ -1,0 +1,63 @@
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - dupl
+    - errcheck
+    - errname
+    - errorlint
+    - fatcontext
+    - forcetypeassert
+    - gochecknoglobals
+    - gochecknoinits
+    - gosec
+    - ineffassign
+    - makezero
+    - modernize
+    - musttag
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - noctx
+    - predeclared
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - testifylint
+    - unused
+    - usestdlibvars
+  settings:
+    dupl:
+      # Advisory-first: a high threshold reports only substantial copies.
+      threshold: 180
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    gosec:
+      excludes:
+        # G104 duplicates errcheck, which is enabled above and more precise.
+        - G104
+        # G304 and G204 fire on reading a file or running a program named by a
+        # variable. That is what a verification harness does on every run, so
+        # here the rule has no signal left; it stays off at the policy level
+        # rather than being suppressed inline at each call site.
+        - G304
+        - G204
+  exclusions:
+    generated: lax
+    rules:
+      - path: _test\.go
+        linters:
+          - dupl
+          - gochecknoglobals
+          - gosec
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: false

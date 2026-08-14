@@ -1,0 +1,247 @@
+package admission
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+// ContractFileName is the conventional location of a task contract.
+const ContractFileName = "goharness.task.yaml"
+
+// ContractSource records where a contract came from, for the report.
+type ContractSource string
+
+// Contract sources, in the priority order they are tried.
+const (
+	ContractFromFlag    ContractSource = "--contract flag"
+	ContractFromFile    ContractSource = ContractSource(ContractFileName)
+	ContractFromDefault ContractSource = "implicit default"
+)
+
+// Budget bounds an acceptable performance regression for one benchmark.
+type Budget struct {
+	MaxTimeIncreasePercent  float64
+	MaxAllocIncreasePercent float64
+}
+
+// DefaultBudget is applied to any benchmark the contract does not name.
+func DefaultBudget() Budget {
+	return Budget{MaxTimeIncreasePercent: 15, MaxAllocIncreasePercent: 10}
+}
+
+// TaskContract is what the change claims to accomplish. The zero value is the
+// implicit default contract: no declared scope, no declared risks, no API
+// breaks allowed.
+type TaskContract struct {
+	Source        ContractSource
+	Goal          string
+	DeclaredScope []string
+	DeclaredRisks []RiskDomain
+	Budgets       map[string]Budget
+	AllowAPIBreak bool
+}
+
+// HasScope reports whether the contract constrains where the change may land.
+func (c TaskContract) HasScope() bool {
+	return len(c.DeclaredScope) > 0
+}
+
+// BudgetFor returns the regression budget for one benchmark.
+func (c TaskContract) BudgetFor(benchmark string) Budget {
+	if b, ok := c.Budgets[benchmark]; ok {
+		return b
+	}
+	return DefaultBudget()
+}
+
+// InScope reports whether a module-relative path is inside the declared scope.
+// Without a declared scope every path is in scope.
+func (c TaskContract) InScope(file string) bool {
+	if !c.HasScope() {
+		return true
+	}
+	return slices.ContainsFunc(c.DeclaredScope, func(pattern string) bool {
+		return scopeMatch(pattern, file)
+	})
+}
+
+func scopeMatch(pattern, file string) bool {
+	pattern = strings.TrimSuffix(strings.TrimSuffix(pattern, "..."), "**")
+	if strings.HasSuffix(pattern, "/") {
+		return strings.HasPrefix(file, pattern)
+	}
+	if pattern == file {
+		return true
+	}
+	if ok, err := path.Match(pattern, file); err == nil && ok {
+		return true
+	}
+	return strings.HasPrefix(file, pattern+"/")
+}
+
+// LoadContract resolves the contract in priority order: the explicit flag, the
+// conventional file at the repository root, then the implicit default.
+func LoadContract(explicitPath, repoRoot string) (TaskContract, error) {
+	if explicitPath != "" {
+		data, err := os.ReadFile(explicitPath)
+		if err != nil {
+			return TaskContract{}, fmt.Errorf("reading contract %s: %w", explicitPath, err)
+		}
+		return parseContract(data, ContractFromFlag)
+	}
+	data, err := os.ReadFile(filepath.Join(repoRoot, ContractFileName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return TaskContract{
+				Source: ContractFromDefault,
+				Goal:   "this change must be admissible under the strict policy",
+			}, nil
+		}
+		return TaskContract{}, fmt.Errorf("reading %s: %w", ContractFileName, err)
+	}
+	return parseContract(data, ContractFromFile)
+}
+
+// parseContract decodes the restricted contract subset: scalar keys, string
+// lists, and a nested budgets mapping. Anything outside that shape is an error
+// rather than a silently ignored key, because a misread contract would relax
+// the gate without saying so.
+func parseContract(src []byte, source ContractSource) (TaskContract, error) {
+	c := TaskContract{Source: source, Budgets: map[string]Budget{}}
+	section := ""
+	benchmark := ""
+
+	for lineNo, raw := range strings.Split(string(src), "\n") {
+		line := strings.TrimRight(raw, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+
+		if indent == 0 {
+			key, value, err := splitKeyValue(trimmed, lineNo+1)
+			if err != nil {
+				return TaskContract{}, err
+			}
+			section, benchmark = key, ""
+			if value == "" {
+				if !isContractSection(key) {
+					return TaskContract{}, fmt.Errorf("%s line %d: unknown key %q", ContractFileName, lineNo+1, key)
+				}
+				continue
+			}
+			if err := c.setScalar(key, value, lineNo+1); err != nil {
+				return TaskContract{}, err
+			}
+			section = ""
+			continue
+		}
+
+		if item, ok := strings.CutPrefix(trimmed, "- "); ok {
+			if err := c.appendItem(section, strings.TrimSpace(item), lineNo+1); err != nil {
+				return TaskContract{}, err
+			}
+			continue
+		}
+		key, value, err := splitKeyValue(trimmed, lineNo+1)
+		if err != nil {
+			return TaskContract{}, err
+		}
+		if section != "budgets" {
+			return TaskContract{}, fmt.Errorf("%s line %d: unexpected mapping under %q", ContractFileName, lineNo+1, section)
+		}
+		if value == "" {
+			benchmark = key
+			c.Budgets[benchmark] = DefaultBudget()
+			continue
+		}
+		if err := c.setBudgetField(benchmark, key, value, lineNo+1); err != nil {
+			return TaskContract{}, err
+		}
+	}
+	return c, nil
+}
+
+func isContractSection(key string) bool {
+	switch key {
+	case "scope", "risks", "budgets":
+		return true
+	}
+	return false
+}
+
+func splitKeyValue(body string, lineNo int) (key, value string, err error) {
+	key, value, ok := strings.Cut(body, ":")
+	if !ok {
+		return "", "", fmt.Errorf("%s line %d: expected key: value, got %q", ContractFileName, lineNo, body)
+	}
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if unquoted, unquoteErr := strconv.Unquote(value); unquoteErr == nil {
+		value = unquoted
+	}
+	return key, value, nil
+}
+
+func (c *TaskContract) setScalar(key, value string, lineNo int) error {
+	switch key {
+	case "goal":
+		c.Goal = value
+	case "allowApiBreak":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("%s line %d: allowApiBreak must be true or false: %w", ContractFileName, lineNo, err)
+		}
+		c.AllowAPIBreak = parsed
+	default:
+		return fmt.Errorf("%s line %d: unknown key %q", ContractFileName, lineNo, key)
+	}
+	return nil
+}
+
+func (c *TaskContract) appendItem(section, item string, lineNo int) error {
+	if unquoted, err := strconv.Unquote(item); err == nil {
+		item = unquoted
+	}
+	switch section {
+	case "scope":
+		c.DeclaredScope = append(c.DeclaredScope, item)
+	case "risks":
+		domain := RiskDomain(item)
+		if !slices.Contains(RiskDomains(), domain) {
+			return fmt.Errorf("%s line %d: unknown risk domain %q", ContractFileName, lineNo, item)
+		}
+		c.DeclaredRisks = append(c.DeclaredRisks, domain)
+	default:
+		return fmt.Errorf("%s line %d: list item outside a list-valued key", ContractFileName, lineNo)
+	}
+	return nil
+}
+
+func (c *TaskContract) setBudgetField(benchmark, key, value string, lineNo int) error {
+	if benchmark == "" {
+		return fmt.Errorf("%s line %d: budget field %q has no benchmark", ContractFileName, lineNo, key)
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fmt.Errorf("%s line %d: %s must be a number: %w", ContractFileName, lineNo, key, err)
+	}
+	budget := c.Budgets[benchmark]
+	switch key {
+	case "maxTimeIncreasePercent":
+		budget.MaxTimeIncreasePercent = parsed
+	case "maxAllocIncreasePercent":
+		budget.MaxAllocIncreasePercent = parsed
+	default:
+		return fmt.Errorf("%s line %d: unknown budget field %q", ContractFileName, lineNo, key)
+	}
+	c.Budgets[benchmark] = budget
+	return nil
+}

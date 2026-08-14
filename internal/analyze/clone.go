@@ -1,0 +1,140 @@
+package analyze
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"go/ast"
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
+	"github.com/ALIBRAGIMOV/goharness/internal/policy"
+)
+
+// CloneMinStatements is the size below which two identically shaped functions
+// carry no signal: short accessors and constructors legitimately look alike.
+const CloneMinStatements = 12
+
+type cloneSite struct {
+	file string
+	line int
+	name string
+}
+
+// CloneFindings reports functions whose statement shape is identical to
+// another function in scope, ignoring identifiers and literals. It is advisory:
+// whether two identical shapes should be one function or deliberately separate
+// is a design decision the scanner cannot make.
+func CloneFindings(ctx context.Context, root string, relFiles []string) ([]Finding, error) {
+	units, err := parseUnits(ctx, root, relFiles)
+	if err != nil {
+		return nil, err
+	}
+	byShape := map[string][]cloneSite{}
+	for _, u := range units {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		u.collectShapes(byShape)
+	}
+
+	var out []Finding
+	for _, shape := range slices.Sorted(maps.Keys(byShape)) {
+		sites := byShape[shape]
+		if len(sites) < 2 {
+			continue
+		}
+		slices.SortFunc(sites, func(a, b cloneSite) int {
+			if a.file != b.file {
+				if a.file < b.file {
+					return -1
+				}
+				return 1
+			}
+			return a.line - b.line
+		})
+		first := sites[0]
+		for _, site := range sites[1:] {
+			out = append(out, Finding{
+				RuleID: policy.RuleClone, File: site.file, Line: site.line,
+				Message: fmt.Sprintf("%s has the same statement shape as %s at %s:%d",
+					site.name, first.name, first.file, first.line),
+				Severity: evidence.SeverityInfo, Advisory: true,
+			})
+		}
+	}
+	sortFindings(out)
+	return out, nil
+}
+
+// collectShapes skips test files. An arrange-act-assert body legitimately
+// repeats its shape across cases, so a clone report there is noise rather than
+// a design signal; the dupl linter is excluded from test files for the same
+// reason, and the two must agree.
+func (u *unit) collectShapes(byShape map[string][]cloneSite) {
+	for i, file := range u.files {
+		if strings.HasSuffix(u.relPaths[i], "_test.go") {
+			continue
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || countStatements(fn.Body) < CloneMinStatements {
+				continue
+			}
+			shape := shapeHash(fn.Body)
+			byShape[shape] = append(byShape[shape], cloneSite{
+				file: u.relPaths[i],
+				line: u.fset.Position(fn.Pos()).Line,
+				name: funcDisplayName(fn),
+			})
+		}
+	}
+}
+
+func countStatements(body *ast.BlockStmt) int {
+	count := 0
+	ast.Inspect(body, func(n ast.Node) bool {
+		if _, ok := n.(ast.Stmt); ok {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
+// shapeHash reduces a body to its control and operator structure. Identifiers
+// and literal values are erased, so two copies that differ only in naming hash
+// the same, while two functions with different logic do not.
+func shapeHash(body *ast.BlockStmt) string {
+	var shape strings.Builder
+	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
+		shape.WriteString(nodeShape(n))
+		return true
+	})
+	sum := sha256.Sum256([]byte(shape.String()))
+	return hex.EncodeToString(sum[:8])
+}
+
+func nodeShape(n ast.Node) string {
+	switch node := n.(type) {
+	case *ast.Ident, *ast.BasicLit:
+		return "x;"
+	case *ast.BinaryExpr:
+		return "b" + node.Op.String() + ";"
+	case *ast.UnaryExpr:
+		return "u" + node.Op.String() + ";"
+	case *ast.AssignStmt:
+		return "a" + node.Tok.String() + strconv.Itoa(len(node.Lhs)) + ";"
+	case *ast.BranchStmt:
+		return "br" + node.Tok.String() + ";"
+	default:
+		return fmt.Sprintf("%T;", n)
+	}
+}
