@@ -5,6 +5,7 @@ package policy
 const (
 	RuleGoroutineLifetime = "GH-CONC-001"
 	RuleGoroutineInLoop   = "GH-CONC-002"
+	RuleGoroutineLeak     = "GH-LEAK-001"
 	RuleTimerInLoop       = "GH-RES-001"
 	RuleVariableChanBuf   = "GH-RES-002"
 	RuleClientTimeout     = "GH-NET-001"
@@ -71,6 +72,16 @@ func concurrencyRules() []Rule {
 			Lifecycle:      LifecycleRequired,
 			Rationale:      "Spawning one goroutine per iteration with no semaphore, errgroup limit, or token channel makes concurrency a function of input size rather than of available resources.",
 			Enforcement:    "native concurrency scanner (internal/analyze)",
+			DocURL:         modelDoc,
+		},
+		{
+			ID:             RuleGoroutineLeak,
+			Title:          "Tests leave goroutines running",
+			Pack:           PackRiskConcurrency,
+			Classification: ClassRequired,
+			Lifecycle:      LifecycleRequired,
+			Rationale:      "A goroutine still alive after the package's tests finish escaped every cleanup path the tests exercised; in production the same code leaks goroutines per request. Detected at runtime by a pinned embedded goleak injected into the race run, so no test code changes are needed.",
+			Enforcement:    "embedded go.uber.org/goleak via go test -overlay, head only",
 			DocURL:         modelDoc,
 		},
 		{

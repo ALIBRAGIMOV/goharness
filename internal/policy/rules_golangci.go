@@ -53,6 +53,8 @@ func golangciLinterSpecs() []linterSpec {
 			rationale: "Work without a context cannot be cancelled and has no deadline."},
 		{name: "predeclared", title: "Identifier shadows a Go predeclared name", classification: ClassRequired,
 			rationale: "Shadowing names such as len, cap, or new makes the surrounding code mean something other than it reads."},
+		{name: "revive", title: "Defect-oriented revive rule violation", classification: ClassRequired,
+			rationale: "Only revive's defect rules are enabled (atomic misuse, identical branches, value-receiver mutation, WaitGroup by value, data races in closures, unconditional recursion, os.Exit outside main); each one reports code that misbehaves, not code that reads unusually."},
 		{name: "rowserrcheck", title: "sql.Rows.Err is not checked", classification: ClassRequired,
 			rationale: "Iteration errors surface only through Rows.Err; skipping it turns a query failure into an empty result."},
 		{name: "sqlclosecheck", title: "sql.Rows or sql.Stmt is not closed", classification: ClassRequired,

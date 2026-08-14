@@ -256,6 +256,15 @@ func (g PackageGraph) FilesFor(pkgPaths []string) ([]string, error) {
 	return sortedKeys(set), nil
 }
 
+// DirAndName returns a package's absolute directory and its package name.
+func (g PackageGraph) DirAndName(pkgPath string) (dir, name string, ok bool) {
+	pkg, found := g.packages[pkgPath]
+	if !found || pkg.Dir == "" {
+		return "", "", false
+	}
+	return pkg.Dir, pkg.Name, true
+}
+
 // HasMainPackage reports whether any of the given packages produces an
 // executable, which decides whether go build needs an output directory.
 func (g PackageGraph) HasMainPackage(pkgPaths []string) bool {

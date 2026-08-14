@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ALIBRAGIMOV/goharness/internal/leakcheck"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
 	"github.com/ALIBRAGIMOV/goharness/internal/repo"
 	"github.com/ALIBRAGIMOV/goharness/internal/report"
@@ -83,6 +84,8 @@ func runDoctor(ctx context.Context, args []string, streams Streams) int {
 func reportScanner(out *printer) {
 	out.line("%s vuln scanner   embedded golang.org/x/vuln %s", mark(true),
 		orUnknown(tool.XVulnVersion()))
+	out.line("%s leak check     embedded go.uber.org/goleak %s, injected into race runs",
+		mark(true), leakcheck.Version)
 }
 
 // reportCache inspects the provisioned cache. Doctor only reads: it reports

@@ -139,14 +139,14 @@ claims that own them.
 | maintainability | always | MaintainabilityDelta base/head |
 | architecture | always | layout policy (banned package names, internal boundary violations, dependency direction rules from config) |
 | appropriate-reuse | always | duplication detection on changed code (dupl-class linter plus native diff-local clone scan), advisory-first |
-| concurrency-safety | concurrency risk | `go test -race` on affected packages (required evidence), goroutine lifecycle scan (goroutine launched without ctx/done/WaitGroup path) |
+| concurrency-safety | concurrency risk | `go test -race` on affected packages (required evidence), goroutine lifecycle scan (goroutine launched without ctx/done/WaitGroup path), and runtime goroutine-leak evidence: an embedded pinned goleak is injected into every affected test package through a build overlay, with zero user setup. A package that already declares TestMain cannot be injected; its leak obligation is INCONCLUSIVE with the remedy spelled out, never a silent pass |
 | bounded-resources | concurrency or network risk | native scans: goroutine spawn in unbounded loop, `time.After` in loop, unbounded buffered channels from variable sizes, missing `http.Client` timeout |
 | reliability | always; stricter under network risk | errcheck/errorlint class, panic-in-library scan; network risk adds timeout, cancellation (noctx-class), and bounded-retry scans |
 | test-effectiveness | always; stricter under tests risk | GH-TEST-* natives; tests risk adds anti-weakening diff and mutation evidence |
 | performance | hot-path risk | base/head benchmark comparison with -benchmem |
 | security | always | gosec-class linters; audit scope adds govulncheck |
 | operability | network or persistence risk | context propagation, shutdown/cleanup heuristics, resource closing (bodyclose/sqlclosecheck class) |
-| policy-integrity | always | suppression scanner, exception validity (owner, unexpired), config-tamper check (mandatory rules not disabled), worktree read-only guard |
+| policy-integrity | always | suppression scanner (every dialect: `//nolint`, `//lint:ignore`, `//lint:file-ignore`, `#nosec`, `//revive:disable*`), exception validity (owner, unexpired), config-tamper check (mandatory rules not disabled), policy-guard (a diff touching `goharness.yaml` or the task contract fails unless the contract itself records `allowPolicyEdit: true`; hand-edited generated files are flagged advisory), worktree read-only guard |
 
 ## Risk-aware planner obligations (normative)
 

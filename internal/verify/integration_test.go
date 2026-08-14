@@ -453,22 +453,30 @@ func TestCompilationFailureIsRejectedAndSkipsDependentChecks(t *testing.T) {
 
 func TestProjectConfigExceptionDowngradesAFinding(t *testing.T) {
 	useGolangci(t)
-	f := newFixture(t)
-	f.write("lib/lib.go", cleanLibrary)
-	f.write("lib/lib_test.go", cleanLibraryTest)
-	f.commit("clean baseline")
-	f.write("lib/lib.go", uncheckedErrorLibrary)
+	bare := newFixture(t)
+	bare.write("lib/lib.go", cleanLibrary)
+	bare.write("lib/lib_test.go", cleanLibraryTest)
+	bare.commit("clean baseline")
+	bare.write("lib/lib.go", uncheckedErrorLibrary)
 
-	if got := run(t, f, verify.ModeFast); got.Decision.Verdict != admission.VerdictRejected {
+	if got := run(t, bare, verify.ModeFast); got.Decision.Verdict != admission.VerdictRejected {
 		t.Fatalf("without configuration the verdict is %s, want REJECTED", got.Decision.Verdict)
 	}
 
+	// A second fixture carries the exception in its baseline: policy is
+	// reviewed history, not part of the diff under judgment, so the policy
+	// guard stays silent and only the excepted finding is at stake.
+	f := newFixture(t)
+	f.write("lib/lib.go", cleanLibrary)
+	f.write("lib/lib_test.go", cleanLibraryTest)
 	f.write("goharness.yaml", "exceptions:\n"+
 		"  - rule: GCL-errcheck\n"+
 		"    scope: lib/\n"+
 		"    reason: legacy helper scheduled for deletion\n"+
 		"    owner: platform-team\n"+
 		"    expires: 2099-12-31\n")
+	f.commit("baseline with reviewed exception")
+	f.write("lib/lib.go", uncheckedErrorLibrary)
 
 	result := run(t, f, verify.ModeFast)
 	requireVerdict(t, result, admission.VerdictAdmitted)

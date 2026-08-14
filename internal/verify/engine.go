@@ -594,7 +594,8 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 	baseAvailable := in.mode == ModeVerify && in.change.HasBase() && in.repository.HasGit
 
 	headTarget, execution, err := e.buildTarget(ctx, targetInput{
-		root: in.repository.Root, change: in.change, mode: in.mode,
+		root: in.repository.Root, modulePath: in.repository.ModulePath,
+		change: in.change, mode: in.mode,
 		contract: in.contract, config: in.config, repositoryWide: repositoryWide,
 	})
 	if err != nil {
@@ -617,6 +618,7 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 	})
 	headTarget.analyzeOpts = analyzeOptionsFor(risks, in.repository, in.config)
 	headTarget.raceTests = risks.Has(admission.RiskConcurrency)
+	headTarget.leakCheck = risks.Has(admission.RiskConcurrency)
 
 	execution.Checks = headTarget.checksFor(plan.Checks)
 	in.result.Risks = risks
@@ -664,10 +666,12 @@ func (e *Engine) compareWithBase(
 
 	baseChange := change.ChangeSet{FullScope: true, BaseOrigin: change.BaseUnavailable}
 	baseTarget, basePlan, err := e.buildTarget(ctx, targetInput{
-		root: wt.Dir, change: baseChange, mode: in.mode, contract: in.contract,
+		root: wt.Dir, modulePath: in.repository.ModulePath,
+		change: baseChange, mode: in.mode, contract: in.contract,
 		config: in.config, restrict: &scopeRestriction{
 			lint: headTarget.packages, tests: headTarget.testPackages,
 		},
+		isBase: true,
 	})
 	if err != nil {
 		return err
@@ -767,12 +771,14 @@ type scopeRestriction struct {
 
 type targetInput struct {
 	root           string
+	modulePath     string
 	change         change.ChangeSet
 	mode           Mode
 	contract       admission.TaskContract
 	config         policy.Config
 	repositoryWide bool
 	restrict       *scopeRestriction
+	isBase         bool
 }
 
 func (e *Engine) buildTarget(ctx context.Context, in targetInput) (*target, ExecutionPlan, error) {
@@ -801,9 +807,9 @@ func (e *Engine) buildTarget(ctx context.Context, in targetInput) (*target, Exec
 	}
 
 	t := &target{
-		engine: e, root: in.root, graph: graph,
+		engine: e, root: in.root, modulePath: in.modulePath, graph: graph,
 		packages: lintPkgs, testPackages: testPkgs, files: files,
-		changed: in.change.GoFiles(), contract: in.contract,
+		changed: in.change.GoFiles(), contract: in.contract, isBase: in.isBase,
 	}
 	plan := ExecutionPlan{
 		Mode: in.mode, Packages: lintPkgs, Files: files, Tests: testPkgs,

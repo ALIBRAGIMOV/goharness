@@ -21,6 +21,7 @@ const (
 	ProducerMetrics      = "metrics"
 	ProducerClone        = "clone-scan"
 	ProducerScope        = "scope-scan"
+	ProducerPolicyGuard  = "policy-guard"
 	ProducerMigration    = "migration-scan"
 	ProducerWorktree     = "worktree-guard"
 	ProducerAPICompat    = "api-compat"
@@ -101,6 +102,7 @@ func BuildPlan(in PlanInput) VerificationPlan {
 	add(KindLintSecurity, ProducerGolangci, DimSecurity, always)
 	add(KindLintOperability, ProducerGolangci, DimOperability, always)
 	add(KindHygieneScan, ProducerNative, DimPolicyIntegrity, always)
+	add(KindPolicyGuard, ProducerPolicyGuard, DimPolicyIntegrity, always)
 	add(KindWorktreeReadOnly, ProducerWorktree, DimPolicyIntegrity, always)
 
 	if in.Contract.HasScope() {
@@ -132,6 +134,7 @@ func addRiskObligations(plan *VerificationPlan, in PlanInput, add addFunc) {
 	risks := in.Risks
 	if risks.Has(RiskConcurrency) {
 		add(KindRaceClean, ProducerRaceTest, DimConcurrencySafety, "the change touches concurrency")
+		add(KindLeakClean, ProducerRaceTest, DimConcurrencySafety, "the change touches concurrency")
 		add(KindGoroutineLifetime, ProducerNative, DimConcurrencySafety, "the change touches concurrency")
 	}
 	if risks.HasAny(RiskConcurrency, RiskNetwork) {
@@ -174,6 +177,7 @@ func checksFor(obligations []RequiredEvidence) []PlannedCheck {
 		ProducerMetrics:      {ID: ProducerMetrics, Tool: "goharness"},
 		ProducerClone:        {ID: ProducerClone, Tool: "goharness"},
 		ProducerScope:        {ID: ProducerScope, Tool: "goharness"},
+		ProducerPolicyGuard:  {ID: ProducerPolicyGuard, Tool: "goharness"},
 		ProducerMigration:    {ID: ProducerMigration, Tool: "goharness"},
 		ProducerWorktree:     {ID: ProducerWorktree, Tool: "git"},
 		ProducerVet:          {ID: ProducerVet, Tool: "go vet", DependsOn: []string{ProducerCompile}},

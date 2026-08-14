@@ -10,6 +10,7 @@ import (
 
 	"github.com/ALIBRAGIMOV/goharness/internal/admission"
 	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
+	"github.com/ALIBRAGIMOV/goharness/internal/leakcheck"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
 	"github.com/ALIBRAGIMOV/goharness/internal/verify"
@@ -53,6 +54,7 @@ type Versions struct {
 	GolangciLintPin     string `json:"golangciLintPin"`
 	GolangciLintMatches bool   `json:"golangciLintMatchesPin"`
 	XVuln               string `json:"xVuln"`
+	Goleak              string `json:"goleak"`
 	UberGuideCommit     string `json:"uberGuideCommit"`
 }
 
@@ -138,6 +140,7 @@ func Build(version string, r verify.Result) Document {
 			GolangciLintPin:     tool.GolangciLintPin,
 			GolangciLintMatches: r.Golangci.MatchesPin(),
 			XVuln:               tool.XVulnVersion(),
+			Goleak:              leakcheck.Version,
 			UberGuideCommit:     policy.UberGuideCommit,
 		},
 		Module:           Module{Path: r.Repository.ModulePath, GoDirective: r.Repository.GoDirective},

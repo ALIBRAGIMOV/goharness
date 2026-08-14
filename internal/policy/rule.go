@@ -109,6 +109,9 @@ func MandatoryRuleIDs() []string {
 	return []string{
 		RuleSuppressNolint,
 		RuleSuppressStaticcheck,
+		RuleSuppressNosec,
+		RuleSuppressRevive,
+		RulePolicyEdit,
 		RuleCommentEmDash,
 		RuleCompile,
 	}
@@ -120,6 +123,9 @@ func UngrandfatherableRuleIDs() []string {
 	return []string{
 		RuleSuppressNolint,
 		RuleSuppressStaticcheck,
+		RuleSuppressNosec,
+		RuleSuppressRevive,
+		RulePolicyEdit,
 		RuleCommentEmDash,
 	}
 }

@@ -39,12 +39,13 @@ func DefaultBudget() Budget {
 // implicit default contract: no declared scope, no declared risks, no API
 // breaks allowed.
 type TaskContract struct {
-	Source        ContractSource
-	Goal          string
-	DeclaredScope []string
-	DeclaredRisks []RiskDomain
-	Budgets       map[string]Budget
-	AllowAPIBreak bool
+	Source          ContractSource
+	Goal            string
+	DeclaredScope   []string
+	DeclaredRisks   []RiskDomain
+	Budgets         map[string]Budget
+	AllowAPIBreak   bool
+	AllowPolicyEdit bool
 }
 
 // HasScope reports whether the contract constrains where the change may land.
@@ -200,6 +201,12 @@ func (c *TaskContract) setScalar(key, value string, lineNo int) error {
 			return fmt.Errorf("%s line %d: allowApiBreak must be true or false: %w", ContractFileName, lineNo, err)
 		}
 		c.AllowAPIBreak = parsed
+	case "allowPolicyEdit":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("%s line %d: allowPolicyEdit must be true or false: %w", ContractFileName, lineNo, err)
+		}
+		c.AllowPolicyEdit = parsed
 	default:
 		return fmt.Errorf("%s line %d: unknown key %q", ContractFileName, lineNo, key)
 	}

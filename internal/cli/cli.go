@@ -21,7 +21,7 @@ import (
 )
 
 // Version is the harness version recorded in every report.
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // Exit codes. They are the harness's contract with any caller.
 const (

@@ -188,7 +188,10 @@ type testEvent struct {
 // RunTests runs go test over the given patterns and returns failures. Extra
 // arguments such as -race are appended by the caller.
 func RunTests(ctx context.Context, runner Runner, dir string, patterns, extraArgs []string) ([]TestFailure, error) {
-	args := []string{"test", "-json", "-count=1"}
+	// Vet is a separate producer with the full analyzer set; letting go test
+	// re-run its subset would surface vet findings as test failures and would
+	// refuse overlay-injected virtual packages it cannot chdir into.
+	args := []string{"test", "-json", "-count=1", "-vet=off"}
 	args = append(args, extraArgs...)
 	args = append(args, patterns...)
 

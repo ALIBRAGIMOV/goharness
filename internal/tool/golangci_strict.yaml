@@ -25,6 +25,7 @@ linters:
     - nilnil
     - noctx
     - predeclared
+    - revive
     - rowserrcheck
     - sqlclosecheck
     - staticcheck
@@ -38,6 +39,30 @@ linters:
     errcheck:
       check-type-assertions: true
       check-blank: true
+    # Only revive's defect-oriented rules are enabled. The stylistic ones would
+    # force rewrites of correct code to please a linter, which is exactly the
+    # behavior this harness exists to prevent.
+    revive:
+      rules:
+        - name: atomic
+        - name: constant-logical-expr
+        - name: defer
+        - name: duplicated-imports
+        - name: identical-branches
+        - name: modifies-value-receiver
+        - name: string-of-int
+        - name: time-equal
+        - name: unconditional-recursion
+        - name: waitgroup-by-value
+        - name: datarace
+        - name: deep-exit
+    staticcheck:
+      # Everything except two: ST1003 is the naming check whose own
+      # documentation calls it opinionated, and ST1000 blocks once per package
+      # without a package comment rather than once per defect, which is out of
+      # proportion for a required gate. SA9003 (empty branch) and the doc
+      # comment checks stay on; they catch stub code and drifting docs.
+      checks: ["all", "-ST1000", "-ST1003"]
     gosec:
       excludes:
         # G104 duplicates errcheck, which is enabled above and more precise.

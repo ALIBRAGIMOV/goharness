@@ -56,11 +56,32 @@ func TestSuppressionTokensInStringLiteralsAreIgnored(t *testing.T) {
 const (
 	a = "//nolint:errcheck"
 	b = "//lint:ignore SA1000 reason"
+	c = "// #nosec G304"
+	d = "//revive:disable"
 )
 `
 	ids := ruleIDs(scan(t, "p.go", src))
-	if contains(ids, policy.RuleSuppressNolint) || contains(ids, policy.RuleSuppressStaticcheck) {
-		t.Fatalf("string literals were treated as suppression directives: %v", ids)
+	for _, rule := range []string{
+		policy.RuleSuppressNolint, policy.RuleSuppressStaticcheck,
+		policy.RuleSuppressNosec, policy.RuleSuppressRevive,
+	} {
+		if contains(ids, rule) {
+			t.Fatalf("a string literal was treated as a %s suppression: %v", rule, ids)
+		}
+	}
+}
+
+func TestEverySuppressionDialectIsDetected(t *testing.T) {
+	cases := map[string]string{
+		policy.RuleSuppressNosec:       "// #nosec G204\n",
+		policy.RuleSuppressRevive:      "//revive:disable-next-line:atomic\n",
+		policy.RuleSuppressStaticcheck: "//lint:file-ignore SA1000 legacy\n",
+	}
+	for rule, comment := range cases {
+		src := "package p\n\n" + comment + "func F() int { return 1 }\n"
+		if ids := ruleIDs(scan(t, "p.go", src)); !contains(ids, rule) {
+			t.Fatalf("comment %q did not produce %s: %v", comment, rule, ids)
+		}
 	}
 }
 

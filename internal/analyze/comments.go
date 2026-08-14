@@ -32,9 +32,17 @@ func (s *scanner) scanComments() {
 				s.add(c.Pos(), policy.RuleSuppressNolint,
 					"inline suppression directive //nolint is forbidden; fix the finding or record a scoped exception in goharness.yaml",
 					evidence.SeverityError, false)
-			case strings.HasPrefix(trimmed, "lint:ignore"):
+			case strings.HasPrefix(trimmed, "lint:ignore"), strings.HasPrefix(trimmed, "lint:file-ignore"):
 				s.add(c.Pos(), policy.RuleSuppressStaticcheck,
 					"inline suppression directive //lint:ignore is forbidden; fix the finding or record a scoped exception in goharness.yaml",
+					evidence.SeverityError, false)
+			case strings.HasPrefix(trimmed, "#nosec"):
+				s.add(c.Pos(), policy.RuleSuppressNosec,
+					"inline suppression directive #nosec is forbidden; fix the finding or record a scoped exception in goharness.yaml",
+					evidence.SeverityError, false)
+			case strings.HasPrefix(trimmed, "revive:disable"):
+				s.add(c.Pos(), policy.RuleSuppressRevive,
+					"inline suppression directive //revive:disable is forbidden; fix the finding or record a scoped exception in goharness.yaml",
 					evidence.SeverityError, false)
 			}
 			if strings.ContainsRune(c.Text, EmDash) {

@@ -11,6 +11,10 @@ const (
 	RuleGovulncheck         = "GO-VULN"
 	RuleSuppressNolint      = "GH-SUPPRESS-001"
 	RuleSuppressStaticcheck = "GH-SUPPRESS-002"
+	RuleSuppressNosec       = "GH-SUPPRESS-003"
+	RuleSuppressRevive      = "GH-SUPPRESS-004"
+	RulePolicyEdit          = "GH-POLICY-001"
+	RuleGeneratedEdit       = "GH-POLICY-002"
 	RuleCommentEmDash       = "GH-COMMENT-001"
 	RuleCommentSize         = "GH-COMMENT-002"
 	RuleCommentRestates     = "GH-COMMENT-003"
@@ -119,6 +123,46 @@ func agentHygieneRules() []Rule {
 			Lifecycle:      LifecycleRequired,
 			Rationale:      "Same reasoning as //nolint: suppression must be a reviewed, centrally recorded exception, not an inline comment.",
 			Enforcement:    "native comment scanner (internal/analyze)",
+			DocURL:         hygieneDoc,
+		},
+		{
+			ID:             RuleSuppressNosec,
+			Title:          "Inline #nosec suppression directive",
+			Pack:           PackAgentHygiene,
+			Classification: ClassRequired,
+			Lifecycle:      LifecycleRequired,
+			Rationale:      "A #nosec comment silences a security finding at the exact place it was reported; security exceptions must be reviewed centrally, not waved through inline.",
+			Enforcement:    "native comment scanner (internal/analyze)",
+			DocURL:         hygieneDoc,
+		},
+		{
+			ID:             RuleSuppressRevive,
+			Title:          "Inline revive:disable suppression directive",
+			Pack:           PackAgentHygiene,
+			Classification: ClassRequired,
+			Lifecycle:      LifecycleRequired,
+			Rationale:      "revive:disable comments switch a linter off for a region of code; like every inline suppression the harness forbids them outright.",
+			Enforcement:    "native comment scanner (internal/analyze)",
+			DocURL:         hygieneDoc,
+		},
+		{
+			ID:             RulePolicyEdit,
+			Title:          "Change modifies the quality policy",
+			Pack:           PackAgentHygiene,
+			Classification: ClassRequired,
+			Lifecycle:      LifecycleRequired,
+			Rationale:      "A change that edits goharness.yaml or the task contract is altering its own admission gate; that requires an explicit human decision, recorded as allowPolicyEdit in the contract, never a silent edit.",
+			Enforcement:    "changed-entry scan (internal/verify), head only",
+			DocURL:         hygieneDoc,
+		},
+		{
+			ID:             RuleGeneratedEdit,
+			Title:          "Generated file edited directly",
+			Pack:           PackAgentHygiene,
+			Classification: ClassAdvisory,
+			Lifecycle:      LifecycleAdvisory,
+			Rationale:      "A modified file carrying a Code generated header was probably edited by hand; the next generator run will silently erase the edit. Re-run the generator instead. Advisory because a legitimate regeneration looks identical to a hand edit.",
+			Enforcement:    "changed-entry scan (internal/verify), head only",
 			DocURL:         hygieneDoc,
 		},
 		{

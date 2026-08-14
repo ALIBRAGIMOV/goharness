@@ -15,6 +15,7 @@ import (
 	"github.com/ALIBRAGIMOV/goharness/internal/analyze"
 	"github.com/ALIBRAGIMOV/goharness/internal/change"
 	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
+	"github.com/ALIBRAGIMOV/goharness/internal/leakcheck"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
 	"github.com/ALIBRAGIMOV/goharness/internal/toolcache"
@@ -25,12 +26,15 @@ import (
 type target struct {
 	engine       *Engine
 	root         string
+	modulePath   string
 	graph        change.PackageGraph
 	packages     []string
 	testPackages []string
 	files        []string
 	changed      []string
 	raceTests    bool
+	leakCheck    bool
+	isBase       bool
 	contract     admission.TaskContract
 	analyzeOpts  analyze.Options
 
@@ -44,20 +48,21 @@ type target struct {
 // and are skipped here.
 func (t *target) checksFor(planned []admission.PlannedCheck) []Check {
 	runners := map[string]runFunc{
-		admission.ProducerCompile:   t.runCompile,
-		admission.ProducerGofmt:     t.runGofmt,
-		admission.ProducerGoimports: t.runGoimports,
-		admission.ProducerModTidy:   t.runModTidy,
-		admission.ProducerNative:    t.runNative,
-		admission.ProducerMetrics:   t.runMetrics,
-		admission.ProducerClone:     t.runClone,
-		admission.ProducerScope:     t.runScope,
-		admission.ProducerMigration: t.runMigration,
-		admission.ProducerVet:       t.runVet,
-		admission.ProducerGolangci:  t.runGolangci,
-		admission.ProducerTest:      t.runTests,
-		admission.ProducerRaceTest:  t.runRaceTests,
-		admission.ProducerVulnScan:  t.runVulnScan,
+		admission.ProducerCompile:     t.runCompile,
+		admission.ProducerGofmt:       t.runGofmt,
+		admission.ProducerGoimports:   t.runGoimports,
+		admission.ProducerModTidy:     t.runModTidy,
+		admission.ProducerNative:      t.runNative,
+		admission.ProducerMetrics:     t.runMetrics,
+		admission.ProducerClone:       t.runClone,
+		admission.ProducerScope:       t.runScope,
+		admission.ProducerPolicyGuard: t.runPolicyGuard,
+		admission.ProducerMigration:   t.runMigration,
+		admission.ProducerVet:         t.runVet,
+		admission.ProducerGolangci:    t.runGolangci,
+		admission.ProducerTest:        t.runTests,
+		admission.ProducerRaceTest:    t.runRaceTests,
+		admission.ProducerVulnScan:    t.runVulnScan,
 	}
 	checks := make([]Check, 0, len(planned))
 	for _, p := range planned {
@@ -239,10 +244,72 @@ func (t *target) runScope(_ context.Context) (checkResult, error) {
 	return checkResult{evidence: out}, nil
 }
 
+// runPolicyGuard rejects a change that edits its own admission gate and flags
+// hand-edited generated files. It reads the diff, so it runs at head only: the
+// same entries re-scanned at base would cancel themselves out as pre-existing.
+func (t *target) runPolicyGuard(ctx context.Context) (checkResult, error) {
+	if t.isBase {
+		return checkResult{}, nil
+	}
+	var out []evidence.Evidence
+	for _, entry := range t.engine.ChangedEntries {
+		if err := ctx.Err(); err != nil {
+			return checkResult{}, err
+		}
+		switch {
+		case isPolicyFile(entry.Path) && !t.contract.AllowPolicyEdit:
+			out = append(out, t.engine.Policy.Decorate(t.newEvidence(
+				policy.RulePolicyEdit, "goharness", t.engine.Version,
+				evidence.SeverityError, entry.Path, 0, 0, "",
+				"the change "+entry.Status.Describe()+" the quality policy file "+entry.Path+
+					"; altering the admission gate needs a human decision, recorded as allowPolicyEdit: true in the task contract")))
+		case entry.Status == change.StatusModified && strings.HasSuffix(entry.Path, ".go") &&
+			isGeneratedFile(filepath.Join(t.root, filepath.FromSlash(entry.Path))):
+			out = append(out, t.engine.Policy.Decorate(t.newEvidence(
+				policy.RuleGeneratedEdit, "goharness", t.engine.Version,
+				evidence.SeverityWarning, entry.Path, 0, 0, "",
+				"file carries a Code generated header but was modified directly; re-run the generator so the next run does not erase this edit")))
+		}
+	}
+	return checkResult{evidence: out}, nil
+}
+
+// isPolicyFile covers the durable policy only. The task contract is a per-run
+// input the gate cannot authenticate anyway (a --contract flag would bypass a
+// file check), so guarding it would add friction without adding protection;
+// what matters is that using allowPolicyEdit leaves an explicit, reportable
+// record of the decision.
+func isPolicyFile(rel string) bool {
+	return rel == "goharness.yaml"
+}
+
+// isGeneratedFile applies the Go convention: a `// Code generated ... DO NOT
+// EDIT.` line before the package clause.
+func isGeneratedFile(abs string) bool {
+	src, err := os.ReadFile(abs)
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(string(src), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "package ") {
+			return false
+		}
+		if strings.HasPrefix(trimmed, "// Code generated ") && strings.HasSuffix(trimmed, " DO NOT EDIT.") {
+			return true
+		}
+	}
+	return false
+}
+
 // runMigration reports migrations that the change rewrote rather than added.
 // Only modification and deletion are reported: appending a migration is the
-// intended way to evolve a schema.
+// intended way to evolve a schema. Like every diff-reading check it runs at
+// head only.
 func (t *target) runMigration(_ context.Context) (checkResult, error) {
+	if t.isBase {
+		return checkResult{}, nil
+	}
 	var out []evidence.Evidence
 	for _, entry := range t.engine.ChangedEntries {
 		if !isMigrationFile(entry.Path) || entry.Status == change.StatusAdded {
@@ -351,7 +418,130 @@ func (t *target) runTests(ctx context.Context) (checkResult, error) {
 }
 
 func (t *target) runRaceTests(ctx context.Context) (checkResult, error) {
-	return t.runTestsWith(ctx, []string{"-race"})
+	if !t.leakCheck || t.isBase {
+		return t.runTestsWith(ctx, []string{"-race"})
+	}
+	return t.runLeakRaceTests(ctx)
+}
+
+// runLeakRaceTests runs the race suite with goroutine-leak verification
+// injected through a build overlay. One run discharges tests-pass, race-clean,
+// and goroutine-leak-clean. Packages that already declare a TestMain cannot be
+// injected; they still run plainly, and the leak obligation is reported
+// unproducible for them rather than silently passed.
+func (t *target) runLeakRaceTests(ctx context.Context) (checkResult, error) {
+	patterns := t.graph.PatternsFor(t.testPackages)
+	if len(patterns) == 0 {
+		return checkResult{}, nil
+	}
+	injectable, injectablePkgs, blocked, err := t.classifyLeakPackages()
+	if err != nil {
+		return checkResult{}, err
+	}
+
+	var res checkResult
+	if len(blocked) > 0 {
+		res.unproducible = append(res.unproducible, admission.Unproducible{
+			Kind: admission.KindLeakClean,
+			Reason: "a TestMain already exists in " + strings.Join(blocked, ", ") +
+				", so goroutine-leak verification cannot be injected there",
+			Remedy: "call goleak.VerifyTestMain from those TestMain functions, or remove them",
+		})
+	}
+
+	var failures []tool.TestFailure
+	if len(injectable) > 0 {
+		scratch, mkErr := os.MkdirTemp("", "goharness-leak-")
+		if mkErr != nil {
+			return checkResult{}, fmt.Errorf("creating leak-check scratch directory: %w", mkErr)
+		}
+		defer func() {
+			if rmErr := os.RemoveAll(scratch); rmErr != nil && err == nil {
+				err = fmt.Errorf("removing leak-check scratch directory: %w", rmErr)
+			}
+		}()
+		overlay, ovErr := leakcheck.Overlay(scratch, t.root, t.modulePath, injectablePkgs)
+		if ovErr != nil {
+			return checkResult{}, ovErr
+		}
+		injected, runErr := tool.RunTests(ctx, t.engine.Runner, t.root, injectable,
+			[]string{"-race", "-overlay", overlay})
+		if runErr != nil {
+			return checkResult{}, runErr
+		}
+		failures = append(failures, injected...)
+	}
+	if rest := exceptPatterns(patterns, injectable); len(rest) > 0 {
+		plain, runErr := tool.RunTests(ctx, t.engine.Runner, t.root, rest, []string{"-race"})
+		if runErr != nil {
+			return checkResult{}, runErr
+		}
+		failures = append(failures, plain...)
+	}
+
+	testFailures := 0
+	for _, f := range failures {
+		if leakcheck.IsLeakFailure(f.Output) {
+			msg, ok := leakcheck.LeakMessage(f.Output)
+			if !ok {
+				msg = "tests leave goroutines running after completion"
+			}
+			res.evidence = append(res.evidence, t.newEvidence(policy.RuleGoroutineLeak,
+				"goleak "+leakcheck.Version, tool.GoVersion(),
+				evidence.SeverityError, "", 0, 0, f.Package, msg))
+			continue
+		}
+		testFailures++
+		res.evidence = append(res.evidence, t.testFailureEvidence(f))
+	}
+	if testFailures > 0 {
+		res.unproducible = append(res.unproducible, admission.Unproducible{
+			Kind:   admission.KindLeakClean,
+			Reason: "failing tests stop the suite before goroutine-leak verification can conclude",
+			Remedy: "fix the failing tests first",
+		})
+	}
+	return res, nil
+}
+
+// classifyLeakPackages splits the test scope into injectable package patterns,
+// their overlay descriptors, and packages blocked by an existing TestMain.
+func (t *target) classifyLeakPackages() (injectable []string, pkgs []leakcheck.Package, blocked []string, err error) {
+	for _, pkgPath := range t.testPackages {
+		dir, name, ok := t.graph.DirAndName(pkgPath)
+		if !ok {
+			continue
+		}
+		hasTests, listErr := leakcheck.HasTestFiles(dir)
+		if listErr != nil {
+			return nil, nil, nil, listErr
+		}
+		if !hasTests {
+			continue
+		}
+		hasMain, mainErr := leakcheck.HasTestMain(dir)
+		if mainErr != nil {
+			return nil, nil, nil, mainErr
+		}
+		if hasMain {
+			blocked = append(blocked, pkgPath)
+			continue
+		}
+		injectable = append(injectable, pkgPath)
+		pkgs = append(pkgs, leakcheck.Package{Dir: t.rel(dir), Name: name})
+	}
+	slices.Sort(blocked)
+	return injectable, pkgs, blocked, nil
+}
+
+func exceptPatterns(all, remove []string) []string {
+	out := make([]string, 0, len(all))
+	for _, p := range all {
+		if !slices.Contains(remove, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func (t *target) runTestsWith(ctx context.Context, extra []string) (checkResult, error) {
@@ -368,15 +558,19 @@ func (t *target) runTestsWith(ctx context.Context, extra []string) (checkResult,
 	}
 	out := make([]evidence.Evidence, 0, len(failures))
 	for _, f := range failures {
-		name := f.Test
-		if name == "" {
-			name = "package"
-		}
-		out = append(out, t.newEvidence(policy.RuleTestFailure, "go test", tool.GoVersion(),
-			evidence.SeverityError, "", 0, 0, f.Package,
-			"test "+name+" failed: "+firstMeaningfulLine(f.Output)))
+		out = append(out, t.testFailureEvidence(f))
 	}
 	return checkResult{evidence: out}, nil
+}
+
+func (t *target) testFailureEvidence(f tool.TestFailure) evidence.Evidence {
+	name := f.Test
+	if name == "" {
+		name = "package"
+	}
+	return t.newEvidence(policy.RuleTestFailure, "go test", tool.GoVersion(),
+		evidence.SeverityError, "", 0, 0, f.Package,
+		"test "+name+" failed: "+firstMeaningfulLine(f.Output))
 }
 
 func firstMeaningfulLine(output string) string {

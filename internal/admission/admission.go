@@ -83,6 +83,8 @@ const (
 	KindWorktreeReadOnly  EvidenceKind = "worktree-readonly"
 	KindScopeConformance  EvidenceKind = "scope-conformance"
 	KindRaceClean         EvidenceKind = "race-clean"
+	KindLeakClean         EvidenceKind = "goroutine-leak-clean"
+	KindPolicyGuard       EvidenceKind = "policy-guard"
 	KindGoroutineLifetime EvidenceKind = "goroutine-lifecycle"
 	KindBoundedResources  EvidenceKind = "bounded-resources"
 	KindNetworkScan       EvidenceKind = "network-scan"

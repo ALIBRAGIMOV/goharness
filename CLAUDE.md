@@ -26,7 +26,7 @@ The task is complete only when the verdict is `ADMITTED`. Resolve every `FAIL` a
 
 goharness enforces rules on other codebases, so its own code holds to every one of them:
 
-- Never write `//nolint`, `//lint:ignore`, or any inline suppression. If a linter finding is wrong, fix the code or record a scoped, expiring exception in `goharness.yaml` with an owner and a written reason. There are currently zero exceptions; keep it that way.
+- Never write `//nolint`, `//lint:ignore`, `//lint:file-ignore`, `#nosec`, `//revive:disable`, or any other inline suppression. If a linter finding is wrong, fix the code or record a scoped, expiring exception in `goharness.yaml` with an owner and a written reason. There are currently zero exceptions; keep it that way.
 - Never put the em dash character U+2014 in Go source. Use a plain hyphen. In test fixtures that need the character, write it inside a string literal as a backslash-u escape (backslash, the letter u, then 2014), never as the raw character.
 - Every goroutine's termination path must be visible at its launch site.
 - No package-level mutable state, no `init()` functions, no `panic` outside the last-resort handler in `main`.
@@ -53,6 +53,7 @@ Determinism check when you touched evidence, fingerprints, or reporting: run `ve
 
 - golangci-lint: exactly `2.12.2`, external executable, discovered via `GOHARNESS_GOLANGCI_LINT`, then `.tools/`, then the content-addressed cache, then PATH. Never import its packages (GPL).
 - `golang.org/x/vuln`: exactly `v1.7.0` in go.mod, used in-process. No govulncheck binary, no PATH probe.
+- `go.uber.org/goleak`: exactly `v1.3.0`, vendored verbatim under `internal/leakcheck/goleaksrc` and injected into race runs via a build overlay. Never add a TestMain to this repository's packages: it would block the injection and turn the leak obligation INCONCLUSIVE.
 - Uber Go Style Guide: commit `1d60a91aa5e87d443002e23c21903c49489dbde5`, never fetched at runtime.
 - Allowed dependencies: `golang.org/x/tools`, `golang.org/x/sync`, `golang.org/x/vuln`, `go.uber.org/zap`. Everything else is the standard library. Adding a dependency is an architecture decision, not a convenience.
 

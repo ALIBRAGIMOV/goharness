@@ -22,7 +22,8 @@ func (s *scanner) scanTests() {
 }
 
 func isTestFunc(fn *ast.FuncDecl) bool {
-	if fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+	// TestMain is the package harness, not a test: it observes nothing itself.
+	if fn.Recv != nil || fn.Name.Name == "TestMain" || !strings.HasPrefix(fn.Name.Name, "Test") {
 		return false
 	}
 	if fn.Name.Name != "Test" && !isUpperOrUnderscore(rune(fn.Name.Name[len("Test")])) {
