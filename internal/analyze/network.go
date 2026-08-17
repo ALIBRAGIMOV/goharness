@@ -3,6 +3,7 @@ package analyze
 import (
 	"go/ast"
 	"slices"
+	"strings"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
@@ -10,7 +11,18 @@ import (
 
 // scanNetwork reports calls that cross the network without a deadline, without
 // the caller's cancellation, or without a retry bound.
+//
+// Test files are out of scope. These rules protect a production request path:
+// a deadline that has to reach the transport, a caller whose cancellation must
+// be honoured, a retry that must not spin forever. A test calling
+// http.Get(server.URL) against a local httptest server has none of those
+// concerns, and the idiomatic form there has no context to propagate. Firing
+// there produced dozens of required findings on healthy repositories in the
+// corpus run and would have taught users to route around the gate.
 func (s *scanner) scanNetwork() {
+	if strings.HasSuffix(s.rel, "_test.go") {
+		return
+	}
 	ast.Inspect(s.file, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.CompositeLit:

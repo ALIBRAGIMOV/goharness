@@ -32,6 +32,7 @@ goharness enforces rules on other codebases, so its own code holds to every one 
 - No package-level mutable state, no `init()` functions, no `panic` outside the last-resort handler in `main`.
 - Comments state constraints the code cannot express. No comments that restate the code, no changelog-style comments, short doc comments on exported symbols.
 - Context is the first parameter of anything that blocks, spawns a process, or can be cancelled. Cleanup paths use `context.WithoutCancel` so cancellation never leaks a temp worktree.
+- A deprecation this repository introduces carries `//go:fix inline` when its replacement is a single call or value, so callers migrate with one command instead of by hand. The harness reports the omission as `GH-DEPRECATE-001`, and a gate that asks other people for this has to hold itself to it.
 - If one of the harness's own checks fires on your new code, fix the code. Never soften a check to make your own code pass. If a check is genuinely too imprecise to block, classify it advisory in the registry with an honest written rationale.
 
 ## Verification matrix (run before claiming anything works)
@@ -41,6 +42,7 @@ gofmt -l .                                                        # must print n
 go build ./...
 go vet ./...
 go mod tidy -diff                                                 # must be empty
+go fix -diff ./...                                                # must print nothing
 .tools/golangci-lint run --config internal/tool/golangci_strict.yaml ./...
 go test ./...
 go test -race ./...
@@ -51,7 +53,7 @@ Determinism check when you touched evidence, fingerprints, or reporting: run `ve
 
 ## Hard pins (never change casually)
 
-- golangci-lint: exactly `2.12.2`, external executable, discovered via `GOHARNESS_GOLANGCI_LINT`, then `.tools/`, then the content-addressed cache, then PATH. Never import its packages (GPL).
+- golangci-lint: exactly `2.12.2`, external executable, discovered via `GOHARNESS_GOLANGCI_LINT`, then `.tools/`, then the content-addressed cache, then PATH. Every candidate is verified against a pinned per-platform binary sha256; a locally built one (`go install`) reports the right version, hashes to something else, and is refused. Provision with `goharness setup`. Never import its packages (GPL).
 - `golang.org/x/vuln`: exactly `v1.7.0` in go.mod, used in-process. No govulncheck binary, no PATH probe.
 - `go.uber.org/goleak`: exactly `v1.3.0`, vendored verbatim under `internal/leakcheck/goleaksrc` and injected into race runs via a build overlay. Never add a TestMain to this repository's packages: it would block the injection and turn the leak obligation INCONCLUSIVE.
 - Uber Go Style Guide: commit `1d60a91aa5e87d443002e23c21903c49489dbde5`, never fetched at runtime.
@@ -81,7 +83,28 @@ Rules that keep it healthy:
 - Evidence fingerprints exclude line numbers and any volatile data. Nothing time-based or random may enter the deterministic report portion.
 - Checks return values; the coordinator owns all aggregation. No shared mutable state across check goroutines. Concurrency is errgroup plus a weighted semaphore bounded by GOMAXPROCS.
 - Interfaces exist only at the two test seams: process execution (`tool.Runner`) and git (`repo.Git`). Do not introduce speculative interfaces.
-- Verification commands are read-only: no network, no installs, no cache writes, no worktree writes. Only `setup` and `tools update` may download or mutate the cache, and every download is checksum-verified before trust.
+- Verification commands are read-only: no network, no installs, no worktree writes. The single exception is derived base evidence under `derived/` in the cache, keyed by content and disabled by `--no-cache`; tool payloads and the vulnerability database remain the exclusive business of `setup` and `tools update`, and every download is checksum-verified before trust.
+- Subprocesses run with a sanitised environment: no `GOFLAGS`, no `GOHARNESS_*`, `GOTOOLCHAIN=local`. Anything a real repository needs for module resolution (`GOPRIVATE`, `GOPROXY`, `GOMODCACHE`) is passed through untouched.
+
+## Adversarial and corpus suites
+
+Two suites exist because two properties only hold while someone keeps checking:
+
+- `internal/verify/bypass_test.go` holds one case per route by which a change
+  could once have been admitted without the evidence to justify it. **A bypass
+  found while using the harness becomes a case here before it is fixed.** Every
+  case asserts a verdict that is not ADMITTED, or asserts that a grant had no
+  effect, and every closure is paired with a false-positive guard so the fix
+  cannot be "reject more".
+- `internal/verify/corpus_test.go` runs the harness over published repositories
+  at pinned commits. It is gated behind `GOHARNESS_CORPUS=1` because it clones
+  and downloads; run it before promoting any rule from advisory to required, and
+  after touching a scanner. It asserts only what must always hold (no failure on
+  real code, no modification of the tree) and prints per-rule hit counts, which
+  is the evidence a rule is precise enough to block.
+
+New rules enter as advisory and experimental. They become required only on
+corpus evidence, never on the strength of a fixture written to make them fire.
 
 ## Testing conventions
 

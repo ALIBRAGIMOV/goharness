@@ -12,11 +12,19 @@ import (
 	"strings"
 )
 
-// Benchmark sampling is fixed rather than time-based so that base and head do
-// the same amount of work and the comparison measures the code, not the clock.
+// Benchmark sampling is bounded by time rather than by iteration count.
+//
+// A fixed count cannot serve both ends of the range: two hundred iterations of
+// a hundred-nanosecond operation is twenty microseconds of measurement, which
+// is noise wearing a number, while two hundred iterations of a one-second
+// operation is three minutes. Letting the go command choose the count for a
+// short, fixed slice of time gives every benchmark enough repetitions to say
+// something and none of them an unbounded bill. Both revisions get the same
+// budget, and the comparison reads medians and ranges, not totals.
 const (
-	BenchIterations = "200x"
-	BenchSamples    = "3"
+	BenchTime = "100ms"
+	// BenchSamples is how many measurements each side of a comparison gets.
+	BenchSamples = 3
 )
 
 // BenchSample is one measurement of one benchmark.
@@ -42,22 +50,18 @@ func (r BenchResult) MedianAllocs() float64 {
 	return median(r.Samples, func(s BenchSample) float64 { return s.AllocsPerOp })
 }
 
-// SpreadNs returns the relative spread of the time samples, which bounds how
-// much of an observed change can be attributed to noise.
-func (r BenchResult) SpreadNs() float64 {
-	if len(r.Samples) < 2 {
-		return 0
+// RangeNs returns the fastest and slowest time samples. Two runs of the same
+// code overlap here; code that genuinely got slower does not.
+func (r BenchResult) RangeNs() (fastest, slowest float64) {
+	if len(r.Samples) == 0 {
+		return 0, 0
 	}
-	lowest, highest := r.Samples[0].NsPerOp, r.Samples[0].NsPerOp
+	fastest, slowest = r.Samples[0].NsPerOp, r.Samples[0].NsPerOp
 	for _, s := range r.Samples {
-		lowest = min(lowest, s.NsPerOp)
-		highest = max(highest, s.NsPerOp)
+		fastest = min(fastest, s.NsPerOp)
+		slowest = max(slowest, s.NsPerOp)
 	}
-	mid := r.MedianNs()
-	if mid == 0 {
-		return 0
-	}
-	return (highest - lowest) / mid * 100
+	return fastest, slowest
 }
 
 func median(samples []BenchSample, pick func(BenchSample) float64) float64 {
@@ -72,15 +76,16 @@ func median(samples []BenchSample, pick func(BenchSample) float64) float64 {
 	return values[len(values)/2]
 }
 
-// RunBenchmarks executes every benchmark in the given packages and returns the
-// parsed samples keyed by benchmark name.
+// RunBenchmarks executes every benchmark in the given packages once and returns
+// the parsed samples keyed by benchmark name. Callers take repeated samples by
+// calling again, which is what lets a comparison interleave the two sides.
 func RunBenchmarks(ctx context.Context, runner Runner, dir string, patterns []string) (map[string]BenchResult, error) {
 	if len(patterns) == 0 {
 		return map[string]BenchResult{}, nil
 	}
 	args := []string{
 		"test", "-run", "^$", "-bench", ".", "-benchmem",
-		"-benchtime", BenchIterations, "-count", BenchSamples, "-json",
+		"-benchtime", BenchTime, "-count", "1", "-json",
 	}
 	args = append(args, patterns...)
 
@@ -177,14 +182,28 @@ func OverlayPath(dir string, replacements map[string]string) (string, error) {
 // RunTestsWithOverlay runs the test binary for the given packages against an
 // overlay, so a mutated source file is compiled without the worktree ever being
 // modified.
+//
+// Vet is off here for a reason beyond speed: a mutated expression can trip a vet
+// analyzer, and a non-zero exit from vet would be read as a test noticing the
+// mutant when no test ran at all.
 func RunTestsWithOverlay(ctx context.Context, runner Runner, dir, overlay string, patterns []string) (failed bool, err error) {
-	args := []string{"test", "-count=1", "-overlay", overlay}
+	args := []string{"test", "-count=1", "-vet=off", "-overlay", overlay}
 	args = append(args, patterns...)
 	res, runErr := runner.Run(ctx, Command{Dir: dir, Name: "go", Args: args})
 	if runErr != nil {
 		return false, runErr
 	}
 	return res.ExitCode != 0, nil
+}
+
+// MergeBenchResults appends one run's samples onto the results collected so far.
+func MergeBenchResults(into, from map[string]BenchResult) {
+	for name, result := range from {
+		existing := into[name]
+		existing.Name = name
+		existing.Samples = append(existing.Samples, result.Samples...)
+		into[name] = existing
+	}
 }
 
 // BenchmarkNames returns the benchmark names common to two runs, sorted.

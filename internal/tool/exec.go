@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -45,15 +47,52 @@ type Runner interface {
 // is killed, which is what keeps a Ctrl+C from leaving worker processes behind.
 type ExecRunner struct{}
 
+// Environment settings a verification subprocess is never allowed to inherit,
+// and the toolchain setting it always receives instead.
+const (
+	envGoFlags     = "GOFLAGS"
+	envGoToolchain = "GOTOOLCHAIN"
+	envHarness     = "GOHARNESS_"
+	// ForcedToolchain keeps the go command on the toolchain that is installed.
+	ForcedToolchain = envGoToolchain + "=local"
+)
+
+// VerificationEnv returns the environment a child process runs with, starting
+// from base or from this process's environment when base is empty.
+//
+// Three settings are taken out of the caller's hands because they change what a
+// check concludes without changing the code under it: GOFLAGS is spliced into
+// every go invocation, where one -run pattern turns an empty test run into a
+// passing one; GOTOOLCHAIN is pinned to local so verification downloads
+// nothing; and GOHARNESS_ settings are dropped so code under test cannot
+// redirect the cache its own verdict rests on. Everything else is inherited,
+// because module resolution in a real repository rides on GOPRIVATE, GOPROXY
+// and their neighbours.
+func VerificationEnv(base []string) []string {
+	if len(base) == 0 {
+		base = os.Environ()
+	}
+	out := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		if name, _, ok := strings.Cut(entry, "="); !ok || stripped(name) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return append(out, ForcedToolchain)
+}
+
+func stripped(name string) bool {
+	return name == envGoFlags || name == envGoToolchain || strings.HasPrefix(name, envHarness)
+}
+
 // Run executes cmd and returns its captured output. A non-zero exit status is
 // reported through Result.ExitCode, not as an error; an error means the process
 // could not be started, or the context ended it.
 func (ExecRunner) Run(ctx context.Context, cmd Command) (Result, error) {
 	proc := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
 	proc.Dir = cmd.Dir
-	if len(cmd.Env) > 0 {
-		proc.Env = cmd.Env
-	}
+	proc.Env = VerificationEnv(cmd.Env)
 	proc.WaitDelay = KillGrace
 	proc.Cancel = func() error { return interruptGroup(proc) }
 	configureProcessGroup(proc)

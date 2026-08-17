@@ -6,12 +6,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/ALIBRAGIMOV/goharness/internal/admission"
 	"github.com/ALIBRAGIMOV/goharness/internal/cli"
+	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
+	"github.com/ALIBRAGIMOV/goharness/internal/leakcheck"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
 	"github.com/ALIBRAGIMOV/goharness/internal/report"
+	"github.com/ALIBRAGIMOV/goharness/internal/tool"
+	"github.com/ALIBRAGIMOV/goharness/internal/toolcache"
+	"github.com/ALIBRAGIMOV/goharness/internal/verify"
 )
 
 func invoke(t *testing.T, args ...string) (code int, stdout, stderr string) {
@@ -26,7 +33,10 @@ func TestVersionPrintsEveryPin(t *testing.T) {
 	if code != cli.ExitAdmitted {
 		t.Fatalf("exit = %d, want %d", code, cli.ExitAdmitted)
 	}
-	for _, want := range []string{cli.Version, policy.UberGuideCommit, report.SchemaID, "2.12.2"} {
+	for _, want := range []string{
+		cli.Version, policy.UberGuideCommit, report.SchemaID, "2.12.2",
+		tool.XVulnVersion(), leakcheck.Version,
+	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("version output is missing %q:\n%s", want, out)
 		}
@@ -127,24 +137,30 @@ func TestDoctorReportsEnvironment(t *testing.T) {
 	}
 }
 
-func TestDoctorReportsAVersionMismatchAsAProblem(t *testing.T) {
-	root, ok := repoRoot()
-	if !ok {
-		t.Skip("could not locate the goharness module root")
+// TestDoctorReportsAnUntrustedLinterAsAProblem covers the machine where the
+// only golangci-lint in reach is not the pinned release. Doctor must call that
+// a problem and name the command that fixes it, because a run there cannot
+// produce lint evidence at all.
+func TestDoctorReportsAnUntrustedLinterAsAProblem(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/doctor\n\ngo 1.26\n"), 0o600); err != nil {
+		t.Fatalf("writing go.mod: %v", err)
 	}
 	script := filepath.Join(t.TempDir(), "old-golangci-lint")
 	body := "#!/bin/sh\necho 'golangci-lint has version 1.64.8 built with go1.22.0'\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatalf("writing fake linter: %v", err)
 	}
-	t.Setenv("GOHARNESS_GOLANGCI_LINT", script)
+	t.Setenv(toolcache.EnvCacheRoot, t.TempDir())
+	t.Setenv(tool.GolangciLintEnvVar, script)
 
-	code, out, _ := invoke(t, "doctor", "--dir", root)
+	code, out, _ := invoke(t, "doctor", "--dir", dir)
 	if code != cli.ExitInconclusive {
 		t.Fatalf("doctor exit = %d, want %d\n%s", code, cli.ExitInconclusive, out)
 	}
-	if !strings.Contains(out, "[FAIL]") || !strings.Contains(out, "2.12.2") {
-		t.Fatalf("doctor did not report the pin mismatch:\n%s", out)
+	if !strings.Contains(out, "[FAIL]") || !strings.Contains(out, tool.GolangciLintPin) {
+		t.Fatalf("doctor did not report the untrusted linter:\n%s", out)
 	}
 	if !strings.Contains(out, "fix: ") {
 		t.Fatalf("doctor did not offer a remediation command:\n%s", out)
@@ -568,17 +584,18 @@ func TestHelpUnknownTopicSuggests(t *testing.T) {
 // TestGlobalHelpIsSelfSufficientForAnAgent checks that an agent that has never
 // seen goharness can learn the protocol from one screen.
 func TestGlobalHelpIsSelfSufficientForAnAgent(t *testing.T) {
-	_, out, _ := invoke(t)
-	if out == "" {
-		_, _, out = invoke(t)
+	code, stdout, text := invoke(t)
+	if code != cli.ExitInconclusive {
+		t.Fatalf("bare goharness exit = %d, want %d", code, cli.ExitInconclusive)
 	}
-	_, _, usage := invoke(t)
-	text := out + usage
+	if stdout != "" {
+		t.Fatalf("usage went to stdout, where --agent puts the report:\n%s", stdout)
+	}
 	for _, want := range []string{
 		"Agent protocol",
 		"goharness verify --agent",
 		"goharness.report/v2",
-		"sufficient_for_completion",
+		"sufficientForCompletion",
 		"FAIL",
 		"INCONCLUSIVE",
 		"goharness explain RULE-ID",
@@ -591,7 +608,164 @@ func TestGlobalHelpIsSelfSufficientForAnAgent(t *testing.T) {
 			t.Fatalf("global help is missing %q:\n%s", want, text)
 		}
 	}
-	if lines := strings.Count(text, "\n"); lines > 140 {
-		t.Fatalf("global help is %d lines; keep it to a screenful", lines)
+	// The budget is one and a half terminal screens rather than one. The block
+	// that grew past a screenful is the agent protocol's field map, and an
+	// agent that reads it needs no second command to parse the report.
+	if lines := strings.Count(text, "\n"); lines > 80 {
+		t.Fatalf("global help is %d lines; keep it near a screenful", lines)
 	}
+}
+
+// jsonKeys marshals a value and returns the field names it actually emits.
+func jsonKeys(t *testing.T, value any) map[string]bool {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshalling %T: %v", value, err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("decoding %T: %v", value, err)
+	}
+	keys := make(map[string]bool, len(decoded))
+	for key := range decoded {
+		keys[key] = true
+	}
+	return keys
+}
+
+// TestAgentProtocolNamesFieldsTheReportHas keeps the help honest about the
+// document it tells an agent to parse.
+//
+// The protocol block is the only instruction some agents will ever read, and a
+// field name that drifted from the report sends them looking for a key that is
+// not there. This test caught exactly that: the help said
+// sufficient_for_completion while the report has emitted sufficientForCompletion
+// since the schema was written.
+func TestAgentProtocolNamesFieldsTheReportHas(t *testing.T) {
+	_, _, help := invoke(t)
+	document := jsonKeys(t, report.Build(cli.Version, verify.Result{}))
+	claim := jsonKeys(t, admission.QualityClaim{})
+	finding := jsonKeys(t, report.Finding{
+		Evidence: evidence.Evidence{Fix: &evidence.Remediation{Command: "gofmt -w a.go"}},
+	})
+	remediation := jsonKeys(t, evidence.Remediation{})
+	unproducible := jsonKeys(t, report.Unproducible{Remedy: "run goharness setup"})
+
+	for _, c := range []struct {
+		named string
+		keys  map[string]bool
+		key   string
+	}{
+		{"sufficientForCompletion", document, "sufficientForCompletion"},
+		{"claims[].state", claim, "state"},
+		{"claims[].missingEvidence", claim, "missingEvidence"},
+		{"unproducible[]", document, "unproducible"},
+		{".remedy", unproducible, "remedy"},
+		{"evidence[].blocking", finding, "blocking"},
+		{"evidence[].fix.command", finding, "fix"},
+		{"evidence[].fix.command", remediation, "command"},
+		{"failures[]", document, "failures"},
+		{".hint", jsonKeys(t, verify.CheckFailure{Hint: "run goharness setup"}), "hint"},
+	} {
+		if !strings.Contains(help, c.named) {
+			t.Errorf("the agent protocol no longer names %s", c.named)
+		}
+		if !c.keys[c.key] {
+			t.Errorf("the help names %s, but no %q field is emitted there", c.named, c.key)
+		}
+	}
+}
+
+// TestDocumentedFlagsAreAccepted feeds every flag a usage line advertises back
+// to the command that printed it.
+//
+// Help that names a flag its own command rejects turns the documentation into
+// an error message, which is worse than saying nothing: a reader who trusts it
+// loses the run. The commands run against a directory that is not a module, so
+// each one stops immediately after parsing.
+func TestDocumentedFlagsAreAccepted(t *testing.T) {
+	dir := t.TempDir()
+	for _, command := range []string{"verify", "audit", "fast", "deep", "doctor"} {
+		t.Run(command, func(t *testing.T) {
+			_, help, _ := invoke(t, "help", command)
+			args := append([]string{command}, documentedFlags(t, help, dir)...)
+			_, _, errOut := invoke(t, args...)
+			if strings.Contains(errOut, "not defined") {
+				t.Fatalf("goharness %s rejects a flag its own help documents:\n%s",
+					strings.Join(args, " "), errOut)
+			}
+		})
+	}
+}
+
+// documentedFlags reads the flags out of a usage line, with a usable value for
+// the ones that take an argument.
+func documentedFlags(t *testing.T, help, dir string) []string {
+	t.Helper()
+	usage, _, _ := strings.Cut(help, "\n\n")
+	pattern := regexp.MustCompile(`\[(-{1,2}[a-z|-]+)(?: ([A-Z][A-Z-]*))?\]`)
+	var args []string
+	for _, match := range pattern.FindAllStringSubmatch(usage, -1) {
+		for flag := range strings.SplitSeq(match[1], "|") {
+			args = append(args, flag)
+			if match[2] != "" {
+				args = append(args, flagValue(t, match[2], dir))
+			}
+		}
+	}
+	return args
+}
+
+// flagValue supplies an argument for one usage placeholder. An unknown
+// placeholder fails rather than being skipped: a flag nobody exercises is how
+// the drift this test exists to catch gets back in.
+func flagValue(t *testing.T, placeholder, dir string) string {
+	t.Helper()
+	switch placeholder {
+	case "DIR":
+		return dir
+	case "REV":
+		return "HEAD"
+	case "FILE":
+		return filepath.Join(dir, "task.yaml")
+	case "D", "DURATION":
+		return "1s"
+	default:
+		t.Fatalf("no test value for the usage placeholder %q", placeholder)
+		return ""
+	}
+}
+
+// TestContractHelpSampleParses keeps the documented file format loadable. An
+// agent copies the sample it is shown, and a sample the parser rejects teaches
+// a syntax the harness does not accept.
+func TestContractHelpSampleParses(t *testing.T) {
+	_, help, _ := invoke(t, "help", "contract")
+	sample := indentedSample(t, help, "  goal:")
+	contract, err := admission.ParseContract([]byte(sample), admission.ContractFromFile)
+	if err != nil {
+		t.Fatalf("the contract sample in help does not parse: %v\n%s", err, sample)
+	}
+	if contract.Goal == "" || !contract.HasScope() || len(contract.Budgets) == 0 {
+		t.Fatalf("the sample parsed into an empty contract: %+v", contract)
+	}
+}
+
+// indentedSample lifts the indented block that starts at the first line with
+// the given prefix out of a help topic, dedented by two spaces.
+func indentedSample(t *testing.T, help, start string) string {
+	t.Helper()
+	_, rest, found := strings.Cut(help, start)
+	if !found {
+		t.Fatalf("no sample starting with %q in:\n%s", start, help)
+	}
+	var lines []string
+	for line := range strings.SplitSeq(strings.TrimPrefix(start, "  ")+rest, "\n") {
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+		lines = append(lines, strings.TrimPrefix(line, "  "))
+	}
+	return strings.Join(lines, "\n") + "\n"
 }

@@ -74,7 +74,12 @@ linters:
         - G304
         - G204
   exclusions:
-    generated: lax
+    # The linter reports generated files like any other; goharness decides which
+    # of them are exempt. A `Code generated` header is a claim anyone can write,
+    # so exempting a file the change itself introduced would hand every agent a
+    # file-wide suppression. Generated code the change does not touch is dropped
+    # from scope by the harness before the evidence is built.
+    generated: disable
     rules:
       - path: _test\.go
         linters:

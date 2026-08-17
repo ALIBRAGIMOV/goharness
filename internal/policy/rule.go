@@ -46,6 +46,7 @@ const (
 // Pack names composing the default strict policy.
 const (
 	PackGoCore            = "go/core"
+	PackGoFix             = "go/fix"
 	PackGolangciStrict    = "golangci/strict"
 	PackUberGuide         = "uber/guide"
 	PackAgentHygiene      = "agent/hygiene"
@@ -80,6 +81,7 @@ func (r Rule) EvidenceClassification() evidence.Classification {
 func Registry() []Rule {
 	rules := make([]Rule, 0, 128)
 	rules = append(rules, goCoreRules()...)
+	rules = append(rules, gofixRules()...)
 	rules = append(rules, agentHygieneRules()...)
 	rules = append(rules, testEffectivenessRules()...)
 	rules = append(rules, golangciRules()...)
@@ -112,6 +114,7 @@ func MandatoryRuleIDs() []string {
 		RuleSuppressNosec,
 		RuleSuppressRevive,
 		RulePolicyEdit,
+		RulePolicyGrant,
 		RuleCommentEmDash,
 		RuleCompile,
 	}
@@ -126,6 +129,7 @@ func UngrandfatherableRuleIDs() []string {
 		RuleSuppressNosec,
 		RuleSuppressRevive,
 		RulePolicyEdit,
+		RulePolicyGrant,
 		RuleCommentEmDash,
 	}
 }

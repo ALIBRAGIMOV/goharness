@@ -2,6 +2,9 @@ package tool
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -193,13 +196,17 @@ func TestDiscoveryFallsThroughACorruptCacheEntry(t *testing.T) {
 	}
 }
 
-func TestDiscoveryPrefersTheVerifiedCacheEntry(t *testing.T) {
+// TestDiscoveryRejectsABinaryThatIsNotThePinnedRelease is the closure for the
+// oldest hole in tool discovery: a cache entry, a repository-local file, or a
+// PATH hit that is internally consistent and still not the release the harness
+// pins. Only the sha256 of the bytes decides.
+func TestDiscoveryRejectsABinaryThatIsNotThePinnedRelease(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv(GolangciLintEnvVar, "")
 	t.Setenv(toolcache.EnvCacheRoot, root)
 
 	cache := toolcache.OpenAt(root)
-	blob, err := cache.WriteBlob([]byte("cached linter"), 0o700)
+	blob, err := cache.WriteBlob([]byte("a linter that is not the pinned release"), 0o700)
 	if err != nil {
 		t.Fatalf("seeding the blob: %v", err)
 	}
@@ -209,14 +216,80 @@ func TestDiscoveryPrefersTheVerifiedCacheEntry(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seeding the manifest: %v", err)
 	}
+
 	discovered, err := DiscoverGolangci(t.TempDir())
+	if discovered.Source == "goharness cache" {
+		t.Fatal("a binary that is not the pinned release was selected for execution")
+	}
+	note := discovered.Note
+	if err != nil {
+		note = err.Error()
+	}
+	if !strings.Contains(note, "is not the pinned release") {
+		t.Fatalf("the rejection reason is not surfaced: %q", note)
+	}
+}
+
+// TestDiscoveryAcceptsThePinnedRelease is the false-positive guard: the real
+// provisioned binary must still be usable, or the harness would reject every
+// linter in existence.
+func TestDiscoveryAcceptsThePinnedRelease(t *testing.T) {
+	repoRoot, ok := repositoryWithTools()
+	if !ok {
+		t.Skip("pinned golangci-lint not found at .tools/golangci-lint; run `goharness setup`")
+	}
+	t.Setenv(GolangciLintEnvVar, "")
+	t.Setenv(toolcache.EnvCacheRoot, t.TempDir())
+
+	discovered, err := DiscoverGolangci(repoRoot)
 	if err != nil {
 		t.Fatalf("DiscoverGolangci: %v", err)
 	}
-	if discovered.Source != "goharness cache" {
-		t.Fatalf("source = %q, want the cache", discovered.Source)
+	if discovered.Source != GolangciLintLocalPath {
+		t.Fatalf("source = %q, want %s", discovered.Source, GolangciLintLocalPath)
 	}
-	if discovered.Note != "" {
-		t.Fatalf("a healthy cache entry produced a note: %q", discovered.Note)
+	pinned, _ := toolcache.GolangciBinarySum(toolcache.CurrentPlatform())
+	if discovered.SHA256 != pinned {
+		t.Fatalf("accepted sha256 %q, pinned %q", discovered.SHA256, pinned)
+	}
+}
+
+// repositoryWithTools walks up to the checkout that carries a provisioned
+// linter, which is where the acceptance case gets a real release to hash.
+func repositoryWithTools() (string, bool) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	for {
+		if info, statErr := os.Stat(filepath.Join(dir, GolangciLintLocalPath)); statErr == nil && !info.IsDir() {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+func TestVerificationEnvStripsWhatCouldChangeAVerdict(t *testing.T) {
+	base := []string{
+		"GOFLAGS=-run=NoTestHasThisName",
+		"GOTOOLCHAIN=go1.99.0",
+		"GOHARNESS_CACHE=/tmp/poison",
+		"GOPRIVATE=example.com/private",
+		"PATH=/usr/bin",
+	}
+	env := VerificationEnv(base)
+	for _, unwanted := range []string{"GOFLAGS=", "GOHARNESS_CACHE=", "GOTOOLCHAIN=go1.99.0"} {
+		if slices.ContainsFunc(env, func(entry string) bool { return strings.HasPrefix(entry, unwanted) }) {
+			t.Fatalf("%s survived sanitisation: %v", unwanted, env)
+		}
+	}
+	for _, required := range []string{"GOPRIVATE=example.com/private", "PATH=/usr/bin", ForcedToolchain} {
+		if !slices.Contains(env, required) {
+			t.Fatalf("%s was not passed through: %v", required, env)
+		}
 	}
 }

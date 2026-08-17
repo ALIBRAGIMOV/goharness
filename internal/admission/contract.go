@@ -21,7 +21,17 @@ type ContractSource string
 const (
 	ContractFromFlag    ContractSource = "--contract flag"
 	ContractFromFile    ContractSource = ContractSource(ContractFileName)
+	ContractFromBase    ContractSource = "base revision"
 	ContractFromDefault ContractSource = "implicit default"
+)
+
+// Grant names the permissive contract fields. They are the only fields that can
+// make the gate weaker, which is why they are honoured from an authenticated
+// contract alone.
+const (
+	GrantAPIBreak   = "allowApiBreak"
+	GrantPolicyEdit = "allowPolicyEdit"
+	GrantBudgets    = "budgets"
 )
 
 // Budget bounds an acceptable performance regression for one benchmark.
@@ -46,6 +56,12 @@ type TaskContract struct {
 	Budgets         map[string]Budget
 	AllowAPIBreak   bool
 	AllowPolicyEdit bool
+	// Authenticated records that the grants in force were read from the base
+	// revision, where the change under verification could not have written them.
+	Authenticated bool
+	// IgnoredGrants names the grants the working-tree contract asked for and did
+	// not get, so the report can say why a permission had no effect.
+	IgnoredGrants []string
 }
 
 // HasScope reports whether the contract constrains where the change may land.
@@ -94,7 +110,7 @@ func LoadContract(explicitPath, repoRoot string) (TaskContract, error) {
 		if err != nil {
 			return TaskContract{}, fmt.Errorf("reading contract %s: %w", explicitPath, err)
 		}
-		return parseContract(data, ContractFromFlag)
+		return ParseContract(data, ContractFromFlag)
 	}
 	data, err := os.ReadFile(filepath.Join(repoRoot, ContractFileName))
 	if err != nil {
@@ -106,14 +122,77 @@ func LoadContract(explicitPath, repoRoot string) (TaskContract, error) {
 		}
 		return TaskContract{}, fmt.Errorf("reading %s: %w", ContractFileName, err)
 	}
-	return parseContract(data, ContractFromFile)
+	return ParseContract(data, ContractFromFile)
 }
 
-// parseContract decodes the restricted contract subset: scalar keys, string
+// Merge combines the contract committed at the base revision with the one the
+// working tree carries.
+//
+// Grants come from the base alone. A change cannot widen the permissions it is
+// judged under, because the base revision predates it; a working-tree contract
+// that asks for a grant it was not given records the refusal in IgnoredGrants
+// instead of taking effect. Declarations that can only make the gate stricter
+// (the goal, a scope where the base declares none, additional risk domains) are
+// taken from either side, because granting them costs nothing.
+func Merge(base, head TaskContract) TaskContract {
+	out := head
+	if head.Source == ContractFromDefault {
+		out = base
+	}
+	out.Authenticated = base.Source == ContractFromBase
+	out.AllowAPIBreak = base.AllowAPIBreak
+	out.AllowPolicyEdit = base.AllowPolicyEdit
+	out.Budgets = base.Budgets
+	if base.HasScope() {
+		out.DeclaredScope = base.DeclaredScope
+	}
+	out.DeclaredRisks = mergedRisks(base, head)
+	out.IgnoredGrants = ignoredGrants(base, head)
+	return out
+}
+
+func mergedRisks(base, head TaskContract) []RiskDomain {
+	out := slices.Clone(base.DeclaredRisks)
+	for _, domain := range head.DeclaredRisks {
+		if !slices.Contains(out, domain) {
+			out = append(out, domain)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// ignoredGrants lists the grants the working-tree contract asks for beyond the
+// ones the base revision already carries. Budgets count as one grant however
+// many benchmarks differ: the report names the field, not every entry.
+func ignoredGrants(base, head TaskContract) []string {
+	var out []string
+	if head.AllowAPIBreak && !base.AllowAPIBreak {
+		out = append(out, GrantAPIBreak)
+	}
+	if head.AllowPolicyEdit && !base.AllowPolicyEdit {
+		out = append(out, GrantPolicyEdit)
+	}
+	if budgetsDiffer(base.Budgets, head.Budgets) {
+		out = append(out, GrantBudgets)
+	}
+	return out
+}
+
+func budgetsDiffer(base, head map[string]Budget) bool {
+	for name, budget := range head {
+		if existing, ok := base[name]; !ok || existing != budget {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseContract decodes the restricted contract subset: scalar keys, string
 // lists, and a nested budgets mapping. Anything outside that shape is an error
 // rather than a silently ignored key, because a misread contract would relax
 // the gate without saying so.
-func parseContract(src []byte, source ContractSource) (TaskContract, error) {
+func ParseContract(src []byte, source ContractSource) (TaskContract, error) {
 	c := TaskContract{Source: source, Budgets: map[string]Budget{}}
 	section := ""
 	benchmark := ""

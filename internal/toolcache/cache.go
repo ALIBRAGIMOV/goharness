@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -79,13 +80,20 @@ func Sum(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// SumFile returns the hex sha256 of a file's contents.
-func SumFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
+// SumFile returns the hex sha256 of a file's contents. It streams, because the
+// files it is asked about are executables of tens of megabytes.
+func SumFile(path string) (_ string, err error) {
+	file, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("hashing %s: %w", path, err)
 	}
-	return Sum(data), nil
+	defer func() { err = errors.Join(err, file.Close()) }()
+
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return "", fmt.Errorf("hashing %s: %w", path, err)
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 // BlobPath returns the location of a blob and whether it is present.

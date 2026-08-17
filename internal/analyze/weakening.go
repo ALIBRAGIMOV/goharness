@@ -146,16 +146,26 @@ func isComparisonOp(op string) bool {
 // WeakeningFindings compares test strength between two snapshots. Removing the
 // ability of a test to fail, while what it observed is still there, is the
 // cheapest way to make a suite lie, so the hard signals are required.
+//
+// A test that vanishes is reported only where its package lost observable
+// failures overall. Renaming or rewriting a test moves its assertions rather
+// than removing them, and a gate that called that weakening would turn every
+// honest test refactor into a rejection; what matters is whether the suite came
+// out of the change able to fail as often as it went in.
 func WeakeningFindings(base, head map[string]TestShape, packageSurvives func(dir string) bool) []Finding {
+	baseStrength, headStrength := packageAssertions(base), packageAssertions(head)
 	var out []Finding
 	for _, key := range slices.Sorted(maps.Keys(base)) {
 		baseShape := base[key]
 		headShape, present := head[key]
 		if !present {
-			if packageSurvives != nil && packageSurvives(baseShape.Package) {
+			lost := headStrength[baseShape.Package] < baseStrength[baseShape.Package]
+			if lost && packageSurvives != nil && packageSurvives(baseShape.Package) {
 				out = append(out, Finding{
 					RuleID: policy.RuleTestDeleted, File: baseShape.File, Line: baseShape.Line,
-					Message:  "test " + baseShape.Name + " was deleted while its package survives, reducing the evidence the suite can produce",
+					Message: fmt.Sprintf(
+						"test %s was deleted and its package fell from %d observable failure(s) to %d",
+						baseShape.Name, baseStrength[baseShape.Package], headStrength[baseShape.Package]),
 					Severity: evidence.SeverityError,
 				})
 			}
@@ -164,6 +174,15 @@ func WeakeningFindings(base, head map[string]TestShape, packageSurvives func(dir
 		out = append(out, compareShapes(baseShape, headShape)...)
 	}
 	sortFindings(out)
+	return out
+}
+
+// packageAssertions totals how many times each package's tests can fail.
+func packageAssertions(shapes map[string]TestShape) map[string]int {
+	out := map[string]int{}
+	for _, shape := range shapes {
+		out[shape.Package] += shape.Assertions
+	}
 	return out
 }
 

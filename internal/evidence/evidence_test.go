@@ -87,3 +87,61 @@ func TestAssignFingerprintsNumbersDuplicates(t *testing.T) {
 		t.Fatal("identical findings in the same file collapsed to one fingerprint")
 	}
 }
+
+// TestPartialImprovementKeepsItsIdentity is the guard against a gate that
+// punishes progress: a function still over a budget, but less over it than
+// before, is the same finding and must stay pre-existing debt.
+func TestPartialImprovementKeepsItsIdentity(t *testing.T) {
+	t.Parallel()
+	base := evidence.Finalize([]evidence.Evidence{{
+		RuleID: "GH-CX-001", File: "lib/lib.go",
+		Message: "Handle has cyclomatic complexity 30, over the budget of 25",
+	}})
+	head := evidence.Finalize([]evidence.Evidence{{
+		RuleID: "GH-CX-001", File: "lib/lib.go",
+		Message: "Handle has cyclomatic complexity 27, over the budget of 25",
+	}})
+
+	cmp := evidence.Compare(base, head)
+	if len(cmp.New) != 0 {
+		t.Fatalf("an improvement was reported as a new finding: %+v", cmp.New)
+	}
+	if len(cmp.Preexisting) != 1 {
+		t.Fatalf("preexisting = %d, want 1: %+v", len(cmp.Preexisting), cmp)
+	}
+}
+
+// TestDifferentSubjectsKeepDifferentIdentities is the other half: masking
+// measurements must not merge findings that are about different code.
+func TestDifferentSubjectsKeepDifferentIdentities(t *testing.T) {
+	t.Parallel()
+	items := evidence.Finalize([]evidence.Evidence{
+		{RuleID: "GH-CX-001", File: "lib/lib.go", Message: "Handle has cyclomatic complexity 30"},
+		{RuleID: "GH-CX-001", File: "lib/lib.go", Message: "Serve has cyclomatic complexity 30"},
+	})
+	if items[0].Fingerprint == items[1].Fingerprint {
+		t.Fatalf("two findings about different functions share a fingerprint: %+v", items)
+	}
+}
+
+// TestIdentityIgnoresWhitespaceAndMeasurements pins what a finding's identity
+// does and does not include, through the exported entry point that computes it.
+func TestIdentityIgnoresWhitespaceAndMeasurements(t *testing.T) {
+	t.Parallel()
+	same := []string{
+		"Handle has complexity 30, over the budget of 25",
+		"Handle   has\tcomplexity 27,\nover the budget of 25",
+		"  Handle has complexity 4, over the budget of 25  ",
+	}
+	first := evidence.Fingerprint("GH-CX-001", "lib/lib.go", "lib", same[0], 0)
+	for _, message := range same[1:] {
+		if got := evidence.Fingerprint("GH-CX-001", "lib/lib.go", "lib", message, 0); got != first {
+			t.Fatalf("Fingerprint(%q) = %s, want %s", message, got, first)
+		}
+	}
+	other := evidence.Fingerprint("GH-CX-001", "lib/lib.go", "lib",
+		"Serve has complexity 30, over the budget of 25", 0)
+	if other == first {
+		t.Fatal("findings about different functions share an identity")
+	}
+}

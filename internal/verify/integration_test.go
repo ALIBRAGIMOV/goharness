@@ -278,6 +278,7 @@ func TestToolCrashIsInconclusiveAndNeverEvidence(t *testing.T) {
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatalf("writing fake linter: %v", err)
 	}
+	isolateLinterSources(t)
 	t.Setenv("GOHARNESS_GOLANGCI_LINT", script)
 	f.write("lib/lib.go", renamedAnswerLibrary)
 
@@ -321,6 +322,7 @@ func TestVersionMismatchIsInconclusive(t *testing.T) {
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatalf("writing fake linter: %v", err)
 	}
+	isolateLinterSources(t)
 	t.Setenv("GOHARNESS_GOLANGCI_LINT", script)
 	f.write("lib/lib.go", renamedAnswerLibrary)
 
@@ -665,7 +667,7 @@ func TestMutationEvidencePassesWhenTestsKillMutants(t *testing.T) {
 	}
 }
 
-func TestPublicAPIBreakIsRejectedUnlessTheContractAllowsIt(t *testing.T) {
+func TestPublicAPIBreakIsRejectedWithoutAContract(t *testing.T) {
 	useGolangci(t)
 	f := newFixture(t)
 	f.write("api/api.go", publicAPIBase)
@@ -674,20 +676,33 @@ func TestPublicAPIBreakIsRejectedUnlessTheContractAllowsIt(t *testing.T) {
 	f.write("api/api.go", publicAPIBreak)
 	f.commit("remove an exported function")
 
-	rejected := run(t, f, verify.ModeVerify)
-	requireVerdict(t, rejected, admission.VerdictRejected)
-	if !slices.Contains(blockingRules(rejected.Evidence), policy.RuleAPIBreak) {
-		t.Fatalf("blocking rules = %v, want %s", blockingRules(rejected.Evidence), policy.RuleAPIBreak)
+	result := run(t, f, verify.ModeVerify)
+	requireVerdict(t, result, admission.VerdictRejected)
+	if !slices.Contains(blockingRules(result.Evidence), policy.RuleAPIBreak) {
+		t.Fatalf("blocking rules = %v, want %s", blockingRules(result.Evidence), policy.RuleAPIBreak)
 	}
+}
 
+// TestPublicAPIBreakIsAllowedWhenTheBaseContractRecordsIt is the other half:
+// the decision to break an interface is a human one, so it counts when it was
+// committed before the change that breaks it, and only then.
+func TestPublicAPIBreakIsAllowedWhenTheBaseContractRecordsIt(t *testing.T) {
+	useGolangci(t)
+	f := newFixture(t)
+	f.write("api/api.go", publicAPIBase)
+	f.write("api/api_test.go", publicAPITest)
 	f.write("goharness.task.yaml", "goal: deliberately drop Farewell\nallowApiBreak: true\n")
-	allowed := run(t, f, verify.ModeVerify)
-	if allowed.Decision.Verdict == admission.VerdictRejected {
+	f.commit("public api baseline with the decision recorded")
+	f.write("api/api.go", publicAPIBreak)
+	f.commit("remove an exported function")
+
+	result := run(t, f, verify.ModeVerify)
+	if result.Decision.Verdict == admission.VerdictRejected {
 		t.Fatalf("verdict = %s with allowApiBreak set; blocking: %v",
-			allowed.Decision.Verdict, blockingRules(allowed.Evidence))
+			result.Decision.Verdict, blockingRules(result.Evidence))
 	}
-	if !allowed.Contract.AllowAPIBreak {
-		t.Fatal("the contract's allowApiBreak was not read")
+	if !result.Contract.AllowAPIBreak || !result.Contract.Authenticated {
+		t.Fatalf("the committed grant was not honoured: %+v", result.Contract)
 	}
 }
 

@@ -17,6 +17,10 @@ func DimensionOf(ruleID string) (Dimension, bool) {
 	if dim, ok := nativeDimensions()[ruleID]; ok {
 		return dim, true
 	}
+	if analyzer, ok := strings.CutPrefix(ruleID, policy.GoFixRulePrefix); ok {
+		dim, found := gofixDimensions()[analyzer]
+		return dim, found
+	}
 	if linter, ok := strings.CutPrefix(ruleID, "GCL-"); ok {
 		dim, found := linterDimensions()[linter]
 		return dim, found
@@ -41,6 +45,7 @@ func nativeDimensions() map[string]Dimension {
 		policy.RuleSuppressNosec:       DimPolicyIntegrity,
 		policy.RuleSuppressRevive:      DimPolicyIntegrity,
 		policy.RulePolicyEdit:          DimPolicyIntegrity,
+		policy.RulePolicyGrant:         DimPolicyIntegrity,
 		policy.RuleGeneratedEdit:       DimPolicyIntegrity,
 		policy.RuleGoroutineLeak:       DimConcurrencySafety,
 		policy.RuleCommentEmDash:       DimPolicyIntegrity,
@@ -64,6 +69,9 @@ func nativeDimensions() map[string]Dimension {
 		policy.RuleForbiddenImport:     DimArchitecture,
 		policy.RuleAPIBreak:            DimArchitecture,
 		policy.RuleComplexity:          DimSimplicity,
+		policy.RuleForwardingLayer:     DimSimplicity,
+		policy.RuleSoleImplementation:  DimSimplicity,
+		policy.RuleDeprecatedNoInline:  DimMaintainability,
 		policy.RuleNesting:             DimSimplicity,
 		policy.RuleFunctionLength:      DimSimplicity,
 		policy.RuleComplexityDelta:     DimMaintainability,
@@ -79,6 +87,24 @@ func nativeDimensions() map[string]Dimension {
 		policy.RuleBenchAllocDelta:     DimPerformance,
 		policy.RuleScopeViolation:      DimRequirements,
 	}
+}
+
+// gofixDimensions places each go fix analyzer on the dimension its findings
+// speak to. The three groups match the three obligations the fix check
+// discharges, so a check that fails leaves every dimension it could have
+// spoken to INCONCLUSIVE rather than one of them silently passing.
+func gofixDimensions() map[string]Dimension {
+	dims := map[string]Dimension{
+		"inline":    DimMaintainability,
+		"plusbuild": DimMaintainability,
+		"hostport":  DimReliability,
+	}
+	for _, analyzer := range policy.GoFixAnalyzers() {
+		if _, placed := dims[analyzer]; !placed {
+			dims[analyzer] = DimSimplicity
+		}
+	}
+	return dims
 }
 
 func linterDimensions() map[string]Dimension {

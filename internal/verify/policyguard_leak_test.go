@@ -72,17 +72,25 @@ func TestPolicyFileEditIsRejected(t *testing.T) {
 	}
 }
 
-func TestPolicyFileEditIsAllowedWhenTheContractDeclaresIt(t *testing.T) {
+// TestPolicyFileEditIsAllowedWhenTheBaseContractDeclaresIt pins the only route
+// to a policy edit: the grant must already be committed at the base revision,
+// where the change under verification could not have written it.
+func TestPolicyFileEditIsAllowedWhenTheBaseContractDeclaresIt(t *testing.T) {
 	useGolangci(t)
 	f := newFixture(t)
 	f.write("lib/lib.go", cleanLibrary)
 	f.write("lib/lib_test.go", cleanLibraryTest)
-	f.commit("clean baseline")
-	f.write("goharness.yaml", "# scoped exceptions live here\n")
 	f.write("goharness.task.yaml", "goal: reviewed policy update\nallowPolicyEdit: true\n")
+	f.commit("baseline carrying a reviewed contract")
+	f.write("lib/lib.go", renamedAnswerLibrary)
+	f.commit("the change the contract authorises")
+	f.write("goharness.yaml", "# scoped exceptions live here\n")
 
 	result := run(t, f, verify.ModeVerify)
 	requireVerdict(t, result, admission.VerdictAdmitted)
+	if !result.Contract.Authenticated {
+		t.Fatalf("contract from %s was not authenticated", result.Contract.Source)
+	}
 	if slices.Contains(ruleIDs(result.Evidence), policy.RulePolicyEdit) {
 		t.Fatalf("allowPolicyEdit was ignored: %v", ruleIDs(result.Evidence))
 	}

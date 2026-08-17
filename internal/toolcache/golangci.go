@@ -61,6 +61,28 @@ func golangciArchiveSums() map[string]string {
 	}
 }
 
+// golangciBinarySums are the sha256 sums of the executable inside each pinned
+// release archive. They are the trust anchor for use rather than for download:
+// whatever discovery turns up, the file that is about to lint the code must
+// hash to the sum recorded here, because a binary that merely prints the right
+// version number proves nothing about what it will report.
+func golangciBinarySums() map[string]string {
+	return map[string]string{
+		"darwin-arm64":  "691b9100ce968ff0009b6b7757ef6a585e31ae9ab11dfe0340ebb6e8e21fdc3d",
+		"darwin-amd64":  "aed31dd446edae61f420d663369578ab9ddacea4594cafa5bc22b9f59c786cf0",
+		"linux-amd64":   "e26335d9bd381a60e5769a13b0ccc7967db5b6fb9c39a896a1f6fd0befe0a661",
+		"linux-arm64":   "66dbbe60d3e1fc6b07807be7cbe58fe9ed45afe190018fba2112870e2e30b737",
+		"windows-amd64": "bed205a512d6ce48a6cce052878fcceb06591bd72d7e6b5e138204ef720eef66",
+	}
+}
+
+// GolangciBinarySum returns the pinned sha256 of the executable for one
+// platform, and whether one is pinned at all.
+func GolangciBinarySum(platform string) (string, bool) {
+	sum, ok := golangciBinarySums()[platform]
+	return sum, ok
+}
+
 // SupportedPlatforms lists the platforms with a pinned checksum, sorted.
 func SupportedPlatforms() []string {
 	return slices.Sorted(slices.Values(keysOf(golangciArchiveSums())))

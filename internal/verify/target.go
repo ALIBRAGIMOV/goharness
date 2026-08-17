@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"go/format"
+	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,13 +32,21 @@ type target struct {
 	graph        change.PackageGraph
 	packages     []string
 	testPackages []string
-	files        []string
-	changed      []string
-	raceTests    bool
-	leakCheck    bool
-	isBase       bool
-	contract     admission.TaskContract
-	analyzeOpts  analyze.Options
+	// files is every Go file in the scope packages. It is what a linter path is
+	// mapped back against, so it must stay complete even where nothing is judged.
+	files []string
+	// judged is the subset of files this run examines: files less the generated
+	// ones the change leaves alone.
+	judged []string
+	// exemptFiles are the generated files this change does not touch. Their
+	// linter issues are dropped rather than reported against the change.
+	exemptFiles map[string]bool
+	changed     []string
+	raceTests   bool
+	leakCheck   bool
+	isBase      bool
+	contract    admission.TaskContract
+	analyzeOpts analyze.Options
 
 	// vulnDB records the snapshot the scan actually used, so the report can
 	// state which database produced the security evidence.
@@ -57,8 +67,10 @@ func (t *target) checksFor(planned []admission.PlannedCheck) []Check {
 		admission.ProducerClone:       t.runClone,
 		admission.ProducerScope:       t.runScope,
 		admission.ProducerPolicyGuard: t.runPolicyGuard,
+		admission.ProducerVisibility:  t.runVisibility,
 		admission.ProducerMigration:   t.runMigration,
 		admission.ProducerVet:         t.runVet,
+		admission.ProducerGoFix:       t.runGoFix,
 		admission.ProducerGolangci:    t.runGolangci,
 		admission.ProducerTest:        t.runTests,
 		admission.ProducerRaceTest:    t.runRaceTests,
@@ -126,7 +138,16 @@ func (t *target) fromFindings(findings []analyze.Finding, producer string) []evi
 	return out
 }
 
+// runCompile reports the defects the compiler found. A package the go command
+// could not resolve at all is not one of them: an unobtainable module says
+// nothing about the change, so it ends the check as a failure and leaves the
+// claim inconclusive rather than blaming the code in front of it.
 func (t *target) runCompile(ctx context.Context) (checkResult, error) {
+	if unresolved := t.graph.ResolutionErrors(); len(unresolved) > 0 {
+		return checkResult{}, fmt.Errorf(
+			"the module graph could not be resolved, so nothing was compiled: %s",
+			unresolved[0].Message)
+	}
 	var out []evidence.Evidence
 	seen := map[string]bool{}
 	addFailure := func(file string, line, col int, msg string) {
@@ -160,7 +181,7 @@ func (t *target) runCompile(ctx context.Context) (checkResult, error) {
 
 func (t *target) runGofmt(ctx context.Context) (checkResult, error) {
 	var out []evidence.Evidence
-	for _, rel := range t.files {
+	for _, rel := range t.judged {
 		if err := ctx.Err(); err != nil {
 			return checkResult{}, err
 		}
@@ -173,9 +194,11 @@ func (t *target) runGofmt(ctx context.Context) (checkResult, error) {
 			continue
 		}
 		if string(formatted) != string(src) {
-			out = append(out, t.newEvidence(policy.RuleFormatGofmt, "gofmt", tool.GoVersion(),
+			e := t.newEvidence(policy.RuleFormatGofmt, "gofmt", tool.GoVersion(),
 				evidence.SeverityError, rel, 0, 0, "",
-				"file is not gofmt-formatted; run gofmt to see the canonical form"))
+				"file is not gofmt-formatted; run gofmt to see the canonical form")
+			e.Fix = &evidence.Remediation{Command: "gofmt -w " + rel}
+			out = append(out, e)
 		}
 	}
 	return checkResult{evidence: out}, nil
@@ -184,7 +207,7 @@ func (t *target) runGofmt(ctx context.Context) (checkResult, error) {
 func (t *target) runGoimports(ctx context.Context) (checkResult, error) {
 	options := &imports.Options{Comments: true, TabIndent: true, TabWidth: 8}
 	var out []evidence.Evidence
-	for _, rel := range t.files {
+	for _, rel := range t.judged {
 		if err := ctx.Err(); err != nil {
 			return checkResult{}, err
 		}
@@ -198,16 +221,18 @@ func (t *target) runGoimports(ctx context.Context) (checkResult, error) {
 			continue
 		}
 		if string(processed) != string(src) {
-			out = append(out, t.newEvidence(policy.RuleFormatGoimports, "goimports", tool.GoVersion(),
+			e := t.newEvidence(policy.RuleFormatGoimports, "goimports", tool.GoVersion(),
 				evidence.SeverityError, rel, 0, 0, "",
-				"import block is not goimports-normalized"))
+				"import block is not goimports-normalized")
+			e.Fix = &evidence.Remediation{Command: "goimports -w " + rel}
+			out = append(out, e)
 		}
 	}
 	return checkResult{evidence: out}, nil
 }
 
 func (t *target) runNative(ctx context.Context) (checkResult, error) {
-	findings, err := analyze.Scan(ctx, t.root, t.files, t.analyzeOpts)
+	findings, err := analyze.Scan(ctx, t.root, t.judged, t.analyzeOpts)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -215,7 +240,7 @@ func (t *target) runNative(ctx context.Context) (checkResult, error) {
 }
 
 func (t *target) runMetrics(ctx context.Context) (checkResult, error) {
-	metrics, err := analyze.ComputeMetrics(ctx, t.root, t.files)
+	metrics, err := analyze.ComputeMetrics(ctx, t.root, t.judged)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -223,7 +248,7 @@ func (t *target) runMetrics(ctx context.Context) (checkResult, error) {
 }
 
 func (t *target) runClone(ctx context.Context) (checkResult, error) {
-	findings, err := analyze.CloneFindings(ctx, t.root, t.files)
+	findings, err := analyze.CloneFindings(ctx, t.root, t.judged)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -252,19 +277,30 @@ func (t *target) runPolicyGuard(ctx context.Context) (checkResult, error) {
 		return checkResult{}, nil
 	}
 	var out []evidence.Evidence
+	if grants := t.contract.IgnoredGrants; len(grants) > 0 {
+		out = append(out, t.engine.Policy.Decorate(t.newEvidence(
+			policy.RulePolicyGrant, "goharness", t.engine.Version,
+			evidence.SeverityError, admission.ContractFileName, 0, 0, "",
+			"the working tree asks for "+strings.Join(grants, ", ")+
+				" but the base revision grants none of it; commit the contract before the change it authorises")))
+	}
 	for _, entry := range t.engine.ChangedEntries {
 		if err := ctx.Err(); err != nil {
 			return checkResult{}, err
 		}
-		switch {
-		case isPolicyFile(entry.Path) && !t.contract.AllowPolicyEdit:
+		if isPolicyFile(entry.Path) && !t.contract.AllowPolicyEdit {
 			out = append(out, t.engine.Policy.Decorate(t.newEvidence(
 				policy.RulePolicyEdit, "goharness", t.engine.Version,
 				evidence.SeverityError, entry.Path, 0, 0, "",
 				"the change "+entry.Status.Describe()+" the quality policy file "+entry.Path+
-					"; altering the admission gate needs a human decision, recorded as allowPolicyEdit: true in the task contract")))
-		case entry.Status == change.StatusModified && strings.HasSuffix(entry.Path, ".go") &&
-			isGeneratedFile(filepath.Join(t.root, filepath.FromSlash(entry.Path))):
+					"; altering the admission gate needs a human decision, recorded as allowPolicyEdit: true in a task contract committed at the base revision")))
+			continue
+		}
+		edited, err := t.editedGeneratedFile(entry)
+		if err != nil {
+			return checkResult{}, err
+		}
+		if edited {
 			out = append(out, t.engine.Policy.Decorate(t.newEvidence(
 				policy.RuleGeneratedEdit, "goharness", t.engine.Version,
 				evidence.SeverityWarning, entry.Path, 0, 0, "",
@@ -274,6 +310,55 @@ func (t *target) runPolicyGuard(ctx context.Context) (checkResult, error) {
 	return checkResult{evidence: out}, nil
 }
 
+// maxNamedFiles keeps an unproducible reason readable when a change moved a
+// whole directory out of the build.
+const maxNamedFiles = 5
+
+// runVisibility reports the changed Go files this run's build configuration
+// excludes from every package.
+//
+// Compiling, vetting, linting and testing all work through the package graph,
+// so a file outside it is a part of the change that nothing examined. That is
+// missing evidence rather than a defect: the file may build perfectly on
+// another platform or under another tag. The claim it supports goes
+// INCONCLUSIVE and names the files, which is the honest answer and still stops
+// an agent from calling the task finished.
+func (t *target) runVisibility(_ context.Context) (checkResult, error) {
+	if t.isBase {
+		return checkResult{}, nil
+	}
+	unexamined := t.graph.Unexamined(t.engine.ChangedEntries)
+	if len(unexamined) == 0 {
+		return checkResult{}, nil
+	}
+	named := make([]string, 0, len(unexamined))
+	for _, file := range unexamined[:min(len(unexamined), maxNamedFiles)] {
+		named = append(named, file.Path+" ("+file.Reason+")")
+	}
+	reason := fmt.Sprintf("%d changed Go file(s) were compiled by nothing in this run: %s",
+		len(unexamined), strings.Join(named, "; "))
+	if len(unexamined) > len(named) {
+		reason += fmt.Sprintf(" and %d more", len(unexamined)-len(named))
+	}
+	return checkResult{unproducible: []admission.Unproducible{{
+		Kind:   admission.KindChangeVisible,
+		Reason: reason,
+		Remedy: "build the file in this configuration, drop it from the change, " +
+			"or run verify where its constraints are satisfied",
+	}}}, nil
+}
+
+// editedGeneratedFile reports a generated file the change rewrote in place.
+// Adding one is not reported: introducing a generator produces its output for
+// the first time, and that output is judged like any other code the change
+// brings in.
+func (t *target) editedGeneratedFile(entry change.Entry) (bool, error) {
+	if entry.Status != change.StatusModified || !strings.HasSuffix(entry.Path, ".go") {
+		return false, nil
+	}
+	return analyze.IsGenerated(filepath.Join(t.root, filepath.FromSlash(entry.Path)))
+}
+
 // isPolicyFile covers the durable policy only. The task contract is a per-run
 // input the gate cannot authenticate anyway (a --contract flag would bypass a
 // file check), so guarding it would add friction without adding protection;
@@ -281,25 +366,6 @@ func (t *target) runPolicyGuard(ctx context.Context) (checkResult, error) {
 // record of the decision.
 func isPolicyFile(rel string) bool {
 	return rel == "goharness.yaml"
-}
-
-// isGeneratedFile applies the Go convention: a `// Code generated ... DO NOT
-// EDIT.` line before the package clause.
-func isGeneratedFile(abs string) bool {
-	src, err := os.ReadFile(abs)
-	if err != nil {
-		return false
-	}
-	for line := range strings.SplitSeq(string(src), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "package ") {
-			return false
-		}
-		if strings.HasPrefix(trimmed, "// Code generated ") && strings.HasSuffix(trimmed, " DO NOT EDIT.") {
-			return true
-		}
-	}
-	return false
 }
 
 // runMigration reports migrations that the change rewrote rather than added.
@@ -350,6 +416,69 @@ func (t *target) runVet(ctx context.Context) (checkResult, error) {
 	return checkResult{evidence: out}, nil
 }
 
+// runGoFix reports what the go fix analyzer suite would rewrite. Every finding
+// carries the command that applies it: the toolchain computed the edit, so the
+// remediation is a command rather than an exercise.
+//
+// Only diagnostics that carry an edit become evidence. What makes this suite
+// precise enough to report at all is that it proves each finding by producing
+// the replacement; a diagnostic with no edit is the analyzer saying it cannot
+// help here, which is a statement about the analyzer rather than about the
+// code. The clearest instance is a call inside a generated file, where the
+// inliner reports that it will not rewrite the file at all.
+//
+// The analyzer set is checked against the toolchain before the run. An analyzer
+// the policy enables and the toolchain does not have would otherwise fail as an
+// undefined flag, which reads as a broken harness rather than as a pin that
+// moved.
+func (t *target) runGoFix(ctx context.Context) (checkResult, error) {
+	patterns := t.graph.PatternsFor(t.packages)
+	if len(patterns) == 0 {
+		return checkResult{}, nil
+	}
+	analyzers := policy.GoFixAnalyzers()
+	support, err := tool.InspectFixAnalyzers(ctx, t.engine.Runner, t.root, analyzers, policy.GoFixKnownAnalyzers())
+	if err != nil {
+		return checkResult{}, err
+	}
+	if len(support.Missing) > 0 {
+		return checkResult{}, fmt.Errorf(
+			"%s does not register the go fix analyzer(s) %s that the policy enables",
+			tool.GoVersion(), strings.Join(support.Missing, ", "))
+	}
+	diags, err := tool.RunGoFix(ctx, t.engine.Runner, t.root, patterns, analyzers)
+	if err != nil {
+		return checkResult{}, err
+	}
+	out := make([]evidence.Evidence, 0, len(diags))
+	for _, d := range diags {
+		file := t.rel(d.File)
+		if t.exemptFiles[file] || d.Edits == 0 {
+			continue
+		}
+		e := t.newEvidence(policy.GoFixRuleID(d.Analyzer), "go fix", tool.GoVersion(),
+			evidence.SeverityWarning, file, d.Line, d.Column, d.Package, d.Message)
+		e.Fix = &evidence.Remediation{
+			Command: goFixCommand(d.Analyzer, file),
+			Summary: d.FixSummary,
+		}
+		out = append(out, e)
+	}
+	return checkResult{evidence: out}, nil
+}
+
+// goFixCommand names the narrowest invocation that closes one finding: the one
+// analyzer that reported it, over the directory it is in. A reader who runs it
+// gets that fix and no other, which is what makes it safe to run without
+// reading the whole diff first.
+func goFixCommand(analyzer, file string) string {
+	dir := path.Dir(file)
+	if dir == "." || dir == "" || file == "" {
+		return "go fix -" + analyzer + " ./..."
+	}
+	return "go fix -" + analyzer + " ./" + dir
+}
+
 func (t *target) runGolangci(ctx context.Context) (checkResult, error) {
 	g := t.engine.Golangci
 	if !g.MatchesPin() {
@@ -368,6 +497,9 @@ func (t *target) runGolangci(ctx context.Context) (checkResult, error) {
 	out := make([]evidence.Evidence, 0, len(issues))
 	for _, issue := range issues {
 		file := t.normalizeLintPath(issue.Pos.Filename)
+		if t.exemptFiles[file] {
+			continue
+		}
 		pkg, _ := t.graph.PackageForFile(file)
 		out = append(out, t.newEvidence("GCL-"+issue.FromLinter, "golangci-lint", g.Version,
 			severityFor(issue.Severity), file, issue.Pos.Line, issue.Pos.Column,
@@ -429,14 +561,14 @@ func (t *target) runRaceTests(ctx context.Context) (checkResult, error) {
 // and goroutine-leak-clean. Packages that already declare a TestMain cannot be
 // injected; they still run plainly, and the leak obligation is reported
 // unproducible for them rather than silently passed.
-func (t *target) runLeakRaceTests(ctx context.Context) (checkResult, error) {
+func (t *target) runLeakRaceTests(ctx context.Context) (_ checkResult, err error) {
 	patterns := t.graph.PatternsFor(t.testPackages)
 	if len(patterns) == 0 {
 		return checkResult{}, nil
 	}
-	injectable, injectablePkgs, blocked, err := t.classifyLeakPackages()
-	if err != nil {
-		return checkResult{}, err
+	injectable, injectablePkgs, blocked, classifyErr := t.classifyLeakPackages()
+	if classifyErr != nil {
+		return checkResult{}, classifyErr
 	}
 
 	var res checkResult
@@ -479,22 +611,42 @@ func (t *target) runLeakRaceTests(ctx context.Context) (checkResult, error) {
 		failures = append(failures, plain...)
 	}
 
-	testFailures := 0
+	interpreted, err := t.interpretLeakRun(ctx, failures)
+	if err != nil {
+		return checkResult{}, err
+	}
+	res.evidence = append(res.evidence, interpreted.evidence...)
+	res.unproducible = append(res.unproducible, interpreted.unproducible...)
+	return res, nil
+}
+
+// interpretLeakRun splits a race run's failures into leaked goroutines, tests
+// that failed twice, and tests that did not reproduce.
+func (t *target) interpretLeakRun(ctx context.Context, failures []tool.TestFailure) (checkResult, error) {
+	var res checkResult
+	var failed []tool.TestFailure
 	for _, f := range failures {
-		if leakcheck.IsLeakFailure(f.Output) {
-			msg, ok := leakcheck.LeakMessage(f.Output)
-			if !ok {
-				msg = "tests leave goroutines running after completion"
-			}
-			res.evidence = append(res.evidence, t.newEvidence(policy.RuleGoroutineLeak,
-				"goleak "+leakcheck.Version, tool.GoVersion(),
-				evidence.SeverityError, "", 0, 0, f.Package, msg))
+		if !leakcheck.IsLeakFailure(f.Output) {
+			failed = append(failed, f)
 			continue
 		}
-		testFailures++
+		msg, ok := leakcheck.LeakMessage(f.Output)
+		if !ok {
+			msg = "tests leave goroutines running after completion"
+		}
+		res.evidence = append(res.evidence, t.newEvidence(policy.RuleGoroutineLeak,
+			"goleak "+leakcheck.Version, tool.GoVersion(),
+			evidence.SeverityError, "", 0, 0, f.Package, msg))
+	}
+	confirmed, flaky, err := t.confirmFailures(ctx, failed, []string{"-race"})
+	if err != nil {
+		return checkResult{}, err
+	}
+	res.unproducible = append(res.unproducible, flakyUnproducible(flaky, true)...)
+	for _, f := range confirmed {
 		res.evidence = append(res.evidence, t.testFailureEvidence(f))
 	}
-	if testFailures > 0 {
+	if len(confirmed) > 0 {
 		res.unproducible = append(res.unproducible, admission.Unproducible{
 			Kind:   admission.KindLeakClean,
 			Reason: "failing tests stop the suite before goroutine-leak verification can conclude",
@@ -556,11 +708,108 @@ func (t *target) runTestsWith(ctx context.Context, extra []string) (checkResult,
 	if err != nil {
 		return checkResult{}, err
 	}
-	out := make([]evidence.Evidence, 0, len(failures))
-	for _, f := range failures {
+	confirmed, flaky, err := t.confirmFailures(ctx, failures, extra)
+	if err != nil {
+		return checkResult{}, err
+	}
+	out := make([]evidence.Evidence, 0, len(confirmed))
+	for _, f := range confirmed {
 		out = append(out, t.testFailureEvidence(f))
 	}
-	return checkResult{evidence: out}, nil
+	return checkResult{evidence: out, unproducible: flakyUnproducible(flaky, slices.Contains(extra, "-race"))}, nil
+}
+
+// raceReport marks output the race detector wrote. A race it saw once is a real
+// race whether or not a second run schedules the goroutines the same way, so
+// such a failure is never dismissed as a flake.
+const raceReport = "DATA RACE"
+
+// confirmFailures re-runs the tests that failed, once each, and splits them
+// into failures that reproduce and tests that did not.
+//
+// A suite with a flake rate above zero would otherwise blame whichever change
+// happens to be in front of it, which is the fastest way for a gate to lose the
+// authority it needs. A test that fails twice is evidence. One that passes on
+// the second run has proved nothing either way, so the obligation it was
+// carrying goes unproducible and names the test, rather than quietly passing or
+// rejecting a change that did not cause it.
+func (t *target) confirmFailures(
+	ctx context.Context, failures []tool.TestFailure, extra []string,
+) (confirmed []tool.TestFailure, flaky []string, err error) {
+	if t.isBase || len(failures) == 0 {
+		return failures, nil, nil
+	}
+	retryable := map[string][]string{}
+	for _, f := range failures {
+		if name := topLevelTest(f); name != "" && !strings.Contains(f.Output, raceReport) {
+			retryable[f.Package] = appendUnique(retryable[f.Package], name)
+		}
+	}
+	stillFailing := map[string]bool{}
+	for _, pkg := range slices.Sorted(maps.Keys(retryable)) {
+		names := retryable[pkg]
+		repeat, runErr := tool.RunTests(ctx, t.engine.Runner, t.root, []string{pkg},
+			append(slices.Clone(extra), "-run", testNamePattern(names)))
+		if runErr != nil {
+			// A re-run the toolchain refuses is a tool failure like any other, and
+			// the harness never turns one of those into a judgement about the code.
+			return nil, nil, fmt.Errorf("re-running the failing tests in %s: %w", pkg, runErr)
+		}
+		for _, f := range repeat {
+			stillFailing[f.Package+"\x00"+topLevelTest(f)] = true
+		}
+	}
+	for _, f := range failures {
+		name := topLevelTest(f)
+		switch {
+		case name == "" || strings.Contains(f.Output, raceReport):
+			confirmed = append(confirmed, f)
+		case stillFailing[f.Package+"\x00"+name]:
+			confirmed = append(confirmed, f)
+		default:
+			flaky = appendUnique(flaky, f.Package+"."+name)
+		}
+	}
+	return confirmed, flaky, nil
+}
+
+// flakyUnproducible turns a non-reproducing failure into missing evidence for
+// the obligations that run was carrying.
+func flakyUnproducible(flaky []string, raced bool) []admission.Unproducible {
+	if len(flaky) == 0 {
+		return nil
+	}
+	kinds := []admission.EvidenceKind{admission.KindTestsPass}
+	if raced {
+		kinds = append(kinds, admission.KindRaceClean)
+	}
+	out := make([]admission.Unproducible, 0, len(kinds))
+	for _, kind := range kinds {
+		out = append(out, admission.Unproducible{
+			Kind:   kind,
+			Reason: "these tests failed and then passed unchanged: " + strings.Join(flaky, ", "),
+			Remedy: "make the named tests deterministic; a suite that answers differently each run cannot support a verdict",
+		})
+	}
+	return out
+}
+
+// topLevelTest is the name a -run pattern has to name to reach a failure,
+// which for a failing subtest is the parent it lives in.
+func topLevelTest(f tool.TestFailure) string {
+	name, _, _ := strings.Cut(f.Test, "/")
+	return name
+}
+
+func testNamePattern(names []string) string {
+	return "^(" + strings.Join(names, "|") + ")$"
+}
+
+func appendUnique(items []string, value string) []string {
+	if slices.Contains(items, value) {
+		return items
+	}
+	return append(items, value)
 }
 
 func (t *target) testFailureEvidence(f tool.TestFailure) evidence.Evidence {
@@ -592,10 +841,11 @@ func (t *target) runModTidy(ctx context.Context) (checkResult, error) {
 	if diff == "" {
 		return checkResult{}, nil
 	}
-	return checkResult{evidence: []evidence.Evidence{t.newEvidence(
-		policy.RuleModTidy, "go mod tidy", tool.GoVersion(),
+	e := t.newEvidence(policy.RuleModTidy, "go mod tidy", tool.GoVersion(),
 		evidence.SeverityError, "go.mod", 0, 0, "",
-		"module requirements are not tidy; `go mod tidy` would change go.mod or go.sum")}}, nil
+		"module requirements are not tidy; `go mod tidy` would change go.mod or go.sum")
+	e.Fix = &evidence.Remediation{Command: "go mod tidy"}
+	return checkResult{evidence: []evidence.Evidence{e}}, nil
 }
 
 // runVulnScan scans in process against the provisioned database snapshot.

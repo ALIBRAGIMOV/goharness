@@ -157,6 +157,8 @@ func (u *unit) scan(opts Options) []Finding {
 		s.scanDocSizes()
 		s.scanRestatements()
 		s.scanArchitecture()
+		s.scanForwarding()
+		s.scanDeprecations()
 		if opts.Concurrency {
 			s.scanConcurrency()
 		}
@@ -174,7 +176,7 @@ func (u *unit) scan(opts Options) []Finding {
 		}
 		out = append(out, s.findings...)
 	}
-	return out
+	return append(out, soleImplementationFindings(u)...)
 }
 
 // parseFile reports whether the source parsed. A file that does not parse is

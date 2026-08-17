@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/admission"
@@ -41,9 +43,29 @@ type Document struct {
 	Plan                    PlanInfo                     `json:"plan"`
 	Claims                  []admission.QualityClaim     `json:"claims"`
 	UnmetObligations        []admission.RequiredEvidence `json:"unmetObligations"`
-	Evidence                []evidence.Evidence          `json:"evidence"`
+	Unproducible            []Unproducible               `json:"unproducible"`
+	Evidence                []Finding                    `json:"evidence"`
 	Failures                []verify.CheckFailure        `json:"failures"`
 	Timing                  Timing                       `json:"timing"`
+}
+
+// Finding is one piece of evidence as the protocol presents it: the finding
+// itself, plus whether it can fail its claim. Without that flag a consumer has
+// to re-derive the harness's grandfathering rules to know what to fix first,
+// and an agent that guesses wrong either ignores a blocker or chases debt it
+// did not create.
+type Finding struct {
+	evidence.Evidence
+	Blocking bool `json:"blocking"`
+}
+
+// Unproducible is one obligation the run could not discharge, with the action
+// that would let the next run discharge it. It is what makes an INCONCLUSIVE
+// verdict actionable rather than merely honest.
+type Unproducible struct {
+	Kind   string `json:"kind"`
+	Reason string `json:"reason"`
+	Remedy string `json:"remedy,omitempty"`
 }
 
 // Versions records every pin that could change a verdict.
@@ -53,6 +75,7 @@ type Versions struct {
 	GolangciLint        string `json:"golangciLint"`
 	GolangciLintPin     string `json:"golangciLintPin"`
 	GolangciLintMatches bool   `json:"golangciLintMatchesPin"`
+	GolangciLintSHA256  string `json:"golangciLintSha256"`
 	XVuln               string `json:"xVuln"`
 	Goleak              string `json:"goleak"`
 	UberGuideCommit     string `json:"uberGuideCommit"`
@@ -76,13 +99,18 @@ type Module struct {
 	GoDirective string `json:"goDirective"`
 }
 
-// Contract is the task contract the run was judged against.
+// Contract is the task contract the run was judged against. Authenticated
+// records whether its grants came from the base revision; IgnoredGrants names
+// the permissions the working tree asked for and did not receive.
 type Contract struct {
-	Source        string   `json:"source"`
-	Goal          string   `json:"goal,omitempty"`
-	DeclaredScope []string `json:"declaredScope"`
-	DeclaredRisks []string `json:"declaredRisks"`
-	AllowAPIBreak bool     `json:"allowApiBreak"`
+	Source          string   `json:"source"`
+	Goal            string   `json:"goal,omitempty"`
+	DeclaredScope   []string `json:"declaredScope"`
+	DeclaredRisks   []string `json:"declaredRisks"`
+	AllowAPIBreak   bool     `json:"allowApiBreak"`
+	AllowPolicyEdit bool     `json:"allowPolicyEdit"`
+	Authenticated   bool     `json:"authenticated"`
+	IgnoredGrants   []string `json:"ignoredGrants"`
 }
 
 // Risks records which risk domains were active and why.
@@ -139,6 +167,7 @@ func Build(version string, r verify.Result) Document {
 			GolangciLint:        r.Golangci.Version,
 			GolangciLintPin:     tool.GolangciLintPin,
 			GolangciLintMatches: r.Golangci.MatchesPin(),
+			GolangciLintSHA256:  r.Golangci.SHA256,
 			XVuln:               tool.XVulnVersion(),
 			Goleak:              leakcheck.Version,
 			UberGuideCommit:     policy.UberGuideCommit,
@@ -152,7 +181,8 @@ func Build(version string, r verify.Result) Document {
 		Plan:             buildPlan(r),
 		Claims:           normalizeClaims(decision.Claims),
 		UnmetObligations: nonNilObligations(decision.UnmetObligations),
-		Evidence:         nonNilEvidence(r.Evidence),
+		Unproducible:     buildUnproducible(r.Unproducible),
+		Evidence:         buildFindings(r.Evidence),
 		Failures:         nonNilFailures(r.Failures),
 		Timing:           buildTiming(r),
 	}
@@ -164,11 +194,14 @@ func buildContract(c admission.TaskContract) Contract {
 		risks = append(risks, string(domain))
 	}
 	return Contract{
-		Source:        string(c.Source),
-		Goal:          c.Goal,
-		DeclaredScope: nonNil(c.DeclaredScope),
-		DeclaredRisks: risks,
-		AllowAPIBreak: c.AllowAPIBreak,
+		Source:          string(c.Source),
+		Goal:            c.Goal,
+		DeclaredScope:   nonNil(c.DeclaredScope),
+		DeclaredRisks:   risks,
+		AllowAPIBreak:   c.AllowAPIBreak,
+		AllowPolicyEdit: c.AllowPolicyEdit,
+		Authenticated:   c.Authenticated,
+		IgnoredGrants:   nonNil(c.IgnoredGrants),
 	}
 }
 
@@ -247,11 +280,28 @@ func nonNil(s []string) []string {
 	return s
 }
 
-func nonNilEvidence(s []evidence.Evidence) []evidence.Evidence {
-	if s == nil {
-		return []evidence.Evidence{}
+// buildFindings marks each finding with whether it blocks, using the same
+// predicate the verdict itself was decided by.
+func buildFindings(items []evidence.Evidence) []Finding {
+	out := make([]Finding, 0, len(items))
+	for _, e := range items {
+		out = append(out, Finding{Evidence: e, Blocking: verify.Blocking(e)})
 	}
-	return s
+	return out
+}
+
+func buildUnproducible(items []admission.Unproducible) []Unproducible {
+	out := make([]Unproducible, 0, len(items))
+	for _, u := range items {
+		out = append(out, Unproducible{Kind: string(u.Kind), Reason: u.Reason, Remedy: u.Remedy})
+	}
+	slices.SortFunc(out, func(a, b Unproducible) int {
+		if c := strings.Compare(a.Kind, b.Kind); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Reason, b.Reason)
+	})
+	return out
 }
 
 func nonNilFailures(s []verify.CheckFailure) []verify.CheckFailure {

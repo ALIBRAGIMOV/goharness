@@ -36,7 +36,7 @@ func Start(ctx context.Context) {
 func work() {}
 `
 	ids := ruleIDs(scanWith(t, "p.go", unbounded, analyze.Options{Concurrency: true}))
-	if !contains(ids, policy.RuleGoroutineLifetime) {
+	if !slices.Contains(ids, policy.RuleGoroutineLifetime) {
 		t.Fatalf("a goroutine ignoring the caller's context was not reported: %v", ids)
 	}
 
@@ -51,7 +51,7 @@ func Start(ctx context.Context) {
 }
 `
 	ids = ruleIDs(scanWith(t, "p.go", bounded, analyze.Options{Concurrency: true}))
-	if contains(ids, policy.RuleGoroutineLifetime) {
+	if slices.Contains(ids, policy.RuleGoroutineLifetime) {
 		t.Fatalf("a goroutine that watches the context was reported: %v", ids)
 	}
 }
@@ -67,7 +67,7 @@ func Start() {
 func work() {}
 `
 	ids := ruleIDs(scanWith(t, "p.go", src, analyze.Options{Concurrency: true}))
-	if contains(ids, policy.RuleGoroutineLifetime) {
+	if slices.Contains(ids, policy.RuleGoroutineLifetime) {
 		t.Fatalf("the rule fired where no stop mechanism was in scope: %v", ids)
 	}
 }
@@ -99,7 +99,7 @@ func TestBoundedResourceScans(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ids := ruleIDs(scanWith(t, "p.go", tc.src, analyze.Options{Concurrency: true}))
-			if !contains(ids, tc.want) {
+			if !slices.Contains(ids, tc.want) {
 				t.Fatalf("missing %s in %v", tc.want, ids)
 			}
 		})
@@ -120,7 +120,7 @@ func F(items []int, tokens chan struct{}) {
 func work() {}
 `
 	ids := ruleIDs(scanWith(t, "p.go", src, analyze.Options{Concurrency: true}))
-	if contains(ids, policy.RuleGoroutineInLoop) {
+	if slices.Contains(ids, policy.RuleGoroutineInLoop) {
 		t.Fatalf("a token-bounded loop was reported: %v", ids)
 	}
 }
@@ -136,7 +136,7 @@ func F() chan int {
 }
 `
 	ids := ruleIDs(scanWith(t, "p.go", src, analyze.Options{Concurrency: true}))
-	if contains(ids, policy.RuleVariableChanBuf) {
+	if slices.Contains(ids, policy.RuleVariableChanBuf) {
 		t.Fatalf("a constant-sized buffer was reported as variable: %v", ids)
 	}
 }
@@ -155,7 +155,7 @@ func F() {
 `
 	ids := ruleIDs(scanWith(t, "p.go", src, analyze.Options{Network: true}))
 	for _, want := range []string{policy.RuleClientTimeout, policy.RuleRequestContext} {
-		if !contains(ids, want) {
+		if !slices.Contains(ids, want) {
 			t.Fatalf("missing %s in %v", want, ids)
 		}
 	}
@@ -175,7 +175,7 @@ func F() *http.Client {
 }
 `
 	ids := ruleIDs(scanWith(t, "p.go", src, analyze.Options{Network: true}))
-	if contains(ids, policy.RuleClientTimeout) {
+	if slices.Contains(ids, policy.RuleClientTimeout) {
 		t.Fatalf("a client with a timeout was reported: %v", ids)
 	}
 }
@@ -196,7 +196,7 @@ func F(db *sql.DB) error {
 }
 `
 	ids := ruleIDs(scanWith(t, "p.go", unresolved, analyze.Options{Persistence: true}))
-	if !contains(ids, policy.RuleTxNotResolved) {
+	if !slices.Contains(ids, policy.RuleTxNotResolved) {
 		t.Fatalf("an unresolved transaction was not reported: %v", ids)
 	}
 
@@ -217,7 +217,7 @@ func F(db *sql.DB) error {
 }
 `
 	ids = ruleIDs(scanWith(t, "p.go", resolved, analyze.Options{Persistence: true}))
-	if contains(ids, policy.RuleTxNotResolved) {
+	if slices.Contains(ids, policy.RuleTxNotResolved) {
 		t.Fatalf("a committed transaction was reported: %v", ids)
 	}
 }
@@ -225,11 +225,11 @@ func F(db *sql.DB) error {
 func TestBannedPackageNames(t *testing.T) {
 	t.Parallel()
 	ids := ruleIDs(scanWith(t, "internal/util/util.go", "package util\n\nfunc F() {}\n", analyze.Options{}))
-	if !contains(ids, policy.RuleBannedPackageName) {
+	if !slices.Contains(ids, policy.RuleBannedPackageName) {
 		t.Fatalf("a package named util was not reported: %v", ids)
 	}
 	ids = ruleIDs(scanWith(t, "internal/policy/policy.go", "package policy\n\nfunc F() {}\n", analyze.Options{}))
-	if contains(ids, policy.RuleBannedPackageName) {
+	if slices.Contains(ids, policy.RuleBannedPackageName) {
 		t.Fatalf("a meaningful package name was reported: %v", ids)
 	}
 }
@@ -249,7 +249,7 @@ func F() {}
 		},
 	}}
 	findings := scanWith(t, "internal/report/report.go", src, opts)
-	if !contains(ruleIDs(findings), policy.RuleForbiddenImport) {
+	if !slices.Contains(ruleIDs(findings), policy.RuleForbiddenImport) {
 		t.Fatalf("the declared direction was not enforced: %v", ruleIDs(findings))
 	}
 	if !strings.Contains(findings[0].Message, "reports must not run tools") {
@@ -275,7 +275,7 @@ func TestComplexityAndNestingBudgets(t *testing.T) {
 
 	metrics := metricsFor(t, "p.go", deep.String())
 	ids := ruleIDs(analyze.SimplicityFindings(metrics))
-	if !contains(ids, policy.RuleNesting) {
+	if !slices.Contains(ids, policy.RuleNesting) {
 		t.Fatalf("a six-level nest was not reported: %v", ids)
 	}
 }
@@ -293,7 +293,7 @@ func TestMaintainabilityDeltaNeedsBothSnapshots(t *testing.T) {
 	head := metricsFor(t, "p.go", grown.String())
 
 	ids := ruleIDs(analyze.MaintainabilityFindings(base, head))
-	if !contains(ids, policy.RuleComplexityDelta) {
+	if !slices.Contains(ids, policy.RuleComplexityDelta) {
 		t.Fatalf("a large complexity rise was not reported: %v", ids)
 	}
 	if got := analyze.MaintainabilityFindings(base, base); len(got) != 0 {
@@ -404,7 +404,7 @@ func TestThing(t *testing.T) {
 	}
 	ids := ruleIDs(analyze.WeakeningFindings(base, head, func(string) bool { return true }))
 	for _, want := range []string{policy.RuleAssertionRemoved, policy.RuleSkipAdded} {
-		if !contains(ids, want) {
+		if !slices.Contains(ids, want) {
 			t.Fatalf("missing %s in %v", want, ids)
 		}
 	}

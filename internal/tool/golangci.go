@@ -40,57 +40,104 @@ type Golangci struct {
 	Path    string
 	Version string
 	Source  string
-	// Note records why an earlier discovery source was passed over, so a
-	// rejected cache entry is visible rather than silently skipped.
+	// SHA256 is the hash the executable was accepted on, recorded in the report
+	// so a verdict is attributable to the exact binary that produced it.
+	SHA256 string
+	// Note records why earlier discovery sources were passed over, so a rejected
+	// candidate is visible rather than silently skipped.
 	Note string
 }
 
-// DiscoverGolangci locates the executable in the documented order: environment
-// override, repository-local .tools, the provisioned cache, then PATH.
+// DiscoverGolangci locates a golangci-lint executable the harness can trust.
 //
-// A cached binary is re-hashed against its manifest before use. A cache entry
-// that fails that check is passed over rather than executed, and the reason is
-// carried on the result: corruption is an environment problem, and falling
-// through still applies the exact version pin to whatever is found next, so no
-// unverified binary can ever be trusted.
+// It searches the documented order (environment override, repository-local
+// .tools, the provisioned cache, then PATH) and accepts a candidate only when
+// the file hashes to the sum pinned for this platform. Identity comes from the
+// bytes, never from the binary's own account of itself: printing the pinned
+// version takes three lines of shell, and .tools sits inside the repository
+// that the change under verification can write to. A candidate that does not
+// match is passed over with the reason recorded, and a run that finds nothing
+// trustworthy reports the linter's evidence as unproducible instead of
+// believing an unknown program.
 func DiscoverGolangci(repoRoot string) (Golangci, error) {
+	var d discovery
 	if p := strings.TrimSpace(os.Getenv(GolangciLintEnvVar)); p != "" {
-		return Golangci{Path: p, Source: "env " + GolangciLintEnvVar}, nil
+		if g, ok := d.accept(p, "env "+GolangciLintEnvVar); ok {
+			return g, nil
+		}
 	}
 	local := filepath.Join(repoRoot, GolangciLintLocalPath)
 	if info, err := os.Stat(local); err == nil && !info.IsDir() {
-		return Golangci{Path: local, Source: GolangciLintLocalPath}, nil
+		if g, ok := d.accept(local, GolangciLintLocalPath); ok {
+			return g, nil
+		}
 	}
-
-	path, note := discoverFromCache()
-	if path != "" {
-		return Golangci{Path: path, Source: "goharness cache"}, nil
+	if path, ok := d.fromCache(); ok {
+		if g, ok := d.accept(path, "goharness cache"); ok {
+			return g, nil
+		}
 	}
-
-	p, err := exec.LookPath("golangci-lint")
-	if err != nil {
-		return Golangci{Note: note}, fmt.Errorf(
-			"golangci-lint not found via %s, %s, the goharness cache, or PATH%s: %w",
-			GolangciLintEnvVar, GolangciLintLocalPath, noteSuffix(note), err)
+	if path, err := exec.LookPath("golangci-lint"); err == nil {
+		if g, ok := d.accept(path, "PATH"); ok {
+			return g, nil
+		}
 	}
-	return Golangci{Path: p, Source: "PATH", Note: note}, nil
+	return Golangci{Note: d.note()}, fmt.Errorf(
+		"no golangci-lint matching the pinned %s release was found via %s, %s, the goharness cache, or PATH%s",
+		GolangciLintPin, GolangciLintEnvVar, GolangciLintLocalPath, noteSuffix(d.note()))
 }
 
-// discoverFromCache returns a verified cached binary, or the reason there is
-// none. A missing entry is not worth reporting; a rejected one is.
-func discoverFromCache() (path, note string) {
+// discovery accumulates why candidates were passed over, so a failed search can
+// say what it found rather than only that it found nothing.
+type discovery struct {
+	rejected []string
+}
+
+func (d *discovery) reject(origin, reason string) {
+	d.rejected = append(d.rejected, origin+" "+reason)
+}
+
+func (d *discovery) note() string {
+	return strings.Join(d.rejected, "; ")
+}
+
+// accept verifies one candidate against the pinned sum for this platform.
+func (d *discovery) accept(path, origin string) (Golangci, bool) {
+	pinned, known := toolcache.GolangciBinarySum(toolcache.CurrentPlatform())
+	if !known {
+		d.reject(origin, "cannot be verified: no golangci-lint binary checksum is pinned for "+
+			toolcache.CurrentPlatform())
+		return Golangci{}, false
+	}
+	sum, err := toolcache.SumFile(path)
+	if err != nil {
+		d.reject(origin, "could not be read: "+err.Error())
+		return Golangci{}, false
+	}
+	if sum != pinned {
+		d.reject(origin, "is not the pinned release: "+path+" hashes to "+sum)
+		return Golangci{}, false
+	}
+	return Golangci{Path: path, Source: origin, SHA256: sum}, true
+}
+
+// fromCache returns the provisioned binary if the cache holds one that still
+// matches its own manifest. A missing entry is not worth reporting; a corrupt
+// one is.
+func (d *discovery) fromCache() (string, bool) {
 	cache, err := toolcache.Open()
 	if err != nil {
-		return "", ""
+		return "", false
 	}
 	binary, err := cache.VerifiedToolBinary(toolcache.ToolGolangci, GolangciLintPin)
 	switch {
 	case err == nil:
-		return binary, ""
+		return binary, true
 	case errors.Is(err, toolcache.ErrNotProvisioned):
-		return "", ""
+		return "", false
 	default:
-		return "", "the cached binary was rejected: " + err.Error()
+		d.reject("the goharness cache", "was rejected: "+err.Error())
+		return "", false
 	}
 }
 

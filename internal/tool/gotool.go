@@ -27,11 +27,6 @@ type VetDiagnostic struct {
 	Message  string
 }
 
-type vetPosition struct {
-	Posn    string `json:"posn"`
-	Message string `json:"message"`
-}
-
 // RunVet runs the official vet analyzers over the given package patterns and
 // returns parsed diagnostics. Diagnostics are findings, not failures; only an
 // inability to run vet is an error.
@@ -60,32 +55,29 @@ func RunVet(ctx context.Context, runner Runner, dir string, patterns []string) (
 }
 
 func parseVetJSON(stream string) ([]VetDiagnostic, error) {
-	dec := json.NewDecoder(strings.NewReader(stream))
+	entries, err := decodeAnalysisJSON(stream)
+	if err != nil {
+		return nil, err
+	}
 	var out []VetDiagnostic
-	for {
-		var batch map[string]map[string][]vetPosition
-		if err := dec.Decode(&batch); err != nil {
-			if err == io.EOF {
-				return out, nil
-			}
-			return out, fmt.Errorf("decoding go vet JSON: %w", err)
+	for _, entry := range entries {
+		if entry.Failure != "" {
+			return nil, fmt.Errorf("vet analyzer %s failed on %s: %s",
+				entry.Analyzer, entry.Package, entry.Failure)
 		}
-		for pkg, analyzers := range batch {
-			for analyzer, findings := range analyzers {
-				for _, f := range findings {
-					file, line, col := splitPosition(f.Posn)
-					out = append(out, VetDiagnostic{
-						Package:  pkg,
-						Analyzer: analyzer,
-						File:     file,
-						Line:     line,
-						Column:   col,
-						Message:  f.Message,
-					})
-				}
-			}
+		for _, d := range entry.Diagnostics {
+			file, line, col := splitPosition(d.Posn)
+			out = append(out, VetDiagnostic{
+				Package:  entry.Package,
+				Analyzer: entry.Analyzer,
+				File:     file,
+				Line:     line,
+				Column:   col,
+				Message:  d.Message,
+			})
 		}
 	}
+	return out, nil
 }
 
 func splitPosition(posn string) (file string, line, col int) {

@@ -39,7 +39,12 @@ type Engine struct {
 	Concurrency    int64
 	ChangedEntries []change.Entry
 	Progress       func(ProgressEvent)
-	phase          string
+	// ConfigDigest identifies the project configuration in force, so cached
+	// evidence produced under a different policy is never reused.
+	ConfigDigest string
+	// NoCache recomputes the base snapshot even when a cached one matches.
+	NoCache bool
+	phase   string
 }
 
 func (e *Engine) notify(event ProgressEvent) {
@@ -263,6 +268,8 @@ func hintFor(checkID string) string {
 		return "run `goharness doctor` to inspect golangci-lint discovery and the pinned version"
 	case admission.ProducerVulnScan:
 		return "run `goharness setup` to provision the vulnerability database snapshot"
+	case admission.ProducerGoFix:
+		return "run `go tool fix help` to see the analyzers the installed toolchain registers"
 	case admission.ProducerMutation:
 		return "add a test that exercises the changed functions"
 	case admission.ProducerBenchmark:
@@ -301,6 +308,10 @@ type Options struct {
 	// PlanOnly stops the run once the obligation set is known, which is what
 	// --explain-plan needs: the plan without paying for the evidence.
 	PlanOnly bool
+	// NoCache recomputes the base snapshot from scratch. A run with it must
+	// reach the same verdict as one without; that is what makes the cache
+	// trustworthy rather than merely fast.
+	NoCache bool
 }
 
 // Result is everything a report renderer needs.
@@ -426,7 +437,7 @@ func prepare(ctx context.Context, version string, opts Options) (runSetup, error
 	if err != nil {
 		return runSetup{}, err
 	}
-	cfg, err := loadProjectConfig(r.Root)
+	cfg, configDigest, err := loadProjectConfig(r.Root)
 	if err != nil {
 		return runSetup{}, err
 	}
@@ -438,10 +449,6 @@ func prepare(ctx context.Context, version string, opts Options) (runSetup, error
 	if err != nil {
 		return runSetup{}, err
 	}
-	contract, err := admission.LoadContract(opts.ContractPath, r.Root)
-	if err != nil {
-		return runSetup{}, err
-	}
 	base, origin, err := change.ResolveBase(ctx, git, r, opts.Base)
 	if err != nil {
 		return runSetup{}, err
@@ -450,11 +457,16 @@ func prepare(ctx context.Context, version string, opts Options) (runSetup, error
 	if err != nil {
 		return runSetup{}, err
 	}
+	contract, err := resolveContract(ctx, git, r, base, opts.ContractPath)
+	if err != nil {
+		return runSetup{}, err
+	}
 
 	engine := &Engine{
 		Runner: runner, Git: git, Logger: logger, Policy: resolved,
 		Version: version, Concurrency: opts.Limit, ChangedEntries: cs.Entries,
-		Progress: opts.Progress, phase: "head",
+		Progress: opts.Progress, ConfigDigest: configDigest,
+		NoCache: opts.NoCache, phase: "head",
 	}
 	configDir, err := os.MkdirTemp("", "goharness-config-")
 	if err != nil {
@@ -474,6 +486,47 @@ func prepare(ctx context.Context, version string, opts Options) (runSetup, error
 			PolicyPacks: resolved.Packs(), Change: cs, Golangci: engine.Golangci,
 		},
 	}, nil
+}
+
+// resolveContract merges the contract committed at the base revision with the
+// one the working tree carries. Only the base copy can grant permissions: it
+// predates the change under verification, so the change cannot have written it.
+func resolveContract(
+	ctx context.Context, git repo.Git, r repo.Repository, base, explicitPath string,
+) (admission.TaskContract, error) {
+	head, err := admission.LoadContract(explicitPath, r.Root)
+	if err != nil {
+		return admission.TaskContract{}, err
+	}
+	committed, err := contractAt(ctx, git, r, base)
+	if err != nil {
+		return admission.TaskContract{}, err
+	}
+	return admission.Merge(committed, head), nil
+}
+
+// contractAt reads the task contract as it stands at one revision. Absence is
+// looked up before the read so that a revision carrying no contract, which is
+// the common case, stays distinguishable from a git that will not answer.
+func contractAt(ctx context.Context, git repo.Git, r repo.Repository, rev string) (admission.TaskContract, error) {
+	none := admission.TaskContract{Source: admission.ContractFromDefault}
+	if rev == "" || !r.HasGit {
+		return none, nil
+	}
+	listed, err := git.Run(ctx, r.Root, "ls-tree", "--name-only", rev, "--", admission.ContractFileName)
+	if err != nil {
+		return admission.TaskContract{}, fmt.Errorf(
+			"looking for %s at %s: %w", admission.ContractFileName, rev, err)
+	}
+	if strings.TrimSpace(listed) == "" {
+		return none, nil
+	}
+	src, err := git.Run(ctx, r.Root, "show", rev+":./"+admission.ContractFileName)
+	if err != nil {
+		return admission.TaskContract{}, fmt.Errorf(
+			"reading %s at %s: %w", admission.ContractFileName, rev, err)
+	}
+	return admission.ParseContract([]byte(src), admission.ContractFromBase)
 }
 
 func applyTimeout(ctx context.Context, opts Options) (context.Context, context.CancelFunc) {
@@ -543,7 +596,7 @@ func golangciUnproducible(reason string) []admission.Unproducible {
 	for _, kind := range kinds {
 		out = append(out, admission.Unproducible{
 			Kind: kind, Reason: reason,
-			Remedy: "install golangci-lint " + tool.GolangciLintPin + " or point GOHARNESS_GOLANGCI_LINT at it",
+			Remedy: "run `goharness setup` to provision the pinned, checksum-verified golangci-lint",
 		})
 	}
 	return out
@@ -614,7 +667,7 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 	}
 	plan := admission.BuildPlan(admission.PlanInput{
 		Contract: in.contract, Risks: risks, BaseAvailable: baseAvailable,
-		RepositoryWide: in.mode == ModeAudit,
+		HasDiff: !in.change.FullScope, RepositoryWide: in.mode == ModeAudit,
 	})
 	headTarget.analyzeOpts = analyzeOptionsFor(risks, in.repository, in.config)
 	headTarget.raceTests = risks.Has(admission.RiskConcurrency)
@@ -680,7 +733,7 @@ func (e *Engine) compareWithBase(
 	basePlan.Checks = baseTarget.checksFor(plan.Checks)
 
 	e.phase = "base"
-	baseRun, err := e.schedule(ctx, basePlan.Checks)
+	baseRun, err := e.baseRun(ctx, in.change.Base, baseTarget, basePlan.Checks)
 	if err != nil {
 		return err
 	}
@@ -706,6 +759,44 @@ func (e *Engine) compareWithBase(
 	out.merge(comparisonRun)
 	evidence.SortPresentation(out.Evidence)
 	return nil
+}
+
+// baseRun produces the base snapshot's evidence, from the cache when one
+// matches this exact revision, scope, policy and toolchain, and by running the
+// checks otherwise.
+func (e *Engine) baseRun(ctx context.Context, base string, t *target, checks []Check) (runOutput, error) {
+	key := e.baseCacheKey(baseCacheInput{
+		base:         base,
+		packages:     t.packages,
+		testPackages: t.testPackages,
+		judged:       t.judged,
+		exempt:       slices.Sorted(maps.Keys(t.exemptFiles)),
+		checks:       checkIDs(checks),
+		analyzeOpts:  describeAnalyzeOptions(t.analyzeOpts),
+		configDigest: e.ConfigDigest,
+	})
+	if !e.NoCache {
+		if cached, ok := e.readBaseSnapshot(key); ok {
+			return cached, nil
+		}
+	}
+	out, err := e.schedule(ctx, checks)
+	if err != nil {
+		return runOutput{}, err
+	}
+	if !e.NoCache && len(out.Failures) == 0 {
+		e.writeBaseSnapshot(key, base, out)
+	}
+	return out, nil
+}
+
+func checkIDs(checks []Check) []string {
+	out := make([]string, 0, len(checks))
+	for _, c := range checks {
+		out = append(out, c.ID)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func analyzeOptionsFor(risks admission.RiskProfile, r repo.Repository, cfg policy.Config) analyze.Options {
@@ -740,15 +831,22 @@ func snapshotIfGit(ctx context.Context, git repo.Git, r repo.Repository) (repo.S
 	return repo.CaptureSnapshot(ctx, git, r.Root)
 }
 
-func loadProjectConfig(root string) (policy.Config, error) {
+// loadProjectConfig reads the project policy and returns a digest of the exact
+// bytes it was parsed from, which is what tells cached evidence apart from
+// evidence produced under a policy that has since been edited.
+func loadProjectConfig(root string) (policy.Config, string, error) {
 	data, err := os.ReadFile(filepath.Join(root, "goharness.yaml"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return policy.Config{}, nil
+			return policy.Config{}, "none", nil
 		}
-		return policy.Config{}, fmt.Errorf("reading goharness.yaml: %w", err)
+		return policy.Config{}, "", fmt.Errorf("reading goharness.yaml: %w", err)
 	}
-	return policy.ParseConfig(data)
+	cfg, err := policy.ParseConfig(data)
+	if err != nil {
+		return policy.Config{}, "", err
+	}
+	return cfg, toolcache.Sum(data), nil
 }
 
 func decorate(p policy.ResolvedPolicy, items []evidence.Evidence) []evidence.Evidence {
@@ -760,6 +858,42 @@ func decorate(p policy.ResolvedPolicy, items []evidence.Evidence) []evidence.Evi
 		out = append(out, e)
 	}
 	return out
+}
+
+// partitionGenerated splits the in-scope files into the ones this run judges
+// and the generated ones it exempts.
+//
+// Generated code is exempt only while the change leaves it alone. A file the
+// change wrote or rewrote is judged in full whatever its header says, because
+// the marker is a claim the author controls: exempting it would turn three
+// words of comment into a suppression for a whole file. The decision reads the
+// head diff in both trees, so a regenerated file is examined at base and at
+// head alike and its unchanged findings stay pre-existing debt.
+func (e *Engine) partitionGenerated(root string, files []string) (judged []string, exempt map[string]bool, err error) {
+	changed := make(map[string]bool, len(e.ChangedEntries))
+	for _, entry := range e.ChangedEntries {
+		if entry.Status != change.StatusDeleted {
+			changed[entry.Path] = true
+		}
+	}
+	judged = make([]string, 0, len(files))
+	exempt = map[string]bool{}
+	for _, rel := range files {
+		if changed[rel] {
+			judged = append(judged, rel)
+			continue
+		}
+		generated, genErr := analyze.IsGenerated(filepath.Join(root, filepath.FromSlash(rel)))
+		if genErr != nil {
+			return nil, nil, genErr
+		}
+		if generated {
+			exempt[rel] = true
+			continue
+		}
+		judged = append(judged, rel)
+	}
+	return judged, exempt, nil
 }
 
 // scopeRestriction mirrors the head scope onto the base worktree so both sides
@@ -805,14 +939,19 @@ func (e *Engine) buildTarget(ctx context.Context, in targetInput) (*target, Exec
 	if err != nil {
 		return nil, ExecutionPlan{}, err
 	}
+	judged, exempt, err := e.partitionGenerated(in.root, files)
+	if err != nil {
+		return nil, ExecutionPlan{}, err
+	}
 
 	t := &target{
 		engine: e, root: in.root, modulePath: in.modulePath, graph: graph,
-		packages: lintPkgs, testPackages: testPkgs, files: files,
+		packages: lintPkgs, testPackages: testPkgs,
+		files: files, judged: judged, exemptFiles: exempt,
 		changed: in.change.GoFiles(), contract: in.contract, isBase: in.isBase,
 	}
 	plan := ExecutionPlan{
-		Mode: in.mode, Packages: lintPkgs, Files: files, Tests: testPkgs,
+		Mode: in.mode, Packages: lintPkgs, Files: judged, Tests: testPkgs,
 	}
 	return t, plan, nil
 }

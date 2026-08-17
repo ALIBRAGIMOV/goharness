@@ -48,7 +48,7 @@ func (s *scanner) checkTestFunc(fn *ast.FuncDecl) {
 			"test "+fn.Name.Name+" skips unconditionally, so its subject is never exercised",
 			evidence.SeverityError, false)
 	}
-	if !s.observesAnything(fn.Body) {
+	if !s.observesAnything(fn.Body) && !delegatesObservation(fn) {
 		s.add(fn.Pos(), policy.RuleTestNoAssertion,
 			"test "+fn.Name.Name+" contains no assertion, error check, state observation, or panic expectation",
 			evidence.SeverityError, false)
@@ -75,6 +75,52 @@ func unconditionalSkip(stmt ast.Stmt) (token.Pos, bool) {
 		return call.Pos(), true
 	}
 	return token.NoPos, false
+}
+
+// delegatesObservation reports a test that hands its *testing.T to a helper.
+//
+// Table-driven tests with a shared assertion helper are the idiomatic Go form,
+// and the scan cannot follow the call to see what the helper checks. What it
+// can see is that the test gave away the only thing that can fail it, and that
+// is not evidence of a test observing nothing. A required rule has to stay
+// silent where it cannot tell; the helper's own weakness, if it has one, shows
+// up as a surviving mutant instead.
+func delegatesObservation(fn *ast.FuncDecl) bool {
+	name := testParameterName(fn)
+	if name == "" {
+		return false
+	}
+	delegated := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if delegated {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		for _, arg := range call.Args {
+			if ident, isIdent := arg.(*ast.Ident); isIdent && ident.Name == name {
+				delegated = true
+				return false
+			}
+		}
+		return true
+	})
+	return delegated
+}
+
+// testParameterName is the name the test gave its *testing.T, which is what a
+// helper has to be passed for the test to be observing through it.
+func testParameterName(fn *ast.FuncDecl) string {
+	if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 {
+		return ""
+	}
+	names := fn.Type.Params.List[0].Names
+	if len(names) != 1 {
+		return ""
+	}
+	return names[0].Name
 }
 
 // observesAnything reports whether the test can fail for a reason other than a

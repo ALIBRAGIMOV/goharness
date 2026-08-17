@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/admission"
+	"github.com/ALIBRAGIMOV/goharness/internal/leakcheck"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
 	"github.com/ALIBRAGIMOV/goharness/internal/report"
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
@@ -21,7 +22,7 @@ import (
 )
 
 // Version is the harness version recorded in every report.
-const Version = "0.4.0"
+const Version = "0.5.0"
 
 // Exit codes. They are the harness's contract with any caller.
 const (
@@ -129,6 +130,7 @@ type verifyFlags struct {
 	noColor     bool
 	logJSON     bool
 	explainPlan bool
+	noCache     bool
 	verbosity   int
 	dir         string
 	base        string
@@ -144,6 +146,7 @@ func bindVerifyFlags(fs *flag.FlagSet, mode verify.Mode) *verifyFlags {
 	fs.BoolVar(&f.noColor, "no-color", false, "never colourise output")
 	fs.BoolVar(&f.logJSON, "log-json", false, "emit diagnostic logs as JSON instead of console format")
 	fs.BoolVar(&f.explainPlan, "explain-plan", false, "print the obligation set and exit")
+	fs.BoolVar(&f.noCache, "no-cache", false, "recompute the base snapshot instead of reusing cached evidence")
 	fs.StringVar(&f.dir, "dir", ".", "directory inside the module to verify")
 	fs.StringVar(&f.base, "base", "", "explicit base revision for comparison (verify only)")
 	fs.StringVar(&f.contract, "contract", "", "task contract file")
@@ -193,7 +196,7 @@ func runVerification(ctx context.Context, command string, args []string, streams
 	result, err := verify.Run(ctx, Version, verify.Options{
 		Mode: mode, Dir: flags.dir, Base: flags.base, ContractPath: flags.contract,
 		Timeout: flags.timeout, Logger: logger, Progress: bar.Handle,
-		PlanOnly: flags.explainPlan,
+		PlanOnly: flags.explainPlan, NoCache: flags.noCache,
 	})
 	bar.Clear()
 	if syncErr := syncLogger(logger); syncErr != nil {
@@ -351,6 +354,9 @@ func runVersion(streams Streams) int {
 	out.line("goharness %s", Version)
 	out.line("go:              %s", tool.GoVersion())
 	out.line("golangci-lint:   %s (exact pin)", tool.GolangciLintPin)
+	out.line("x/vuln:          %s (embedded)", tool.XVulnVersion())
+	out.line("goleak:          %s (vendored)", leakcheck.Version)
+	out.line("go fix:          %d analyzers, from the toolchain above", len(policy.GoFixAnalyzers()))
 	out.line("uber guide:      %s", policy.UberGuideCommit)
 	out.line("report schema:   %s", report.SchemaID)
 	return exitFor(out, ExitAdmitted)

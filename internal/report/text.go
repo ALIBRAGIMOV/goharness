@@ -115,6 +115,11 @@ func writeHeader(b *strings.Builder, p Palette, version string, r verify.Result)
 		fmt.Fprintf(b, " (%s)", r.Contract.Goal)
 	}
 	b.WriteString("\n")
+	if grants := r.Contract.IgnoredGrants; len(grants) > 0 {
+		fmt.Fprintf(b, "%s\n", p.warn(fmt.Sprintf(
+			"contract grants ignored: %s (not committed at the base revision)",
+			strings.Join(grants, ", "))))
+	}
 	writeScope(b, r)
 	if len(r.Risks.Active) > 0 {
 		names := make([]string, 0, len(r.Risks.Active))
@@ -223,6 +228,9 @@ func writeFindings(b *strings.Builder, p Palette, r verify.Result) {
 		for _, e := range items {
 			fmt.Fprintf(b, "  %s %s %s%s\n      %s\n",
 				marker(p, e), p.dim(e.RuleID), p.accent(location(e)), stateSuffix(e), e.Message)
+			if e.Fix != nil {
+				fmt.Fprintf(b, "      %s\n", p.dim("fix: "+e.Fix.Command))
+			}
 			rules[e.RuleID] = true
 		}
 		for _, ruleID := range slices.Sorted(mapKeys(rules)) {

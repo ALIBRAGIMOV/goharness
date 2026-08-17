@@ -82,9 +82,11 @@ func APIBreakFindings(base, head map[string]string) []Finding {
 		switch {
 		case !present:
 			out = append(out, Finding{
-				RuleID:   policy.RuleAPIBreak,
-				File:     pkgPath,
-				Message:  "exported symbol " + symbol + " was removed from " + pkgPath,
+				RuleID: policy.RuleAPIBreak,
+				File:   pkgPath,
+				Message: "exported symbol " + symbol + " was removed from " + pkgPath +
+					"; keeping it as a shim marked " + fixInlineDirective +
+					" would let every caller migrate with go fix instead of by hand",
 				Severity: evidence.SeverityError,
 			})
 		case headType != base[key]:

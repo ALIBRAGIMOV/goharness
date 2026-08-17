@@ -3,13 +3,17 @@ package change
 import (
 	"context"
 	"fmt"
+	"go/build"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
+
+	"github.com/ALIBRAGIMOV/goharness/internal/tool"
 )
 
 // Package is one loaded Go package, reduced to what scoping needs.
@@ -23,11 +27,17 @@ type Package struct {
 }
 
 // PackageError is a load or type-check error attached to a package.
+//
+// Resolution separates the two kinds apart from each other for good: a package
+// that does not parse or does not type-check is a defect in the change, while a
+// package the go command could not even list is a module the machine could not
+// obtain. The first is evidence; the second is a run that established nothing.
 type PackageError struct {
-	File    string
-	Line    int
-	Column  int
-	Message string
+	File       string
+	Line       int
+	Column     int
+	Message    string
+	Resolution bool
 }
 
 // PackageGraph is the loaded module with a precomputed reverse-dependency
@@ -58,6 +68,10 @@ func LoadGraph(ctx context.Context, dir string) (PackageGraph, error) {
 		Mode:    graphLoadMode,
 		Dir:     dir,
 		Tests:   false,
+		// The loader shells out to the go command, so it gets the same sanitised
+		// environment as every other subprocess: GOFLAGS could otherwise add build
+		// tags and change which files this graph contains at all.
+		Env: tool.VerificationEnv(nil),
 	}
 	loaded, err := packages.Load(cfg, "./...")
 	if err != nil {
@@ -110,6 +124,7 @@ func reducePackage(p *packages.Package) Package {
 		file, line, col := splitPos(e.Pos)
 		out.Errors = append(out.Errors, PackageError{
 			File: file, Line: line, Column: col, Message: e.Msg,
+			Resolution: e.Kind == packages.ListError,
 		})
 	}
 	return out
@@ -146,11 +161,27 @@ func (g PackageGraph) Packages() []string {
 	return out
 }
 
-// Errors returns every load and type-check error in the graph, sorted.
+// Errors returns the parse and type-check errors in the graph, sorted. They are
+// defects in the code and belong in the report as evidence.
 func (g PackageGraph) Errors() []PackageError {
+	return g.errorsWhere(false)
+}
+
+// ResolutionErrors returns the errors that stopped the go command from listing a
+// package at all, which is a module the machine could not obtain rather than
+// anything the change did.
+func (g PackageGraph) ResolutionErrors() []PackageError {
+	return g.errorsWhere(true)
+}
+
+func (g PackageGraph) errorsWhere(resolution bool) []PackageError {
 	var out []PackageError
 	for _, path := range g.Packages() {
-		out = append(out, g.packages[path].Errors...)
+		for _, e := range g.packages[path].Errors {
+			if e.Resolution == resolution {
+				out = append(out, e)
+			}
+		}
 	}
 	return out
 }
@@ -254,6 +285,84 @@ func (g PackageGraph) FilesFor(pkgPaths []string) ([]string, error) {
 		}
 	}
 	return sortedKeys(set), nil
+}
+
+// Unexamined is a changed Go file that no check in this run could look at,
+// together with the reason the toolchain passed it over.
+type Unexamined struct {
+	Path   string
+	Reason string
+}
+
+// Unexamined returns the changed Go files that this run's build configuration
+// excludes from every package, so a caller can report the gap instead of
+// mistaking silence for approval.
+//
+// Deleted files have nothing left to examine, and the directories Go itself
+// never builds (testdata, vendor, and names beginning with a dot or an
+// underscore) hold no code this module compiles. Everything else that no
+// package claims is a file the change altered and nothing checked.
+func (g PackageGraph) Unexamined(entries []Entry) []Unexamined {
+	compiled := g.compiledFiles()
+	var out []Unexamined
+	for _, e := range entries {
+		if e.Status == StatusDeleted || !strings.HasSuffix(e.Path, ".go") || excludedByConvention(e.Path) {
+			continue
+		}
+		if compiled[e.Path] {
+			continue
+		}
+		dir := filepath.Join(g.Root, filepath.FromSlash(path.Dir(e.Path)))
+		name := path.Base(e.Path)
+		if _, isPackage := g.byDir[dir]; isPackage && strings.HasSuffix(name, "_test.go") {
+			if matched, err := build.Default.MatchFile(dir, name); err == nil && matched {
+				continue
+			}
+		}
+		out = append(out, Unexamined{Path: e.Path, Reason: exclusionReason(dir, name)})
+	}
+	return out
+}
+
+func exclusionReason(dir, name string) string {
+	matched, err := build.Default.MatchFile(dir, name)
+	switch {
+	case err != nil:
+		return "its build constraints could not be read: " + err.Error()
+	case !matched:
+		return fmt.Sprintf("build constraints exclude it from GOOS=%s GOARCH=%s",
+			build.Default.GOOS, build.Default.GOARCH)
+	default:
+		return "no package in this module compiles it"
+	}
+}
+
+// compiledFiles is every module-relative file the loader placed in a package
+// for this build configuration.
+func (g PackageGraph) compiledFiles() map[string]bool {
+	out := map[string]bool{}
+	for _, pkg := range g.packages {
+		for _, abs := range pkg.GoFiles {
+			rel, err := filepath.Rel(g.Root, abs)
+			if err != nil {
+				continue
+			}
+			out[filepath.ToSlash(rel)] = true
+		}
+	}
+	return out
+}
+
+// excludedByConvention reports the directories the go command never builds from,
+// so a change inside them is not a gap in coverage.
+func excludedByConvention(rel string) bool {
+	for segment := range strings.SplitSeq(path.Dir(rel), "/") {
+		if segment == "testdata" || segment == "vendor" ||
+			strings.HasPrefix(segment, "_") || strings.HasPrefix(segment, ".") {
+			return true
+		}
+	}
+	return false
 }
 
 // DirAndName returns a package's absolute directory and its package name.

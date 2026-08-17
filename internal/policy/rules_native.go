@@ -15,6 +15,7 @@ const (
 	RuleSuppressRevive      = "GH-SUPPRESS-004"
 	RulePolicyEdit          = "GH-POLICY-001"
 	RuleGeneratedEdit       = "GH-POLICY-002"
+	RulePolicyGrant         = "GH-POLICY-003"
 	RuleCommentEmDash       = "GH-COMMENT-001"
 	RuleCommentSize         = "GH-COMMENT-002"
 	RuleCommentRestates     = "GH-COMMENT-003"
@@ -23,6 +24,9 @@ const (
 	RuleTestEmpty           = "GH-TEST-003"
 	RuleTestTautology       = "GH-TEST-004"
 	RuleTestIgnoredError    = "GH-TEST-005"
+	RuleForwardingLayer     = "GH-SIMP-001"
+	RuleSoleImplementation  = "GH-SIMP-002"
+	RuleDeprecatedNoInline  = "GH-DEPRECATE-001"
 )
 
 const goDocFormat = "https://pkg.go.dev/cmd/gofmt"
@@ -103,7 +107,33 @@ func goCoreRules() []Rule {
 }
 
 func agentHygieneRules() []Rule {
-	const hygieneDoc = "https://github.com/ALIBRAGIMOV/goharness/blob/main/docs/architecture.md#native-checks-agent-hygiene"
+	rules := append(suppressionRules(), gateIntegrityRules()...)
+	rules = append(rules, simplicityRules()...)
+	return append(rules, migrationRules()...)
+}
+
+// migrationRules cover a deprecation the author left as manual work. Advisory
+// and experimental: the harness asks for the directive, it does not yet refuse
+// a change without one.
+func migrationRules() []Rule {
+	return []Rule{
+		{
+			ID:             RuleDeprecatedNoInline,
+			Title:          "Deprecated declaration without a //go:fix inline directive",
+			Pack:           PackAgentHygiene,
+			Classification: ClassAdvisory,
+			Lifecycle:      LifecycleExperimental,
+			Rationale:      "A deprecation notice asks every caller to migrate by hand, and the shim then outlives the release it was written for. When the replacement is a single call or value, a //go:fix inline directive lets `go fix` perform that migration at every call site, in this module and in every consumer of it. Advisory because a scanner cannot see whether the author intends the substitution to be automatic.",
+			Enforcement:    "native AST scanner (internal/analyze)",
+			DocURL:         "https://go.dev/blog/gofix",
+		},
+	}
+}
+
+// hygieneDoc is the one place the agent-hygiene rules point a reader at.
+const hygieneDoc = "https://github.com/ALIBRAGIMOV/goharness/blob/main/docs/architecture.md#native-checks-agent-hygiene"
+
+func suppressionRules() []Rule {
 	return []Rule{
 		{
 			ID:             RuleSuppressNolint,
@@ -145,6 +175,11 @@ func agentHygieneRules() []Rule {
 			Enforcement:    "native comment scanner (internal/analyze)",
 			DocURL:         hygieneDoc,
 		},
+	}
+}
+
+func gateIntegrityRules() []Rule {
+	return []Rule{
 		{
 			ID:             RulePolicyEdit,
 			Title:          "Change modifies the quality policy",
@@ -153,6 +188,16 @@ func agentHygieneRules() []Rule {
 			Lifecycle:      LifecycleRequired,
 			Rationale:      "A change that edits goharness.yaml or the task contract is altering its own admission gate; that requires an explicit human decision, recorded as allowPolicyEdit in the contract, never a silent edit.",
 			Enforcement:    "changed-entry scan (internal/verify), head only",
+			DocURL:         hygieneDoc,
+		},
+		{
+			ID:             RulePolicyGrant,
+			Title:          "Change grants itself a contract permission",
+			Pack:           PackAgentHygiene,
+			Classification: ClassRequired,
+			Lifecycle:      LifecycleRequired,
+			Rationale:      "Contract grants such as allowPolicyEdit and allowApiBreak weaken the gate, so they count only when they were committed at the base revision, before the change existed. A grant that appears in the working tree is a change authorising itself, and the harness never honours it.",
+			Enforcement:    "contract merge (internal/admission), head only",
 			DocURL:         hygieneDoc,
 		},
 		{
@@ -194,6 +239,36 @@ func agentHygieneRules() []Rule {
 			Rationale:      "A comment that repeats the next statement carries no information and rots independently of the code.",
 			Enforcement:    "native token-overlap heuristic (internal/analyze)",
 			DocURL:         hygieneDoc,
+		},
+	}
+}
+
+// simplicityRules cover the structure a change adds without needing it. Both
+// enter as advisory: the harness's own lifecycle says a rule earns required
+// status by being right on real code, and the corpus run is where that is
+// measured.
+func simplicityRules() []Rule {
+	const simplicityDoc = "https://github.com/ALIBRAGIMOV/goharness/blob/main/docs/admission-model.md#quality-dimensions-and-their-evidence"
+	return []Rule{
+		{
+			ID:             RuleForwardingLayer,
+			Title:          "Function only forwards its arguments",
+			Pack:           PackAgentHygiene,
+			Classification: ClassAdvisory,
+			Lifecycle:      LifecycleExperimental,
+			Rationale:      "A function whose body hands its arguments to another function unchanged adds a name and a hop, and every reader now opens two functions to learn what one does. Advisory because an interface implementation or a deprecation shim can look identical.",
+			Enforcement:    "native AST scanner (internal/analyze)",
+			DocURL:         simplicityDoc,
+		},
+		{
+			ID:             RuleSoleImplementation,
+			Title:          "Unexported interface with a single implementation",
+			Pack:           PackAgentHygiene,
+			Classification: ClassAdvisory,
+			Lifecycle:      LifecycleExperimental,
+			Rationale:      "An unexported interface that exactly one type in its own package satisfies describes a type that already exists. Go interfaces earn their keep at the consumer, with a second implementation or a test seam behind them; exported ones are excluded because they are a package's contract with the outside.",
+			Enforcement:    "native AST scanner (internal/analyze)",
+			DocURL:         simplicityDoc,
 		},
 	}
 }

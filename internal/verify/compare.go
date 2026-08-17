@@ -124,12 +124,8 @@ func (c *comparison) runBenchmarks(ctx context.Context) (checkResult, error) {
 	if len(patterns) == 0 {
 		return checkResult{unproducible: unmeasurableBench("no package in scope could be benchmarked")}, nil
 	}
-	headResults, err := tool.RunBenchmarks(ctx, c.engine.Runner, c.head.root, patterns)
-	if err != nil {
-		return checkResult{}, err
-	}
 	basePatterns := c.base.graph.PatternsFor(c.base.testPackages)
-	baseResults, err := tool.RunBenchmarks(ctx, c.engine.Runner, c.base.root, basePatterns)
+	baseResults, headResults, err := c.sampleBenchmarks(ctx, basePatterns, patterns)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -144,6 +140,33 @@ func (c *comparison) runBenchmarks(ctx context.Context) (checkResult, error) {
 		out = append(out, c.compareBenchmark(name, baseResults[name], headResults[name])...)
 	}
 	return checkResult{evidence: out}, nil
+}
+
+// sampleBenchmarks measures both revisions, alternating between them.
+//
+// Interleaving is the whole point. A machine's load drifts over the minutes a
+// comparison takes, and measuring one revision to completion and then the other
+// turns that drift into a regression report for every benchmark at once, which
+// is exactly what a run against a real repository produced. Alternating gives
+// both sides the same conditions, so what survives the comparison is the change
+// rather than the weather.
+func (c *comparison) sampleBenchmarks(
+	ctx context.Context, basePatterns, headPatterns []string,
+) (base, head map[string]tool.BenchResult, err error) {
+	base, head = map[string]tool.BenchResult{}, map[string]tool.BenchResult{}
+	for range tool.BenchSamples {
+		baseSample, err := tool.RunBenchmarks(ctx, c.engine.Runner, c.base.root, basePatterns)
+		if err != nil {
+			return nil, nil, err
+		}
+		headSample, err := tool.RunBenchmarks(ctx, c.engine.Runner, c.head.root, headPatterns)
+		if err != nil {
+			return nil, nil, err
+		}
+		tool.MergeBenchResults(base, baseSample)
+		tool.MergeBenchResults(head, headSample)
+	}
+	return base, head, nil
 }
 
 func unmeasurableBench(reason string) []admission.Unproducible {
@@ -163,17 +186,18 @@ func (c *comparison) compareBenchmark(name string, base, head tool.BenchResult) 
 	budget := c.head.contract.BudgetFor(name)
 	var out []evidence.Evidence
 
-	if timeRise, regressed := regression(base.MedianNs(), head.MedianNs(),
-		budget.MaxTimeIncreasePercent, head.SpreadNs()); regressed {
+	if timeRise, regressed := timeRegression(base, head, budget.MaxTimeIncreasePercent); regressed {
+		baseFastest, baseSlowest := base.RangeNs()
+		headFastest, headSlowest := head.RangeNs()
 		out = append(out, c.head.engine.Policy.Decorate(c.head.newEvidence(
 			policy.RuleBenchTimeDelta, "go test -bench", tool.GoVersion(),
 			evidence.SeverityError, "", 0, 0, "",
-			fmt.Sprintf("%s slowed by %.1f%% (%.0f to %.0f ns/op), past the %.0f%% budget and the %.1f%% sample spread",
-				name, timeRise, base.MedianNs(), head.MedianNs(),
-				budget.MaxTimeIncreasePercent, head.SpreadNs()))))
+			fmt.Sprintf("%s slowed by %.1f%% past the %.0f%% budget: every head sample (%.0f to %.0f ns/op) is slower than every base sample (%.0f to %.0f ns/op)",
+				name, timeRise, budget.MaxTimeIncreasePercent,
+				headFastest, headSlowest, baseFastest, baseSlowest))))
 	}
 	if allocRise, regressed := regression(base.MedianAllocs(), head.MedianAllocs(),
-		budget.MaxAllocIncreasePercent, 0); regressed {
+		budget.MaxAllocIncreasePercent); regressed {
 		out = append(out, c.head.engine.Policy.Decorate(c.head.newEvidence(
 			policy.RuleBenchAllocDelta, "go test -bench", tool.GoVersion(),
 			evidence.SeverityError, "", 0, 0, "",
@@ -184,12 +208,29 @@ func (c *comparison) compareBenchmark(name string, base, head tool.BenchResult) 
 	return out
 }
 
-// regression reports the percentage rise and whether it exceeds both the budget
-// and the observed sample spread, so measurement noise never fails a claim.
-func regression(base, head, budgetPercent, spreadPercent float64) (float64, bool) {
+// timeRegression reports a benchmark that got slower by more than its budget
+// and did so beyond any doubt the samples leave.
+//
+// Beyond doubt means the two sample ranges do not overlap: the fastest run at
+// head is still slower than the slowest run at base. Timing a nanosecond-scale
+// benchmark on a machine that is doing anything else produces swings of tens of
+// percent, and a gate that rejected a change over one of those would be teaching
+// its users to ignore it. A real regression separates the ranges; noise does not.
+func timeRegression(base, head tool.BenchResult, budgetPercent float64) (float64, bool) {
+	rise, over := regression(base.MedianNs(), head.MedianNs(), budgetPercent)
+	if !over {
+		return rise, false
+	}
+	_, baseSlowest := base.RangeNs()
+	headFastest, _ := head.RangeNs()
+	return rise, headFastest > baseSlowest
+}
+
+// regression reports the percentage rise and whether it exceeds the budget.
+func regression(base, head, budgetPercent float64) (float64, bool) {
 	if base <= 0 {
 		return 0, false
 	}
 	rise := (head - base) / base * 100
-	return rise, rise > budgetPercent && rise > spreadPercent
+	return rise, rise > budgetPercent
 }

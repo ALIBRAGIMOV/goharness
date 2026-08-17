@@ -45,7 +45,7 @@ func Resolve(cfg Config, now time.Time) (ResolvedPolicy, error) {
 	}
 	return ResolvedPolicy{
 		packs: []string{
-			PackGoCore, PackGolangciStrict, PackUberGuide,
+			PackGoCore, PackGoFix, PackGolangciStrict, PackUberGuide,
 			PackAgentHygiene, PackTestEffectiveness,
 		},
 		rules:      rules,

@@ -62,25 +62,37 @@ func commentBody(text string) string {
 	return strings.TrimSuffix(rest, "*/")
 }
 
+// scanDocSizes budgets documentation comments.
+//
+// The package comment is exempt. Go convention puts a package's whole
+// introduction there, often in a doc.go of its own, and the standard library
+// runs to hundreds of lines; a budget on it would only teach people to split
+// documentation into places readers do not look.
 func (s *scanner) scanDocSizes() {
 	for _, decl := range s.file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			s.checkDocSize(d.Doc, "func "+d.Name.Name)
+			s.checkDocSize(d.Doc, "func "+d.Name.Name, s.bodyLines(d))
 		case *ast.GenDecl:
-			s.checkDocSize(d.Doc, d.Tok.String()+" declaration")
+			s.checkDocSize(d.Doc, d.Tok.String()+" declaration", 0)
 		}
 	}
-	s.checkDocSize(s.file.Doc, "package "+s.file.Name.Name)
 }
 
-func (s *scanner) checkDocSize(doc *ast.CommentGroup, subject string) {
+// checkDocSize reports a comment that has outgrown what it documents.
+//
+// Over the required budget, the code it sits above has to be shorter than the
+// comment before the finding blocks. That is the shape the rule exists for: an
+// essay above a function that does almost nothing. A long comment on a long,
+// intricate exported function is documentation doing its job, and a gate that
+// rejected it would be asking for worse code.
+func (s *scanner) checkDocSize(doc *ast.CommentGroup, subject string, bodyLines int) {
 	if doc == nil {
 		return
 	}
 	lines := countCommentLines(doc)
 	switch {
-	case lines > docCommentRequiredLines:
+	case lines > docCommentRequiredLines && lines > bodyLines:
 		s.add(doc.Pos(), policy.RuleCommentSize,
 			commentSizeMessage(subject, lines, docCommentRequiredLines),
 			evidence.SeverityError, false)
@@ -89,6 +101,16 @@ func (s *scanner) checkDocSize(doc *ast.CommentGroup, subject string) {
 			commentSizeMessage(subject, lines, docCommentAdvisoryLines),
 			evidence.SeverityWarning, true)
 	}
+}
+
+// bodyLines is how many lines of code the comment is speaking about.
+func (s *scanner) bodyLines(fn *ast.FuncDecl) int {
+	if fn.Body == nil {
+		return 0
+	}
+	start := s.fset.Position(fn.Body.Lbrace).Line
+	end := s.fset.Position(fn.Body.Rbrace).Line
+	return end - start + 1
 }
 
 func commentSizeMessage(subject string, lines, budget int) string {

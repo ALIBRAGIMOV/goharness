@@ -63,8 +63,12 @@ type EvidenceKind string
 // Evidence obligations. Each is produced by exactly one check; a check may
 // produce several.
 const (
+	KindChangeVisible     EvidenceKind = "change-visible"
 	KindCompileClean      EvidenceKind = "compile-clean"
 	KindVetClean          EvidenceKind = "vet-clean"
+	KindFixScan           EvidenceKind = "fix-scan"
+	KindInlineMigration   EvidenceKind = "inline-migration"
+	KindDialAddress       EvidenceKind = "dial-address"
 	KindTestsPass         EvidenceKind = "tests-pass"
 	KindLintCorrectness   EvidenceKind = "lint-correctness"
 	KindLintReliability   EvidenceKind = "lint-reliability"

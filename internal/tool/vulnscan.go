@@ -85,6 +85,7 @@ func RunVulnScan(ctx context.Context, dir, dbURL string, patterns []string) ([]V
 
 	var stdout, stderr bytes.Buffer
 	cmd := scan.Command(ctx, args...)
+	cmd.Env = VerificationEnv(nil)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

@@ -52,8 +52,10 @@ func runDoctor(ctx context.Context, args []string, streams Streams) int {
 	}
 
 	healthy = reportGolangci(ctx, out, runner, r) && healthy
+	healthy = reportGoFix(ctx, out, runner, *dir) && healthy
 	healthy = reportStaleWorktrees(ctx, out, git, r) && healthy
 	reportPath(out)
+	reportSubprocessEnv(out)
 
 	reportScanner(out)
 	cache, cacheHealthy := reportCache(out)
@@ -64,7 +66,7 @@ func runDoctor(ctx context.Context, args []string, streams Streams) int {
 	out.line("uber guide pin: %s", policy.UberGuideCommit)
 	out.line("report schema:  %s", report.SchemaID)
 	out.line("policy packs:   %s", strings.Join([]string{
-		policy.PackGoCore, policy.PackGolangciStrict, policy.PackUberGuide,
+		policy.PackGoCore, policy.PackGoFix, policy.PackGolangciStrict, policy.PackUberGuide,
 		policy.PackAgentHygiene, policy.PackTestEffectiveness,
 		policy.PackArchitecture, policy.PackMaintainability, policy.PackDiffEvidence,
 	}, ", "))
@@ -78,9 +80,56 @@ func runDoctor(ctx context.Context, args []string, streams Streams) int {
 	return ExitInconclusive
 }
 
+// reportSubprocessEnv names the settings the harness takes away from the
+// commands it runs, so a developer whose local GOFLAGS stop applying can see
+// why here rather than guessing at a verdict that disagrees with their shell.
+func reportSubprocessEnv(out *printer) {
+	var present []string
+	for _, name := range []string{"GOFLAGS", "GOTOOLCHAIN"} {
+		if value := os.Getenv(name); value != "" {
+			present = append(present, name+"="+value)
+		}
+	}
+	out.line("%s subprocess env GOFLAGS and GOTOOLCHAIN are not inherited; %s",
+		mark(true), tool.ForcedToolchain)
+	if len(present) > 0 {
+		out.line("      your shell sets %s; verification runs without it", strings.Join(present, ", "))
+	}
+}
+
 // reportScanner shows the embedded scanner. There is no PATH probe: the
 // scanner is a library dependency of this binary, so it is present exactly when
 // the binary is.
+// reportGoFix compares the analyzer set the policy declares with the one the
+// installed toolchain registers.
+//
+// An enabled analyzer the toolchain does not have breaks the run, so it is a
+// problem here. One the toolchain added and the policy never classified is not:
+// the verdict stays trustworthy on the analyzers that did run. It is reported
+// because nothing else would ever say so, and an analyzer silently not running
+// is how a gate loses coverage between toolchain releases.
+func reportGoFix(ctx context.Context, out *printer, runner tool.Runner, dir string) bool {
+	enabled := policy.GoFixAnalyzers()
+	support, err := tool.InspectFixAnalyzers(ctx, runner, dir, enabled, policy.GoFixKnownAnalyzers())
+	if err != nil {
+		out.line("%s go fix         %v", mark(false), err)
+		out.line("      fix: run `go tool fix help` to see what this toolchain provides")
+		return false
+	}
+	if len(support.Missing) > 0 {
+		out.line("%s go fix         %s does not register %s", mark(false),
+			tool.GoVersion(), strings.Join(support.Missing, ", "))
+		out.line("      fix: install the pinned Go toolchain, or reclassify those analyzers in the registry")
+		return false
+	}
+	out.line("%s go fix         %d analyzers enabled, read-only (-json)", mark(true), len(enabled))
+	if len(support.Unregistered) > 0 {
+		out.line("      note: this toolchain also offers %s, which the policy has not classified",
+			strings.Join(support.Unregistered, ", "))
+	}
+	return true
+}
+
 func reportScanner(out *printer) {
 	out.line("%s vuln scanner   embedded golang.org/x/vuln %s", mark(true),
 		orUnknown(tool.XVulnVersion()))
@@ -225,8 +274,11 @@ func reportPath(out *printer) {
 	out.line("%s PATH           %d entries", mark(len(entries) > 0), len(entries))
 }
 
-const golangciInstall = "GOBIN=$PWD/.tools go install " +
-	"github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v" + tool.GolangciLintPin
+// golangciInstall is the only route that ends in a trusted binary. A locally
+// built one reports the pinned version and hashes to something else, so the
+// harness will not use it; provisioning downloads the pinned release and
+// verifies it against the checksum shipped in this binary.
+const golangciInstall = "goharness setup"
 
 func reportGolangci(ctx context.Context, out *printer, runner tool.Runner, r repo.Repository) bool {
 	g, err := tool.DiscoverGolangci(r.Root)
@@ -244,10 +296,13 @@ func reportGolangci(ctx context.Context, out *printer, runner tool.Runner, r rep
 	if !g.MatchesPin() {
 		out.line("%s golangci-lint  %s reports %s, pinned %s", mark(false), g.Path, g.Version, tool.GolangciLintPin)
 		out.line("      fix: %s", golangciInstall)
-		out.line("      or:  export %s=/path/to/golangci-lint", tool.GolangciLintEnvVar)
 		return false
 	}
-	out.line("%s golangci-lint  %s (%s, matches pin, via %s)", mark(true), g.Version, g.Path, g.Source)
+	out.line("%s golangci-lint  %s (%s, sha256 %s, via %s)",
+		mark(true), g.Version, g.Path, g.SHA256[:12], g.Source)
+	if g.Note != "" {
+		out.line("      passed over: %s", g.Note)
+	}
 	return true
 }
 

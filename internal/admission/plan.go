@@ -14,6 +14,7 @@ const (
 	ProducerModTidy      = "modtidy"
 	ProducerNative       = "native"
 	ProducerVet          = "vet"
+	ProducerGoFix        = "gofix"
 	ProducerGolangci     = "golangci-lint"
 	ProducerTest         = "test"
 	ProducerRaceTest     = "race-test"
@@ -22,6 +23,7 @@ const (
 	ProducerClone        = "clone-scan"
 	ProducerScope        = "scope-scan"
 	ProducerPolicyGuard  = "policy-guard"
+	ProducerVisibility   = "change-visibility"
 	ProducerMigration    = "migration-scan"
 	ProducerWorktree     = "worktree-guard"
 	ProducerAPICompat    = "api-compat"
@@ -57,9 +59,13 @@ type VerificationPlan struct {
 
 // PlanInput is what the planner needs beyond the contract and risk profile.
 type PlanInput struct {
-	Contract       TaskContract
-	Risks          RiskProfile
-	BaseAvailable  bool
+	Contract      TaskContract
+	Risks         RiskProfile
+	BaseAvailable bool
+	// HasDiff records that the run has a real change set to reason about, as
+	// opposed to a whole tree taken as the subject. Obligations about the change
+	// itself have no subject without one.
+	HasDiff        bool
 	RepositoryWide bool
 }
 
@@ -80,6 +86,9 @@ func BuildPlan(in PlanInput) VerificationPlan {
 	const always = "applies to every change"
 	add(KindCompileClean, ProducerCompile, DimCorrectness, always)
 	add(KindVetClean, ProducerVet, DimCorrectness, always)
+	add(KindFixScan, ProducerGoFix, DimSimplicity, always)
+	add(KindInlineMigration, ProducerGoFix, DimMaintainability, always)
+	add(KindDialAddress, ProducerGoFix, DimReliability, always)
 	// A -race run executes the same tests, so when concurrency risk activates
 	// it the plain run would only repeat work. One producer discharges both
 	// obligations rather than the suite running twice.
@@ -105,6 +114,10 @@ func BuildPlan(in PlanInput) VerificationPlan {
 	add(KindPolicyGuard, ProducerPolicyGuard, DimPolicyIntegrity, always)
 	add(KindWorktreeReadOnly, ProducerWorktree, DimPolicyIntegrity, always)
 
+	if in.HasDiff {
+		add(KindChangeVisible, ProducerVisibility, DimCorrectness,
+			"a change is only judged where the toolchain can see it")
+	}
 	if in.Contract.HasScope() {
 		add(KindScopeConformance, ProducerScope, DimRequirements, "the contract declares a scope")
 	}
@@ -178,9 +191,11 @@ func checksFor(obligations []RequiredEvidence) []PlannedCheck {
 		ProducerClone:        {ID: ProducerClone, Tool: "goharness"},
 		ProducerScope:        {ID: ProducerScope, Tool: "goharness"},
 		ProducerPolicyGuard:  {ID: ProducerPolicyGuard, Tool: "goharness"},
+		ProducerVisibility:   {ID: ProducerVisibility, Tool: "go/build"},
 		ProducerMigration:    {ID: ProducerMigration, Tool: "goharness"},
 		ProducerWorktree:     {ID: ProducerWorktree, Tool: "git"},
 		ProducerVet:          {ID: ProducerVet, Tool: "go vet", DependsOn: []string{ProducerCompile}},
+		ProducerGoFix:        {ID: ProducerGoFix, Tool: "go fix", DependsOn: []string{ProducerCompile}},
 		ProducerGolangci:     {ID: ProducerGolangci, Tool: "golangci-lint", DependsOn: []string{ProducerCompile}},
 		ProducerTest:         {ID: ProducerTest, Tool: "go test", DependsOn: []string{ProducerCompile}},
 		ProducerRaceTest:     {ID: ProducerRaceTest, Tool: "go test -race", DependsOn: []string{ProducerCompile}},

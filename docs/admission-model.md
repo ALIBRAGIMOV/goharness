@@ -1,4 +1,4 @@
-# goharness Admission Model (v0.2)
+# goharness Admission Model (v0.5)
 
 Status: accepted. Extends `docs/architecture.md`. Where the two conflict,
 this document wins.
@@ -29,6 +29,22 @@ What the change claims to accomplish. Sources, in priority order:
 2. `goharness.task.yaml` at the repo root;
 3. the implicit default contract: "this change must be admissible under the
    strict policy" with no declared scope or risks.
+
+Grants are read from the base revision alone (normative). The contract has two
+kinds of field. Declarations can only make the gate stricter: a goal, a scope
+where the base declares none, additional risk domains. Grants make it weaker:
+`allowApiBreak`, `allowPolicyEdit`, and benchmark budgets. A change cannot widen
+the permissions it is judged under, so the effective contract takes its grants
+from the copy committed at the base revision (`git show <base>:...`), where the
+change under verification could not have written them, and its declarations from
+either side.
+
+A working-tree contract asking for a grant the base does not give it gets
+nothing, and the refusal is reported: the fields are listed in the contract block
+of the report as `ignoredGrants`, and `GH-POLICY-003` fails policy integrity so
+the attempt is visible rather than silently inert. The route to a grant is
+therefore the one a human takes anyway: commit the contract in a revision that
+precedes the change it authorises.
 
 Fields: `Goal` (free text, recorded in the report), `DeclaredScope`
 (path/package globs the change is allowed to touch), `DeclaredRisks`
@@ -117,7 +133,7 @@ so a reviewer can see why each check ran.
 
 Replaces the bare verdict. Contains the final verdict, every QualityClaim
 with its state and reasons, the evidence set (new/preexisting/fixed), the
-unmet obligations, and `sufficient_for_completion` (true only for
+unmet obligations, and `sufficientForCompletion` (true only for
 `verify`/`audit`, always false for `fast`).
 
 Decision rule, exactly:
@@ -134,14 +150,14 @@ claims that own them.
 | Dimension | Applicability | Evidence producers |
 |---|---|---|
 | requirements-compliance | contract present (else N/A) | scope conformance scan against DeclaredScope |
-| correctness | always | compile, go vet, go test, correctness-class linters |
-| simplicity | always | native complexity/nesting/length metrics on changed functions |
-| maintainability | always | MaintainabilityDelta base/head |
+| correctness | always | compile, go vet, go test, correctness-class linters, change-visibility scan |
+| simplicity | always | native complexity/nesting/length metrics on changed functions, forwarding-layer and sole-implementation scans (advisory), `go fix` modernizers (`fix-scan`, advisory) |
+| maintainability | always | MaintainabilityDelta base/head, `go fix` migration analyzers (`inline-migration`: calls of APIs marked `//go:fix inline`, obsolete `+build` lines), deprecated declarations left without a `//go:fix inline` directive (advisory) |
 | architecture | always | layout policy (banned package names, internal boundary violations, dependency direction rules from config) |
 | appropriate-reuse | always | duplication detection on changed code (dupl-class linter plus native diff-local clone scan), advisory-first |
 | concurrency-safety | concurrency risk | `go test -race` on affected packages (required evidence), goroutine lifecycle scan (goroutine launched without ctx/done/WaitGroup path), and runtime goroutine-leak evidence: an embedded pinned goleak is injected into every affected test package through a build overlay, with zero user setup. A package that already declares TestMain cannot be injected; its leak obligation is INCONCLUSIVE with the remedy spelled out, never a silent pass |
 | bounded-resources | concurrency or network risk | native scans: goroutine spawn in unbounded loop, `time.After` in loop, unbounded buffered channels from variable sizes, missing `http.Client` timeout |
-| reliability | always; stricter under network risk | errcheck/errorlint class, panic-in-library scan; network risk adds timeout, cancellation (noctx-class), and bounded-retry scans |
+| reliability | always; stricter under network risk | errcheck/errorlint class, panic-in-library scan, `go fix` address-format analyzer (`dial-address`); network risk adds timeout, cancellation (noctx-class), and bounded-retry scans |
 | test-effectiveness | always; stricter under tests risk | GH-TEST-* natives; tests risk adds anti-weakening diff and mutation evidence |
 | performance | hot-path risk | base/head benchmark comparison with -benchmem |
 | security | always | gosec-class linters; audit scope adds govulncheck |
@@ -179,10 +195,39 @@ operators, negate branch conditions, swap boolean literals, replace
 mutants per run, 60s per mutant, 5 minute total; tests run only in the
 mutated package and its direct importers, `-count=1`.
 
-Outcomes: any mutant killed by a failing test is signal that tests observe
-the change; all mutants surviving fails test-effectiveness (weak-test
-evidence); budget exhausted before any mutant ran, or no tests cover the
-mutated package, is INCONCLUSIVE for test-effectiveness.
+Mutants are offered to the tests nearest them first: the mutated package's own
+suite, or its importers when the package has no tests of its own. One kill
+answers the obligation, so the wider search over the importing packages runs
+only when nothing near the mutant noticed it. The order matters more than it
+looks: on a repository whose integration tests take minutes, searching wide per
+mutant spends the whole budget on compilation and reports INCONCLUSIVE for a
+suite that was in fact watching. A mutant whose wider search runs out of time is
+dropped rather than reported as a survivor, because accusing a suite of weakness
+on the strength of a search that did not finish is an accusation the run cannot
+support.
+
+Outcomes: any mutant killed by a test is signal that tests observe the change;
+mutants surviving both passes fail test-effectiveness (weak-test evidence);
+budget exhausted before any mutant ran, no tests covering the mutated package,
+or every survivor left unconfirmed, is INCONCLUSIVE for test-effectiveness with
+the reason naming which of those it was.
+
+## Test failures: pre-existing and flaky (normative)
+
+Two failures that are not the change's fault must not be reported as if they
+were, or the gate loses the authority it needs.
+
+A test failing at both base and head is pre-existing debt by the ordinary
+fingerprint comparison, and does not block a change that did not cause it.
+
+A test failing at head is re-run once, alone, before it becomes evidence. A test
+that fails twice is a defect. A test that passes on the second run has
+established nothing either way: it produces no evidence, and the obligations
+that run was carrying (`tests-pass`, and `race-clean` when the run was a race
+run) go unproducible with the test named, so the verdict is INCONCLUSIVE rather
+than a rejection of an innocent change. Output carrying a race detector report is
+exempt from this: a race seen once is a race whether or not the second run
+happens to schedule it the same way.
 
 ## Anti-weakening evidence
 
@@ -191,13 +236,33 @@ without the exercised production code being removed; `t.Skip` added;
 numeric tolerances widened; test functions deleted while their subject
 survives. Hard signals are required violations; soft signals are advisory.
 
+A deleted test is reported only where its package came out of the change able to
+fail fewer times than it went in. Renaming or rewriting a test moves its
+assertions rather than removing them, and a gate that called that weakening
+would make every honest test refactor a rejection.
+
 ## Benchmark evidence
 
-Benchmarks in affected packages run at base and head with fixed
-`-benchtime` iteration counts and `-benchmem`, three samples each. A
-regression beyond the contract budget (default: >15% time/op or >10%
-allocs/op past sample spread) fails the performance claim; inside noise is
-PASS with the delta recorded; unmeasurable is INCONCLUSIVE.
+Benchmarks in affected packages run at base and head with `-benchmem` and a
+fixed `-benchtime` of 100ms, three samples each. The budget is time rather than
+an iteration count: a fixed count starves a nanosecond-scale benchmark of the
+repetitions it needs to mean anything, and hands a second-scale one a bill of
+minutes.
+
+Sampling alternates between the two revisions rather than measuring one and then
+the other. A machine's load drifts over the minutes a comparison takes, and
+measuring the sides in sequence turns that drift into a regression report for
+every benchmark at once, which is exactly what the corpus run produced before
+this was fixed.
+
+Time is only a regression when the medians differ by more than the contract
+budget (default 15%) *and* the two sample ranges do not overlap: the fastest run
+at head must still be slower than the slowest run at base. Timing a
+nanosecond-scale benchmark on a machine doing anything else swings by tens of
+percent, and a gate that rejected a change over one of those would teach its
+users to ignore it. Allocation counts are deterministic, so the budget alone
+decides there (default 10%). Inside noise is PASS with the delta recorded;
+unmeasurable is INCONCLUSIVE.
 
 ## Scopes and commands
 
@@ -212,7 +277,7 @@ Two verification scopes:
 
 `fast` remains a developer/editor loop aid. It never produces an
 AdmissionDecision: its report and exit text state explicitly that it is not
-an admission gate, and its JSON carries `sufficient_for_completion: false`.
+an admission gate, and its JSON carries `sufficientForCompletion: false`.
 
 ## Agent completion protocol
 
@@ -222,11 +287,50 @@ requires:
     goharness verify --agent
 
 `--agent` emits the AdmissionDecision JSON on stdout (human text moves to
-stderr), sets `sufficient_for_completion: true` only when the verdict is
+stderr), sets `sufficientForCompletion: true` only when the verdict is
 ADMITTED, and always includes the full claim table so the agent can act on
 FAIL and INCONCLUSIVE claims individually. Exit codes are unchanged
 (0/1/2). Documentation and `fast` output both direct agents to this
 command.
+
+The document carries what a repair loop needs without a second command:
+
+- every finding says whether it blocks (`blocking`), so a consumer never has to
+  re-derive the grandfathering rules to know what to fix first;
+- every obligation the run could not discharge appears under `unproducible`
+  with its reason and the action that would produce it, which is what makes an
+  INCONCLUSIVE verdict actionable rather than merely honest;
+- the contract block reports `authenticated` and `ignoredGrants`, so an agent
+  can see that a permission it asked for did not apply and why;
+- a finding whose fix a tool can state rather than guess carries `fix`, an
+  object with the exact `command` that closes it and a one-line `summary`. It
+  is present for the mechanical rules (`gofmt`, `goimports`, `go mod tidy`) and
+  for every `GO-FIX-*` finding, where the toolchain computed the replacement
+  before reporting it. An agent runs that command instead of inventing an edit;
+  the field carries no positions or patch text, so it cannot make two runs of an
+  unchanged tree differ, and it is not part of the fingerprint.
+
+### Machine-applicable evidence (`GO-FIX-*`)
+
+`go fix` (Go 1.26 and later) is a suite of analyzers that prove a finding by
+producing the edit that closes it. The harness runs it with `-json`, which
+reports the diagnostics and their edits without touching the tree, and takes
+only the diagnostics that carry an edit: what makes the suite precise enough to
+report is the replacement it offers, and a diagnostic without one is the
+analyzer saying it cannot help here.
+
+One analyzer of the suite is not a modernizer. `inline` acts on `//go:fix
+inline` directives, which an author puts on a deprecated function or constant
+to declare that call sites can migrate mechanically. That turns a deprecation
+from a notice every caller reads into a migration every caller can perform with
+one command, in this module and in every consumer of it. The harness reports
+both sides of that mechanism: `GO-FIX-inline` for a call that has not migrated,
+and `GH-DEPRECATE-001` for a deprecation whose replacement is a single call or
+value but which carries no directive.
+
+All `GO-FIX-*` rules and `GH-DEPRECATE-001` enter advisory and experimental.
+They become required on corpus evidence, never on a fixture written to make
+them fire.
 
 ## Structured logging (zap)
 

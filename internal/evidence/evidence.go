@@ -49,6 +49,18 @@ const (
 // FingerprintLength is the hex length of a truncated evidence fingerprint.
 const FingerprintLength = 16
 
+// Remediation is the exact action that closes a finding, for the findings whose
+// fix a tool can state rather than guess.
+//
+// It carries a command and a summary and nothing else: no positions, no byte
+// offsets, no patch text. Everything volatile stays out, so the field cannot
+// make two runs over an unchanged tree differ, and it is not part of the
+// fingerprint, so it cannot change what base and head have in common.
+type Remediation struct {
+	Command string `json:"command"`
+	Summary string `json:"summary,omitempty"`
+}
+
 // Evidence is a single normalized finding. Values are immutable once the
 // coordinator has assigned states; checks return them by value.
 type Evidence struct {
@@ -66,6 +78,7 @@ type Evidence struct {
 	State          State          `json:"state,omitempty"`
 	Classification Classification `json:"classification"`
 	DocURL         string         `json:"docUrl,omitempty"`
+	Fix            *Remediation   `json:"fix,omitempty"`
 }
 
 // NormalizeMessage collapses whitespace and strips volatile substrings so that
@@ -77,33 +90,107 @@ func NormalizeMessage(msg string) string {
 // Fingerprint derives the stable identity of a finding. Line and column are
 // deliberately excluded: unrelated edits shift them without changing identity.
 func Fingerprint(ruleID, file, pkg, message string, occurrence int) string {
+	return fingerprintOf(ruleID, file, pkg, identityMessage(message), occurrence)
+}
+
+func fingerprintOf(ruleID, file, pkg, identity string, occurrence int) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		ruleID,
 		file,
 		pkg,
-		NormalizeMessage(message),
+		identity,
 		strconv.Itoa(occurrence),
 	}, "\x00")))
 	return hex.EncodeToString(sum[:])[:FingerprintLength]
 }
 
-// AssignFingerprints fills in the Fingerprint of every item, numbering
-// occurrences within each (rule, file, package, message) group in the order the
-// slice already establishes. Callers must sort deterministically first.
-func AssignFingerprints(items []Evidence) {
+// identityMessage reduces a message to the part that says which finding it is:
+// whitespace collapsed, every run of digits masked.
+//
+// The numbers a message carries are measurements, and a measurement moves while
+// the finding stays the same one: a function still over the complexity budget
+// at 27 instead of 30, a line number that shifted, a value a failing test
+// printed. Leaving them in the identity made every such move look like a brand
+// new finding, which blocks a change for partly repairing old debt and lets a
+// gate punish an improvement. Masking them is the same reasoning that already
+// keeps line and column out.
+//
+// One pass and one allocation: this runs for every finding of every run, and a
+// benchmark in this package holds it to that.
+func identityMessage(message string) string {
+	var out strings.Builder
+	out.Grow(len(message))
+	// Text is copied a run at a time rather than a character at a time: this is
+	// the hot path of every report, and the bytes it skips (whitespace and
+	// digits) are all ASCII, so scanning bytes stays correct for UTF-8 input.
+	copied, inDigits, pendingSpace := 0, false, false
+	emit := func(end int) {
+		if end <= copied {
+			return
+		}
+		if pendingSpace && out.Len() > 0 {
+			out.WriteByte(' ')
+		}
+		pendingSpace = false
+		out.WriteString(message[copied:end])
+	}
+	for i := range len(message) {
+		switch c := message[i]; {
+		case isSpaceByte(c):
+			emit(i)
+			copied, inDigits = i+1, false
+			pendingSpace = out.Len() > 0
+		case c >= '0' && c <= '9':
+			emit(i)
+			copied = i + 1
+			if !inDigits {
+				if pendingSpace && out.Len() > 0 {
+					out.WriteByte(' ')
+					pendingSpace = false
+				}
+				out.WriteByte('#')
+				inDigits = true
+			}
+		case inDigits:
+			copied, inDigits = i, false
+		}
+	}
+	emit(len(message))
+	return out.String()
+}
+
+func isSpaceByte(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '\v', '\f':
+		return true
+	}
+	return false
+}
+
+// identified pairs a finding with its identity, so the identity is computed
+// once per finding instead of twice per comparison.
+type identified struct {
+	item     Evidence
+	identity string
+}
+
+// assignFingerprints numbers occurrences within each identity group in the
+// order the slice already establishes, so a repeated finding keeps a stable
+// name. Callers must sort deterministically first.
+func assignFingerprints(items []identified) {
 	counts := make(map[string]int, len(items))
 	for i := range items {
 		key := strings.Join([]string{
-			items[i].RuleID,
-			items[i].File,
-			items[i].Package,
-			NormalizeMessage(items[i].Message),
+			items[i].item.RuleID,
+			items[i].item.File,
+			items[i].item.Package,
+			items[i].identity,
 		}, "\x00")
 		occurrence := counts[key]
 		counts[key] = occurrence + 1
-		items[i].Fingerprint = Fingerprint(
-			items[i].RuleID, items[i].File, items[i].Package, items[i].Message, occurrence,
-		)
+		items[i].item.Fingerprint = fingerprintOf(
+			items[i].item.RuleID, items[i].item.File, items[i].item.Package,
+			items[i].identity, occurrence)
 	}
 }
 
@@ -115,28 +202,27 @@ func SortPresentation(items []Evidence) {
 	})
 }
 
-// SortIdentity orders evidence by the fields that feed the fingerprint. It runs
+// sortIdentity orders findings by the fields that feed the fingerprint. It runs
 // before fingerprint assignment so occurrence indexes are reproducible.
-func SortIdentity(items []Evidence) {
+func sortIdentity(items []identified) {
 	sort.SliceStable(items, func(i, j int) bool {
 		a, b := items[i], items[j]
-		if a.RuleID != b.RuleID {
-			return a.RuleID < b.RuleID
+		if a.item.RuleID != b.item.RuleID {
+			return a.item.RuleID < b.item.RuleID
 		}
-		if a.File != b.File {
-			return a.File < b.File
+		if a.item.File != b.item.File {
+			return a.item.File < b.item.File
 		}
-		if a.Package != b.Package {
-			return a.Package < b.Package
+		if a.item.Package != b.item.Package {
+			return a.item.Package < b.item.Package
 		}
-		am, bm := NormalizeMessage(a.Message), NormalizeMessage(b.Message)
-		if am != bm {
-			return am < bm
+		if a.identity != b.identity {
+			return a.identity < b.identity
 		}
-		if a.Line != b.Line {
-			return a.Line < b.Line
+		if a.item.Line != b.item.Line {
+			return a.item.Line < b.item.Line
 		}
-		return a.Column < b.Column
+		return a.item.Column < b.item.Column
 	})
 }
 
@@ -160,10 +246,17 @@ func lessPresentation(a, b Evidence) bool {
 // presentation. It is the single entry point that turns raw check output into a
 // deterministic evidence set.
 func Finalize(items []Evidence) []Evidence {
-	out := make([]Evidence, len(items))
-	copy(out, items)
-	SortIdentity(out)
-	AssignFingerprints(out)
+	indexed := make([]identified, len(items))
+	for i, item := range items {
+		indexed[i] = identified{item: item, identity: identityMessage(item.Message)}
+	}
+	sortIdentity(indexed)
+	assignFingerprints(indexed)
+
+	out := make([]Evidence, len(indexed))
+	for i, entry := range indexed {
+		out[i] = entry.item
+	}
 	SortPresentation(out)
 	return out
 }

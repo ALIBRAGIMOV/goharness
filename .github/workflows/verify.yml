@@ -1,0 +1,91 @@
+name: verify
+
+# The harness is the thing being tested and the thing doing the testing. Every
+# job ends by running goharness against goharness, because a gate that has never
+# been through its own gate is a claim, not a guarantee.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The admission gate compares against a base revision, so the run needs
+          # more than the single commit a default checkout fetches.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: build
+        run: go build ./...
+
+      - name: provision the pinned toolchain
+        # Deliberately not a third-party install action: setup downloads the
+        # pinned release and verifies it against the checksum compiled into this
+        # binary, which is the same path a user takes and the one under test.
+        run: |
+          go run ./cmd/goharness setup
+          go run ./cmd/goharness doctor
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: module tidiness
+        run: go mod tidy -diff
+
+      - name: tests
+        run: go test ./...
+
+      - name: tests under the race detector
+        run: go test -race ./...
+
+      - name: admission gate against itself
+        run: |
+          go build -o "${RUNNER_TEMP}/goharness" ./cmd/goharness
+          "${RUNNER_TEMP}/goharness" verify --agent > "${RUNNER_TEMP}/first.json"
+
+      - name: determinism of the report
+        # Two runs over one unchanged tree must produce identical documents once
+        # the timing block, the only non-deterministic part, is removed.
+        run: |
+          "${RUNNER_TEMP}/goharness" verify --agent > "${RUNNER_TEMP}/second.json"
+          python3 -c 'import json,sys; a,b=[json.load(open(p)) for p in sys.argv[1:3]]; [d.pop("timing",None) for d in (a,b)]; sys.exit(0 if a==b else "two runs over one tree produced different reports")' "${RUNNER_TEMP}/first.json" "${RUNNER_TEMP}/second.json"
+
+  bypasses:
+    name: bypass corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - run: go run ./cmd/goharness setup
+      - name: every known bypass stays closed
+        run: go test ./internal/verify -run 'TestBypass' -count=1 -v
