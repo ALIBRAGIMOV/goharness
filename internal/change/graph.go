@@ -54,18 +54,26 @@ type PackageGraph struct {
 // costs more than every other check combined and only duplicates what go build
 // already reports precisely. Loader errors still surface as compile evidence,
 // and go build remains the authority on type errors.
+//
+// NeedDeps is absent because nothing here reads a dependency's fields. It would
+// populate a Package for every transitive import, including the whole standard
+// library, and the only thing this graph wants from an import is its path,
+// which is the key of the Imports map either way.
 const graphLoadMode = packages.NeedName |
 	packages.NeedFiles |
 	packages.NeedCompiledGoFiles |
 	packages.NeedImports |
-	packages.NeedDeps |
 	packages.NeedModule
 
 // LoadGraph loads every package in the module rooted at dir.
 func LoadGraph(ctx context.Context, dir string) (PackageGraph, error) {
+	return loadGraphWith(ctx, dir, graphLoadMode)
+}
+
+func loadGraphWith(ctx context.Context, dir string, mode packages.LoadMode) (PackageGraph, error) {
 	cfg := &packages.Config{
 		Context: ctx,
-		Mode:    graphLoadMode,
+		Mode:    mode,
 		Dir:     dir,
 		Tests:   false,
 		// The loader shells out to the go command, so it gets the same sanitised
@@ -116,8 +124,11 @@ func reducePackage(p *packages.Package) Package {
 	}
 	sort.Strings(files)
 	out.GoFiles = files
-	for _, imp := range p.Imports {
-		out.Imports = append(out.Imports, imp.PkgPath)
+	// The map key is the import path as written, which is the one part of an
+	// import entry the loader fills in whether or not it was asked to load the
+	// dependency itself. Reading it from the value would tie this to a load mode.
+	for importPath := range p.Imports {
+		out.Imports = append(out.Imports, importPath)
 	}
 	sort.Strings(out.Imports)
 	for _, e := range p.Errors {
@@ -294,6 +305,19 @@ type Unexamined struct {
 	Reason string
 }
 
+// Unresolved is a changed Go file the harness could not inspect at all, with
+// the error that stopped it.
+//
+// It is deliberately a different type from Unexamined. "The build configuration
+// excludes this file" is a fact about the repository; "the harness could not
+// read this file" is a fact about the harness, and stating the second in the
+// grammar of the first sends a reader looking for a build-constraint problem
+// that does not exist. The two must not share a channel.
+type Unresolved struct {
+	Path string
+	Err  error
+}
+
 // Unexamined returns the changed Go files that this run's build configuration
 // excludes from every package, so a caller can report the gap instead of
 // mistaking silence for approval.
@@ -302,9 +326,10 @@ type Unexamined struct {
 // never builds (testdata, vendor, and names beginning with a dot or an
 // underscore) hold no code this module compiles. Everything else that no
 // package claims is a file the change altered and nothing checked.
-func (g PackageGraph) Unexamined(entries []Entry) []Unexamined {
+func (g PackageGraph) Unexamined(entries []Entry) ([]Unexamined, []Unresolved) {
 	compiled := g.compiledFiles()
 	var out []Unexamined
+	var faults []Unresolved
 	for _, e := range entries {
 		if e.Status == StatusDeleted || !strings.HasSuffix(e.Path, ".go") || excludedByConvention(e.Path) {
 			continue
@@ -319,21 +344,29 @@ func (g PackageGraph) Unexamined(entries []Entry) []Unexamined {
 				continue
 			}
 		}
-		out = append(out, Unexamined{Path: e.Path, Reason: exclusionReason(dir, name)})
+		reason, err := exclusionReason(dir, name)
+		if err != nil {
+			faults = append(faults, Unresolved{Path: e.Path, Err: err})
+			continue
+		}
+		out = append(out, Unexamined{Path: e.Path, Reason: reason})
 	}
-	return out
+	return out, faults
 }
 
-func exclusionReason(dir, name string) string {
+// exclusionReason explains why the toolchain compiles nothing from a file, or
+// returns the error that stopped the harness from finding out. A caller must
+// keep the two apart: only the first is a statement about the repository.
+func exclusionReason(dir, name string) (string, error) {
 	matched, err := build.Default.MatchFile(dir, name)
 	switch {
 	case err != nil:
-		return "its build constraints could not be read: " + err.Error()
+		return "", err
 	case !matched:
 		return fmt.Sprintf("build constraints exclude it from GOOS=%s GOARCH=%s",
-			build.Default.GOOS, build.Default.GOARCH)
+			build.Default.GOOS, build.Default.GOARCH), nil
 	default:
-		return "no package in this module compiles it"
+		return "no package in this module compiles it", nil
 	}
 }
 

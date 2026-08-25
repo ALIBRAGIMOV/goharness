@@ -70,7 +70,7 @@ func TestScanAcceptsAFileSnapshot(t *testing.T) {
 	}
 
 	module := toolcachetest.WriteVulnerableModule(t)
-	findings, err := tool.RunVulnScan(t.Context(), module, cache.VulnDBURL(), []string{"./..."})
+	findings, err := tool.RunVulnScan(t.Context(), module, cache.VulnDBURL(), "go1.26.6", []string{"./..."})
 	if err != nil {
 		t.Fatalf("RunVulnScan against a file:// snapshot: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestEmptyDatabaseFindsNothingSilently(t *testing.T) {
 		t.Fatalf("creating an empty directory: %v", err)
 	}
 	module := toolcachetest.WriteVulnerableModule(t)
-	findings, err := tool.RunVulnScan(t.Context(), module, "file://"+empty, []string{"./..."})
+	findings, err := tool.RunVulnScan(t.Context(), module, "file://"+empty, "go1.26.6", []string{"./..."})
 	if err != nil {
 		t.Fatalf("RunVulnScan against an empty database: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestMissingDatabaseDirectoryFails(t *testing.T) {
 	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "no-such-directory")
 	module := toolcachetest.WriteVulnerableModule(t)
-	if _, err := tool.RunVulnScan(t.Context(), module, "file://"+missing, []string{"./..."}); err == nil {
+	if _, err := tool.RunVulnScan(t.Context(), module, "file://"+missing, "go1.26.6", []string{"./..."}); err == nil {
 		t.Fatal("scanning against a nonexistent database directory reported success")
 	}
 }

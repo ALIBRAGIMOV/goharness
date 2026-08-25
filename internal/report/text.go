@@ -83,6 +83,8 @@ func WriteTextWithOptions(w io.Writer, version string, r verify.Result, opts Tex
 	writeHeader(&b, p, version, r)
 	writeClaims(&b, p, r)
 	writeCounts(&b, r)
+	writeBaseline(&b, p, r)
+	writePolicyShadow(&b, p, r)
 	writeFailures(&b, p, r)
 	writeFindings(&b, p, r)
 	writeNextSteps(&b, p, r)
@@ -190,6 +192,55 @@ func writeCounts(b *strings.Builder, r verify.Result) {
 	newFindings, preexisting, fixed, advisory := EvidenceCounts(r.Evidence)
 	fmt.Fprintf(b, "\nevidence: %d new, %d pre-existing, %d fixed, %d advisory; %d tool failure(s); %s\n",
 		newFindings, preexisting, fixed, advisory, len(r.Failures), r.Duration.Round(1e6))
+}
+
+// writeBaseline prints the ledger burn-down in one line, which is the whole
+// point of recording it: a ratchet nobody can see the progress of is a way of
+// never fixing anything.
+func writeBaseline(b *strings.Builder, p Palette, r verify.Result) {
+	base := buildBaseline(r.Debt, buildFindings(r.Evidence))
+	if base == nil {
+		return
+	}
+	line := fmt.Sprintf(
+		"baseline %s: %d acknowledged, %d still present, %d fixed since, %d new blocking, "+
+			"%d that no ledger can ever acknowledge",
+		shortRev(base.RecordedAt), base.Entries, base.StillPresent,
+		base.FixedSince, base.New, base.Unbaselineable)
+	if base.New > 0 || base.Unbaselineable > 0 {
+		fmt.Fprintf(b, "%s\n", p.warn(line))
+		return
+	}
+	fmt.Fprintf(b, "%s\n", p.dim(line))
+}
+
+// writePolicyShadow states what the repository's own lint configuration hides.
+// It never appears in the next steps: nothing here is a defect in the code, and
+// no part of it moved the verdict.
+func writePolicyShadow(b *strings.Builder, p Palette, r verify.Result) {
+	shadow := r.PolicyShadow
+	if shadow == nil {
+		return
+	}
+	fmt.Fprintf(b, "\npolicy shadow (%s, from your own configuration; it does not affect the verdict):\n",
+		shadow.File)
+	if !shadow.Analysed {
+		fmt.Fprintf(b, "  %s\n", p.dim("not analysed: "+shadow.Reason))
+		return
+	}
+	if len(shadow.Entries) == 0 {
+		fmt.Fprintf(b, "  %s\n", p.dim("no shadow detected against the strict pack"))
+		return
+	}
+	for _, e := range shadow.Entries {
+		fmt.Fprintf(b, "  %s  %s\n      %s (%s)\n", p.warn(e.ID),
+			strings.Join(e.RuleIDs, ", "), e.Mechanism, e.Detail)
+		if e.Attributed {
+			fmt.Fprintf(b, "      %d finding(s) of this run live in that shadow\n", e.Findings)
+			continue
+		}
+		fmt.Fprintf(b, "      %s\n", p.dim(e.Note))
+	}
 }
 
 func writeFailures(b *strings.Builder, p Palette, r verify.Result) {

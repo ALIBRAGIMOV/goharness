@@ -3,6 +3,7 @@ package report_test
 import (
 	"bytes"
 	"encoding/json"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -157,10 +158,173 @@ func TestEmptyCollectionsRenderAsArrays(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	for _, key := range []string{"evidence", "failures", "claims", "unmetObligations"} {
+	for _, key := range []string{
+		"evidence", "failures", "claims", "unmetObligations", "summary", "coverage",
+	} {
+		if key == "summary" || key == "coverage" {
+			if _, ok := doc[key].(map[string]any); !ok {
+				t.Fatalf("%s = %v, want an object rather than null", key, doc[key])
+			}
+			continue
+		}
 		if _, ok := doc[key].([]any); !ok {
 			t.Fatalf("%s = %v, want an array rather than null", key, doc[key])
 		}
+	}
+}
+
+// summaryFixture is an evidence set with one finding of each consequence class,
+// two of them in the same file, so every aggregation the summary reports has
+// something to count.
+func summaryFixture(t *testing.T) verify.Result {
+	t.Helper()
+	r := sampleResult()
+	r.Evidence = evidence.Finalize(decorated(defaultPolicy(t), []evidence.Evidence{
+		{RuleID: policy.RuleErrcheck, File: "store.go", Line: 20, Tool: "golangci-lint",
+			Message: "Error return value of `s.store.Audit` is not checked", State: evidence.StateNew},
+		{RuleID: policy.RuleErrcheck, File: "store.go", Line: 30, Tool: "golangci-lint",
+			Message: "Error return value of `rows.Close` is not checked", State: evidence.StatePreexisting},
+		{RuleID: policy.RuleCommentEmDash, File: "doc.go", Line: 3, Tool: "goharness",
+			Message: "comment contains the em dash", State: evidence.StateNew},
+		{RuleID: policy.RuleGoroutineLeak, Package: "example.com/x/server", Tool: "goleak",
+			Message: "tests leave goroutines running", State: evidence.StateFixed},
+	}))
+	r.Execution.Files = []string{"store.go", "doc.go"}
+	r.GeneratedExempt = []string{"api.pb.go"}
+	r.LeakBlockedPackages = []string{"example.com/x/legacy"}
+	return r
+}
+
+func defaultPolicy(t *testing.T) policy.ResolvedPolicy {
+	t.Helper()
+	resolved, err := policy.Resolve(policy.Config{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("resolving the default policy: %v", err)
+	}
+	return resolved
+}
+
+func decorated(p policy.ResolvedPolicy, items []evidence.Evidence) []evidence.Evidence {
+	out := make([]evidence.Evidence, 0, len(items))
+	for _, e := range items {
+		out = append(out, p.Decorate(e))
+	}
+	return out
+}
+
+// TestEvidenceIsOrderedByConsequence pins the property the document's readers
+// depend on: position in evidence[] is triage order, so a consumer that works
+// the list top down meets the silent data loss before the typography.
+func TestEvidenceIsOrderedByConsequence(t *testing.T) {
+	t.Parallel()
+	doc := report.Build("0.6.0", summaryFixture(t))
+	var got []string
+	for _, f := range doc.Evidence {
+		got = append(got, f.Consequence)
+	}
+	want := []string{
+		evidence.ConsequenceSilentLoss, evidence.ConsequenceUnsafeBehavior,
+		evidence.ConsequenceStructural, evidence.ConsequenceHygiene,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("evidence = %v, want one finding per class", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("evidence order = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestErrcheckFindingsCarryTheirRemedyClass covers the split that turns one
+// rule's undifferentiated volume into a handful of decisions: a discarded
+// domain write and a discarded rows.Close are the same linter finding and are
+// not remotely the same defect.
+func TestErrcheckFindingsCarryTheirRemedyClass(t *testing.T) {
+	t.Parallel()
+	doc := report.Build("0.6.0", summaryFixture(t))
+	got := map[string]string{}
+	for _, f := range doc.Evidence {
+		if f.RuleID == policy.RuleErrcheck {
+			got[f.RemedyClass] = f.Consequence
+		}
+	}
+	if got[policy.RemedyDomainWrite] != evidence.ConsequenceSilentLoss {
+		t.Fatalf("an unrecognised discarded call was not treated as a lost domain write: %v", got)
+	}
+	if got[policy.RemedyResourceClose] != evidence.ConsequenceStructural {
+		t.Fatalf("rows.Close was not bucketed as a resource close: %v", got)
+	}
+}
+
+func TestSummaryAggregatesTheWholeEvidenceSet(t *testing.T) {
+	t.Parallel()
+	doc := report.Build("0.6.0", summaryFixture(t))
+	s := doc.Summary
+	if s.Total != 4 || s.Blocking+s.Advisory != s.Total {
+		t.Fatalf("summary totals do not partition the set: %+v", s)
+	}
+	if s.New != 2 || s.Preexisting != 1 || s.Fixed != 1 {
+		t.Fatalf("state split = new %d, preexisting %d, fixed %d", s.New, s.Preexisting, s.Fixed)
+	}
+	if s.ByRule[policy.RuleErrcheck] != 2 || s.ByFile["store.go"] != 2 {
+		t.Fatalf("per-rule or per-file counts are wrong: %+v", s)
+	}
+	if s.ByConsequence[evidence.ConsequenceSilentLoss] != 1 ||
+		s.ByConsequence[evidence.ConsequenceHygiene] != 1 {
+		t.Fatalf("per-consequence counts are wrong: %v", s.ByConsequence)
+	}
+	if s.ByRemedyClass[policy.RemedyDomainWrite] != 1 {
+		t.Fatalf("per-remedy counts are wrong: %v", s.ByRemedyClass)
+	}
+	if s.ByDimension[string(admission.DimPolicyIntegrity)] == 0 {
+		t.Fatalf("per-dimension counts are wrong: %v", s.ByDimension)
+	}
+	if s.ByFile["ok.go"] != 0 || len(s.ByFile) != 2 {
+		t.Fatalf("byFile names files with no findings: %v", s.ByFile)
+	}
+}
+
+// TestCoverageStatesWhatTheVerdictSkipped is the other half of the
+// honest-INCONCLUSIVE discipline: the tool already refuses to claim what it did
+// not prove, and this makes it state what it did not look at.
+func TestCoverageStatesWhatTheVerdictSkipped(t *testing.T) {
+	t.Parallel()
+	doc := report.Build("0.6.0", summaryFixture(t))
+	c := doc.Coverage
+	if c.FilesJudged != 2 || c.PackageCount != 1 || c.TestPackageCount != 1 {
+		t.Fatalf("coverage counts = %+v", c)
+	}
+	if c.GeneratedExemptCount != 1 || len(c.GeneratedExempt) != 1 {
+		t.Fatalf("a generated exemption is invisible: %+v", c)
+	}
+	if len(c.LeakInjectionBlocked) != 1 {
+		t.Fatalf("a package the leak detector could not reach is invisible: %+v", c)
+	}
+}
+
+// TestTruncationIsAlwaysDeclared keeps the enumeration trustworthy: a consumer
+// must never have to guess whether the list it holds is complete.
+func TestTruncationIsAlwaysDeclared(t *testing.T) {
+	t.Parallel()
+	full := report.Build("0.6.0", summaryFixture(t))
+	if full.EvidenceTruncated || full.EvidenceOmitted != 0 {
+		t.Fatalf("the complete document declares itself truncated: %+v", full.EvidenceTruncated)
+	}
+	top := report.BuildWithOptions("0.6.0", summaryFixture(t), report.Options{EvidenceLimit: 2})
+	if !top.EvidenceTruncated || top.EvidenceOmitted != 2 || len(top.Evidence) != 2 {
+		t.Fatalf("truncation = %t, omitted %d, kept %d",
+			top.EvidenceTruncated, top.EvidenceOmitted, len(top.Evidence))
+	}
+	// The verdict and every aggregate are computed before truncation, so a
+	// budgeted rendering reports the run rather than the excerpt.
+	if top.Summary.Total != full.Summary.Total || top.Verdict != full.Verdict ||
+		len(top.Claims) != len(full.Claims) ||
+		!maps.Equal(top.Summary.ByConsequence, full.Summary.ByConsequence) {
+		t.Fatal("truncation changed the summary, the verdict, or the claims")
+	}
+	if top.Evidence[0].Consequence != evidence.ConsequenceSilentLoss {
+		t.Fatalf("truncation kept %q rather than the highest consequence", top.Evidence[0].Consequence)
 	}
 }
 
@@ -349,5 +513,102 @@ func TestTextReportShowsSnapshotAgeButJSONDoesNot(t *testing.T) {
 	}
 	if !strings.Contains(out, "goharness tools update") {
 		t.Fatalf("a stale database does not prompt an update:\n%s", out)
+	}
+}
+
+// TestNewBlocksAreAbsentWhenThereIsNothingToSay keeps the schema additive. A
+// run with no ledger and no local lint configuration has to render exactly the
+// document it rendered before either existed, or every consumer of
+// goharness.report/v2 has to be told about a change that says nothing.
+func TestNewBlocksAreAbsentWhenThereIsNothingToSay(t *testing.T) {
+	t.Parallel()
+	encoded, err := json.Marshal(report.Build("test", sampleResult()))
+	if err != nil {
+		t.Fatalf("marshalling: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	for _, key := range []string{"baseline", "policyShadow"} {
+		if _, present := fields[key]; present {
+			t.Fatalf("%q is present in a document with nothing to report", key)
+		}
+	}
+}
+
+// TestBaselineBlockCountsTheBurnDown checks the arithmetic the whole ratchet is
+// read through: what was acknowledged, what is left, what was repaid, and what
+// no ledger could ever accept.
+func TestBaselineBlockCountsTheBurnDown(t *testing.T) {
+	t.Parallel()
+	result := sampleResult()
+	present := result.Evidence[0].Fingerprint
+	result.Debt = &policy.DebtLedger{
+		Schema: policy.DebtSchema, RecordedAt: "abcdef1234567890",
+		Entries: []policy.DebtEntry{
+			{Fingerprint: present, RuleID: policy.RuleSuppressNolint, File: "a.go"},
+			{Fingerprint: "0000000000000000", RuleID: policy.RuleErrcheck, File: "gone.go"},
+		},
+	}
+	doc := report.Build("test", result)
+	if doc.Baseline == nil {
+		t.Fatal("a run with a ledger carries no baseline block")
+	}
+	got := *doc.Baseline
+	want := report.Baseline{
+		RecordedAt: "abcdef1234567890", Entries: 2, StillPresent: 1, FixedSince: 1,
+		New: 0, Unbaselineable: 1,
+	}
+	if got != want {
+		t.Fatalf("baseline = %+v, want %+v", got, want)
+	}
+	// The acknowledged finding is a suppression, so acknowledging it changed
+	// nothing about whether it blocks.
+	if !doc.Evidence[0].Blocking {
+		t.Fatalf("a ledger entry stopped a suppression from blocking: %+v", doc.Evidence[0])
+	}
+}
+
+// TestPolicyShadowRendersWhatItCouldAndCouldNotCount is the honesty guard on the
+// section: a count that cannot be exact is declared, never printed as if it
+// were.
+func TestPolicyShadowRendersWhatItCouldAndCouldNotCount(t *testing.T) {
+	t.Parallel()
+	result := sampleResult()
+	result.PolicyShadow = &verify.PolicyShadow{
+		File: ".golangci.yml", Analysed: true,
+		Entries: []verify.ShadowEntry{
+			{ID: "test-file-exclusion", Mechanism: "m", Detail: "d",
+				RuleIDs: []string{policy.RuleErrcheck}, Attributed: true, Findings: 259},
+			{ID: "errcheck-check-blank", Mechanism: "m", Detail: "d",
+				RuleIDs: []string{policy.RuleErrcheck}, Note: "cannot be counted exactly"},
+		},
+	}
+	doc := report.Build("test", result)
+	if doc.PolicyShadow == nil || len(doc.PolicyShadow.Entries) != 2 {
+		t.Fatalf("policy shadow = %+v", doc.PolicyShadow)
+	}
+	if doc.PolicyShadow.Entries[0].FindingsInShadow != 259 || !doc.PolicyShadow.Entries[0].Attributed {
+		t.Fatalf("attributed entry = %+v", doc.PolicyShadow.Entries[0])
+	}
+	if doc.PolicyShadow.Entries[1].Attributed || doc.PolicyShadow.Entries[1].Note == "" {
+		t.Fatalf("unattributed entry claims an exact count: %+v", doc.PolicyShadow.Entries[1])
+	}
+	// Nothing in the section may reach the verdict or the counts.
+	plain := report.Build("test", sampleResult())
+	if doc.Verdict != plain.Verdict || doc.ExitCode != plain.ExitCode {
+		t.Fatal("the policy shadow moved the verdict")
+	}
+	if doc.Summary.Total != plain.Summary.Total || doc.Summary.Blocking != plain.Summary.Blocking {
+		t.Fatal("the policy shadow moved the summary counts")
+	}
+
+	var text bytes.Buffer
+	if err := report.WriteText(&text, "test", result); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	if !strings.Contains(text.String(), "does not affect the verdict") {
+		t.Fatalf("the text report does not say the section is inert:\n%s", text.String())
 	}
 }

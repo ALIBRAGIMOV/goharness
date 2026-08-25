@@ -59,23 +59,29 @@ type Metrics struct {
 	Packages  map[string]PackageMetric
 }
 
-// ComputeMetrics measures every function and package in the given files.
-func ComputeMetrics(ctx context.Context, root string, relFiles []string) (Metrics, error) {
-	units, err := parseUnits(ctx, root, relFiles)
-	if err != nil {
-		return Metrics{}, err
-	}
+// Metrics measures every function and package in the parsed scope.
+func (s *ParsedScope) Metrics(ctx context.Context) (Metrics, error) {
 	m := Metrics{
 		Functions: map[string]FunctionMetric{},
 		Packages:  map[string]PackageMetric{},
 	}
-	for _, u := range units {
+	for _, u := range s.units {
 		if err := ctx.Err(); err != nil {
 			return Metrics{}, err
 		}
 		u.measure(&m)
 	}
 	return m, nil
+}
+
+// ComputeMetrics parses the given files and measures every function and package
+// in them.
+func ComputeMetrics(ctx context.Context, root string, relFiles []string) (Metrics, error) {
+	scope, err := Parse(ctx, root, relFiles)
+	if err != nil {
+		return Metrics{}, err
+	}
+	return scope.Metrics(ctx)
 }
 
 func (u *unit) measure(m *Metrics) {

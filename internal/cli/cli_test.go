@@ -89,7 +89,7 @@ func TestExplainUnknownRuleIsInconclusive(t *testing.T) {
 }
 
 func TestUnknownCommandIsInconclusive(t *testing.T) {
-	code, _, errOut := invoke(t, "fix")
+	code, _, errOut := invoke(t, "frobnicate")
 	if code != cli.ExitInconclusive {
 		t.Fatalf("exit = %d, want %d", code, cli.ExitInconclusive)
 	}
@@ -379,7 +379,9 @@ func TestNoArgumentsPrintsStructuredHelp(t *testing.T) {
 }
 
 func TestEveryCommandHasHelp(t *testing.T) {
-	for _, command := range []string{"verify", "audit", "fast", "deep", "explain", "doctor", "version"} {
+	for _, command := range []string{
+		"verify", "audit", "fast", "deep", "explain", "diff", "fix", "doctor", "version",
+	} {
 		t.Run(command, func(t *testing.T) {
 			code, out, _ := invoke(t, command, "-h")
 			if code != cli.ExitAdmitted {
@@ -768,4 +770,39 @@ func indentedSample(t *testing.T, help, start string) string {
 		lines = append(lines, strings.TrimPrefix(line, "  "))
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// TestBaselineFlagIsAuditOnly keeps the write where it belongs. Verify and fast
+// have no ledger to record, and a flag they accepted but did not honour would be
+// worse than one they refuse.
+func TestBaselineFlagIsAuditOnly(t *testing.T) {
+	for _, mode := range []string{"fast", "verify"} {
+		code, _, errOut := invoke(t, mode, "--baseline")
+		if code != cli.ExitInconclusive {
+			t.Fatalf("%s --baseline exit = %d, want %d", mode, code, cli.ExitInconclusive)
+		}
+		if !strings.Contains(errOut, "baseline") {
+			t.Fatalf("%s stderr does not name the flag it refused: %q", mode, errOut)
+		}
+	}
+}
+
+// TestInconclusiveAuditRecordsNothing is the guard on what a ledger may be taken
+// from. A run that could not enumerate its findings would produce a ledger
+// acknowledging debt nobody measured, so it produces no ledger at all.
+func TestInconclusiveAuditRecordsNothing(t *testing.T) {
+	useGolangci(t)
+	t.Setenv(toolcache.EnvCacheRoot, filepath.Join(t.TempDir(), "empty-cache"))
+	dir := newFixtureRepo(t)
+
+	code, out, errOut := invoke(t, "audit", "--baseline", "--dir", dir)
+	if code != cli.ExitInconclusive {
+		t.Fatalf("exit = %d, want %d\n%s", code, cli.ExitInconclusive, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(dir, policy.DebtFileName)); !os.IsNotExist(err) {
+		t.Fatalf("an inconclusive audit wrote a ledger: %v", err)
+	}
+	if !strings.Contains(out, "nothing was recorded") {
+		t.Fatalf("the refusal was not explained: %q", out)
+	}
 }

@@ -1,7 +1,9 @@
 package verify_test
 
 import (
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/admission"
@@ -129,6 +131,20 @@ func TestLeakedGoroutineRejectsTheChange(t *testing.T) {
 	if !slices.Contains(blockingRules(result.Evidence), policy.RuleGoroutineLeak) {
 		t.Fatalf("blocking rules = %v, want %s", blockingRules(result.Evidence), policy.RuleGoroutineLeak)
 	}
+	// A leak belongs to a package rather than to a line, but a finding with no
+	// location at all is one a reader cannot open and a scoped exception cannot
+	// reach. The package directory is the most precise anchor that is true.
+	for _, e := range result.Evidence {
+		if e.RuleID != policy.RuleGoroutineLeak {
+			continue
+		}
+		if e.File == "" {
+			t.Fatalf("a leak finding carried no location: %+v", e)
+		}
+		if filepath.IsAbs(e.File) {
+			t.Fatalf("a leak finding was anchored outside the module: %q", e.File)
+		}
+	}
 }
 
 func TestExistingTestMainMakesLeakEvidenceUnproducible(t *testing.T) {
@@ -146,5 +162,16 @@ func TestExistingTestMainMakesLeakEvidenceUnproducible(t *testing.T) {
 		return u.Kind == admission.KindLeakClean
 	}) {
 		t.Fatalf("expected %s to be unproducible, got %v", admission.KindLeakClean, result.Unproducible)
+	}
+	// The same fact, reachable as data rather than only as prose inside a reason.
+	// A consumer deciding where the run is blind cannot parse an English sentence
+	// for it, and a coverage statement nobody can read is not one.
+	if !slices.ContainsFunc(result.LeakBlockedPackages, func(pkg string) bool {
+		return strings.HasSuffix(pkg, "/worker")
+	}) {
+		t.Fatalf("the blocked package is not in coverage: %v", result.LeakBlockedPackages)
+	}
+	if len(result.Execution.Packages) == 0 || len(result.Execution.Files) == 0 {
+		t.Fatalf("coverage reports nothing judged: %+v", result.Execution)
 	}
 }

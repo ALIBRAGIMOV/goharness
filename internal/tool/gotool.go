@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -264,4 +265,65 @@ func RunModTidy(ctx context.Context, runner Runner, dir string) (string, error) 
 			res.ExitCode, strings.TrimSpace(firstLines(res.Stderr, 20)))
 	}
 	return diff, nil
+}
+
+// ResolveGoVersion reports the toolchain version the go command in dir will
+// actually use, as a "go1.26.6" string.
+//
+// GoVersion names the toolchain this binary was built with, which is a
+// different question and the wrong one for anything that judges the module: a
+// harness built with one release can be asked to verify a module another
+// release compiles. The answer is read through the same sanitised environment
+// every other check runs under, so a stray GOFLAGS or GOTOOLCHAIN in the
+// operator's shell cannot move it.
+func ResolveGoVersion(ctx context.Context, runner Runner, dir string) (string, error) {
+	res, err := runner.Run(ctx, Command{Dir: dir, Name: "go", Args: []string{"env", "GOVERSION"}})
+	if err != nil {
+		return "", err
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("go env GOVERSION exited %d: %s",
+			res.ExitCode, strings.TrimSpace(firstLines(res.Stderr, 5)))
+	}
+	version := strings.TrimSpace(res.Stdout)
+	if version == "" {
+		return "", errors.New("go env GOVERSION reported nothing")
+	}
+	return version, nil
+}
+
+// CompareGoVersions orders two "go1.26.6" strings by their numeric components,
+// returning a negative number when a precedes b.
+//
+// Release numbers are compared as integers because they are integers: go1.26.10
+// is newer than go1.26.9 and sorts before it as text, so a string comparison
+// would report a patched host as older than the floor it satisfies and turn a
+// clean security scan inconclusive.
+func CompareGoVersions(a, b string) int {
+	return slices.Compare(goVersionParts(a), goVersionParts(b))
+}
+
+// goVersionParts reduces a version string to its numeric components. Anything
+// that is not a release number, such as a devel or gccgo string, yields no
+// components and therefore compares equal to every other unparsable value; the
+// caller treats that as "no opinion" rather than as an ordering.
+func goVersionParts(version string) []int {
+	trimmed, ok := strings.CutPrefix(strings.TrimSpace(version), "go")
+	if !ok {
+		return nil
+	}
+	// A release candidate or beta suffix carries no ordering this comparison
+	// needs, and the numbers before it are the ones a floor is written against.
+	for _, cut := range []string{"rc", "beta", "-", "+", " "} {
+		trimmed, _, _ = strings.Cut(trimmed, cut)
+	}
+	var parts []int
+	for field := range strings.SplitSeq(trimmed, ".") {
+		n, err := strconv.Atoi(field)
+		if err != nil {
+			return nil
+		}
+		parts = append(parts, n)
+	}
+	return parts
 }

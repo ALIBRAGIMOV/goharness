@@ -431,3 +431,254 @@ func TestThing(t *testing.T) {
 		t.Fatalf("an unchanged test produced findings: %+v", got)
 	}
 }
+
+// TestCanonicalWorkerPoolsAreNotReported covers the two shapes a production
+// audit flagged, both of them fixed-size worker pools and both of them false
+// positives.
+//
+// The rule defends a property, "concurrency does not scale with input", and
+// `for range workerCount` is the most direct way Go offers to hold it. Firing
+// there meant the way to satisfy the rule was to add a semaphore the code did
+// not need, so the rule rewarded decorating code for the scanner. Every case
+// here must stay silent, and TestUnboundedSpawnLoopsAreStillReported is the
+// guard that keeps the fix from becoming "report less".
+func TestCanonicalWorkerPoolsAreNotReported(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "range over a package constant",
+			src: `package p
+
+import "context"
+
+const transcriptionWorkers = 4
+
+type worker struct{}
+
+func (w worker) run(ctx context.Context) {}
+
+func Start(ctx context.Context, w worker) {
+	for range transcriptionWorkers {
+		go w.run(ctx)
+	}
+}
+`,
+		},
+		{
+			name: "range over a validated config field",
+			src: `package p
+
+import "context"
+
+type service struct {
+	workerCount int
+}
+
+func (s *service) loop(ctx context.Context) {}
+
+func (s *service) Start(ctx context.Context) {
+	for range s.workerCount {
+		go s.loop(ctx)
+	}
+}
+`,
+		},
+		{
+			name: "counted loop over a constant",
+			src: `package p
+
+import "context"
+
+const workers = 8
+
+func work(ctx context.Context) {}
+
+func Start(ctx context.Context) {
+	for i := 0; i < workers; i++ {
+		go work(ctx)
+	}
+}
+`,
+		},
+		{
+			name: "integer literal bound",
+			src: `package p
+
+import "context"
+
+func work(ctx context.Context) {}
+
+func Start(ctx context.Context) {
+	for range 3 {
+		go work(ctx)
+	}
+}
+`,
+		},
+		{
+			name: "consumer ranging over a shared channel",
+			src: `package p
+
+import "context"
+
+func Start(ctx context.Context, jobs chan int, n int) {
+	for range n {
+		go func() {
+			for job := range jobs {
+				_ = job
+			}
+		}()
+	}
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ids := ruleIDs(scanWith(t, "p.go", tc.src, analyze.Options{Concurrency: true}))
+			if slices.Contains(ids, policy.RuleGoroutineInLoop) {
+				t.Fatalf("a bounded worker pool was reported as unbounded: %v", ids)
+			}
+		})
+	}
+}
+
+// TestUnboundedSpawnLoopsAreStillReported is the false-positive guard's twin:
+// it fails if the bound recognition ever grows wide enough to swallow the case
+// the rule exists for, a goroutine per item of something the caller supplied.
+func TestUnboundedSpawnLoopsAreStillReported(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "range over a caller-supplied slice",
+			src: `package p
+
+import "context"
+
+func handle(ctx context.Context, item int) {}
+
+func Start(ctx context.Context, userSupplied []int) {
+	for _, item := range userSupplied {
+		go handle(ctx, item)
+	}
+}
+`,
+		},
+		{
+			name: "counted loop over a parameter",
+			src: `package p
+
+import "context"
+
+func work(ctx context.Context) {}
+
+func Start(ctx context.Context, n int) {
+	for i := 0; i < n; i++ {
+		go work(ctx)
+	}
+}
+`,
+		},
+		{
+			name: "range over a channel of incoming work",
+			src: `package p
+
+import "context"
+
+func handle(ctx context.Context, item int) {}
+
+func Start(ctx context.Context, incoming chan int) {
+	for item := range incoming {
+		go handle(ctx, item)
+	}
+}
+`,
+		},
+		{
+			name: "range over a slice field, which is a count of arrivals",
+			src: `package p
+
+import "context"
+
+type service struct {
+	items []int
+}
+
+func (s *service) handle(ctx context.Context) {}
+
+func (s *service) Start(ctx context.Context) {
+	for range s.items {
+		go s.handle(ctx)
+	}
+}
+`,
+		},
+		{
+			name: "range over a channel field",
+			src: `package p
+
+import "context"
+
+type service struct {
+	jobs chan int
+}
+
+func (s *service) handle(ctx context.Context) {}
+
+func (s *service) Start(ctx context.Context) {
+	for range s.jobs {
+		go s.handle(ctx)
+	}
+}
+`,
+		},
+		{
+			name: "counted loop down from a variable to a literal",
+			src: `package p
+
+import "context"
+
+func work(ctx context.Context) {}
+
+func Start(ctx context.Context, n int) {
+	for i := n; i > 0; i-- {
+		go work(ctx)
+	}
+}
+`,
+		},
+		{
+			name: "spawned body ranges over a map, not a work channel",
+			src: `package p
+
+import "context"
+
+func Start(ctx context.Context, n int, table map[string]int) {
+	for range n {
+		go func() {
+			for key := range table {
+				_ = key
+			}
+		}()
+	}
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ids := ruleIDs(scanWith(t, "p.go", tc.src, analyze.Options{Concurrency: true}))
+			if !slices.Contains(ids, policy.RuleGoroutineInLoop) {
+				t.Fatalf("an unbounded spawn loop was not reported: %v", ids)
+			}
+		})
+	}
+}

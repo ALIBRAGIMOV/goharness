@@ -42,9 +42,24 @@ type Engine struct {
 	// ConfigDigest identifies the project configuration in force, so cached
 	// evidence produced under a different policy is never reused.
 	ConfigDigest string
+	// GoVersion is the toolchain the go command in this module resolves to. It
+	// decides which standard-library vulnerabilities apply, so it is recorded and
+	// keyed rather than left to whatever the scanner would discover on its own.
+	GoVersion string
+	// GoVersionErr is why GoVersion is empty, kept because a check that cannot
+	// run has to say what stopped it rather than report an absence.
+	GoVersionErr error
+	// ToolchainFloor is the module's go.mod toolchain directive, empty when it
+	// names none.
+	ToolchainFloor string
 	// NoCache recomputes the base snapshot even when a cached one matches.
 	NoCache bool
-	phase   string
+	// Debt is the acknowledged-debt ledger committed at HEAD, and is nil in every
+	// mode but audit. Verify performs a real base comparison and must never
+	// consult a ledger: two mechanisms for the same question would let a change
+	// pick whichever one suits it.
+	Debt  *policy.DebtLedger
+	phase string
 }
 
 func (e *Engine) notify(event ProgressEvent) {
@@ -93,6 +108,14 @@ func (o *runOutput) merge(other runOutput) {
 // checks running concurrently under a semaphore bounded by GOMAXPROCS. Each
 // goroutine writes only its own slot and returns before Wait completes, so its
 // lifetime is visible here; the coordinator owns all aggregation.
+//
+// Every check acquires weight 1, and that is a measurement rather than an
+// oversight. Charging the core-saturating subprocesses (build, vet, test,
+// golangci-lint, the vulnerability scan) half the limit each, so that at most
+// two of them overlap, was tried against a forty-package module and made an
+// audit 14% slower and a verify 16% slower. None of those tools is parallel
+// enough to fill the machine on its own, so overlapping their serial phases
+// beats protecting them from each other. Change this only with numbers.
 func (e *Engine) schedule(ctx context.Context, checks []Check) (runOutput, error) {
 	limit := e.Concurrency
 	if limit <= 0 {
@@ -177,6 +200,19 @@ func readyWave(checks []Check, index map[string]int, completed, usable map[strin
 	return wave, blocked
 }
 
+// harnessError marks a check failure as a defect in goharness rather than in
+// the tool the check drives.
+//
+// Without it the report attributes the failure to whatever the check normally
+// runs, and a reader who trusts that attribution goes looking for a problem in
+// their toolchain, or worse, in their code. A tool fault is never a fact about
+// the repository, and it is not a fact about the repository's tools either.
+type harnessError struct{ err error }
+
+func (f harnessError) Error() string { return f.err.Error() }
+
+func (f harnessError) Unwrap() error { return f.err }
+
 // runOne executes one check under a recover guard: a panicking check becomes a
 // CheckFailure, and therefore an INCONCLUSIVE claim, never a harness crash.
 func (e *Engine) runOne(ctx context.Context, check Check, total int) (outcome checkOutcome) {
@@ -213,15 +249,15 @@ func collect(checks []Check, outcomes []checkOutcome) runOutput {
 		out.Timings[o.id] = o.elapsed
 		switch {
 		case o.failure != nil:
+			attributed, reason := attribute(o.tool, o.id, o.failure)
 			out.Failures = append(out.Failures, CheckFailure{
-				CheckID: o.id, Tool: o.tool,
+				CheckID: o.id, Tool: attributed,
 				Reason: o.failure.Error(), Hint: hintFor(o.id),
 			})
 			for _, kind := range checks[i].Produces {
 				unproduced[kind] = true
 				out.Unproducible = append(out.Unproducible, admission.Unproducible{
-					Kind: kind, Reason: o.id + " failed: " + firstLine(o.failure.Error()),
-					Remedy: hintFor(o.id),
+					Kind: kind, Reason: reason, Remedy: hintFor(o.id),
 				})
 			}
 		case o.skipped:
@@ -262,6 +298,21 @@ func firstLine(s string) string {
 	return first
 }
 
+// attribute names who failed and phrases the gap the failure leaves.
+//
+// A reason is the sentence a reader acts on, so it has to say which side the
+// fault fell on. Anything else would let a harness defect read as a defect in
+// the repository, which is how an audit sends its operator hunting for a
+// build-constraint problem that does not exist.
+func attribute(checkTool, checkID string, failure error) (tool, reason string) {
+	var fault harnessError
+	if errors.As(failure, &fault) {
+		return "goharness", "goharness itself failed while producing this evidence, so the " +
+			"repository was not judged on it; see failures[] for the fault: " + firstLine(failure.Error())
+	}
+	return checkTool, checkID + " failed: " + firstLine(failure.Error())
+}
+
 func hintFor(checkID string) string {
 	switch checkID {
 	case admission.ProducerGolangci:
@@ -270,6 +321,9 @@ func hintFor(checkID string) string {
 		return "run `goharness setup` to provision the vulnerability database snapshot"
 	case admission.ProducerGoFix:
 		return "run `go tool fix help` to see the analyzers the installed toolchain registers"
+	case admission.ProducerVisibility:
+		return "this is a fault in goharness, not a defect in the repository; " +
+			"report it with the paths above and the module's location inside the repository"
 	case admission.ProducerMutation:
 		return "add a test that exercises the changed functions"
 	case admission.ProducerBenchmark:
@@ -330,7 +384,27 @@ type Result struct {
 	Unproducible []admission.Unproducible
 	Golangci     tool.Golangci
 	VulnDB       *toolcache.VulnDBManifest
-	PolicyPacks  []string
+	// GoVersion is the toolchain that produced this run's evidence, which for the
+	// security claim is the standard library that was actually judged.
+	GoVersion   string
+	PolicyPacks []string
+	// GeneratedExempt names the in-scope files this run did not judge because
+	// they carry a generated header and the change leaves them alone. An ADMITTED
+	// whose scope is invisible is not auditable, so what was skipped is reported
+	// rather than merely applied.
+	GeneratedExempt []string
+	// LeakBlockedPackages names the test packages where goroutine-leak
+	// verification could not be injected because a TestMain already exists.
+	LeakBlockedPackages []string
+	// Debt is the acknowledged-debt ledger this audit was judged against, nil
+	// when there was none and in every mode but audit.
+	Debt *policy.DebtLedger
+	// PolicyShadow describes what the repository's own lint configuration hides
+	// from itself. It is a report section and never a claim: a configuration is
+	// not a defect in the code, and a gate that rejected a change over someone's
+	// .golangci.yml would be overreach. Nil outside audit and where no
+	// configuration was found.
+	PolicyShadow *PolicyShadow
 	BaseCompared bool
 	Interrupted  bool
 	TimedOut     bool
@@ -383,6 +457,10 @@ func Run(ctx context.Context, version string, opts Options) (result Result, err 
 	result.CheckTimings = run.Timings
 	result.Golangci = setup.engine.Golangci
 	result.VulnDB = run.VulnDB
+
+	if opts.Mode == ModeAudit {
+		result.PolicyShadow = detectPolicyShadow(setup.repository.Root, result.Evidence)
+	}
 
 	setup.engine.applyWorktreeGuard(runCtx, setup.repository, setup.before, &run, &result)
 	result.Decision = decideRun(result, run, opts.Mode)
@@ -461,13 +539,29 @@ func prepare(ctx context.Context, version string, opts Options) (runSetup, error
 	if err != nil {
 		return runSetup{}, err
 	}
+	// Loading the ledger only in audit is what holds "verify ignores the ledger":
+	// the mode is consulted once, here, rather than at every place a state is
+	// decided. A ledger that will not parse ends the run, the same answer a
+	// malformed policy file gets, because a document that decides what stops
+	// blocking must never be read on a guess.
+	var ledger *policy.DebtLedger
+	if opts.Mode == ModeAudit {
+		if ledger, err = ledgerAt(ctx, git, r, r.Head); err != nil {
+			return runSetup{}, err
+		}
+	}
 
 	engine := &Engine{
 		Runner: runner, Git: git, Logger: logger, Policy: resolved,
 		Version: version, Concurrency: opts.Limit, ChangedEntries: cs.Entries,
 		Progress: opts.Progress, ConfigDigest: configDigest,
-		NoCache: opts.NoCache, phase: "head",
+		NoCache: opts.NoCache, Debt: ledger, phase: "head",
 	}
+	// A failure here is not fatal: the checks that need it report it as an
+	// obligation they could not discharge, which is more useful than refusing to
+	// run at all. The error travels with the gap so the report can name a cause.
+	engine.GoVersion, engine.GoVersionErr = tool.ResolveGoVersion(ctx, runner, r.Root)
+	engine.ToolchainFloor = r.ToolchainDirective
 	configDir, err := os.MkdirTemp("", "goharness-config-")
 	if err != nil {
 		return runSetup{}, fmt.Errorf("creating temporary config directory: %w", err)
@@ -484,6 +578,7 @@ func prepare(ctx context.Context, version string, opts Options) (runSetup, error
 		result: Result{
 			Mode: opts.Mode, Repository: r, Contract: contract,
 			PolicyPacks: resolved.Packs(), Change: cs, Golangci: engine.Golangci,
+			GoVersion: engine.GoVersion, Debt: ledger,
 		},
 	}, nil
 }
@@ -505,28 +600,56 @@ func resolveContract(
 	return admission.Merge(committed, head), nil
 }
 
-// contractAt reads the task contract as it stands at one revision. Absence is
-// looked up before the read so that a revision carrying no contract, which is
-// the common case, stays distinguishable from a git that will not answer.
+// contractAt reads the task contract as it stands at one revision.
 func contractAt(ctx context.Context, git repo.Git, r repo.Repository, rev string) (admission.TaskContract, error) {
-	none := admission.TaskContract{Source: admission.ContractFromDefault}
-	if rev == "" || !r.HasGit {
-		return none, nil
-	}
-	listed, err := git.Run(ctx, r.Root, "ls-tree", "--name-only", rev, "--", admission.ContractFileName)
-	if err != nil {
-		return admission.TaskContract{}, fmt.Errorf(
-			"looking for %s at %s: %w", admission.ContractFileName, rev, err)
-	}
-	if strings.TrimSpace(listed) == "" {
-		return none, nil
-	}
-	src, err := git.Run(ctx, r.Root, "show", rev+":./"+admission.ContractFileName)
-	if err != nil {
-		return admission.TaskContract{}, fmt.Errorf(
-			"reading %s at %s: %w", admission.ContractFileName, rev, err)
+	src, found, err := fileAt(ctx, git, r, rev, admission.ContractFileName)
+	if err != nil || !found {
+		return admission.TaskContract{Source: admission.ContractFromDefault}, err
 	}
 	return admission.ParseContract([]byte(src), admission.ContractFromBase)
+}
+
+// ledgerAt reads the acknowledged-debt ledger as it stands at one revision.
+//
+// The revision is the whole point. A ledger in the working tree is something
+// the change under judgement could have written for itself, so only the
+// committed copy counts, exactly as with the task contract. Editing the file is
+// itself a policy edit and is reported as one.
+func ledgerAt(ctx context.Context, git repo.Git, r repo.Repository, rev string) (*policy.DebtLedger, error) {
+	src, found, err := fileAt(ctx, git, r, rev, policy.DebtFileName)
+	if err != nil || !found {
+		return nil, err
+	}
+	ledger, err := policy.ParseDebtLedger([]byte(src))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s at %s: %w", policy.DebtFileName, rev, err)
+	}
+	return &ledger, nil
+}
+
+// fileAt reads one module-root file as it stands at a revision. Absence is
+// looked up before the read so that a revision carrying no such file, which is
+// the common case, stays distinguishable from a git that will not answer. Both
+// queries run at the module root, so the file is found where the module keeps
+// it however deep below the repository root that is.
+func fileAt(
+	ctx context.Context, git repo.Git, r repo.Repository, rev, name string,
+) (src string, found bool, err error) {
+	if rev == "" || !r.HasGit {
+		return "", false, nil
+	}
+	listed, err := git.Run(ctx, r.Root, "ls-tree", "--name-only", rev, "--", name)
+	if err != nil {
+		return "", false, fmt.Errorf("looking for %s at %s: %w", name, rev, err)
+	}
+	if strings.TrimSpace(listed) == "" {
+		return "", false, nil
+	}
+	src, err = git.Run(ctx, r.Root, "show", rev+":./"+name)
+	if err != nil {
+		return "", false, fmt.Errorf("reading %s at %s: %w", name, rev, err)
+	}
+	return src, true, nil
 }
 
 func applyTimeout(ctx context.Context, opts Options) (context.Context, context.CancelFunc) {
@@ -677,6 +800,7 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 	in.result.Risks = risks
 	in.result.Plan = plan
 	in.result.Execution = execution
+	in.result.GeneratedExempt = slices.Sorted(maps.Keys(headTarget.exemptFiles))
 
 	e.Logger.Info("plan built",
 		zap.Int("packages", len(execution.Packages)),
@@ -687,12 +811,19 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 		return runOutput{Timings: map[string]time.Duration{}}, nil
 	}
 
+	if err := headTarget.prepare(ctx); err != nil {
+		return runOutput{}, err
+	}
 	out, err := e.schedule(ctx, execution.Checks)
 	if err != nil {
 		return runOutput{}, err
 	}
 	out.Evidence = evidence.Finalize(decorate(e.Policy, out.Evidence))
+	out.Evidence = applyDebtLedger(e.Debt, out.Evidence)
 	out.VulnDB = headTarget.vulnDB
+	// Read after schedule returns, so the only goroutine that could have written
+	// it has finished; the same discipline the vulnerability snapshot follows.
+	in.result.LeakBlockedPackages = headTarget.leakBlocked
 
 	if !baseAvailable {
 		return out, nil
@@ -718,8 +849,13 @@ func (e *Engine) compareWithBase(
 	}()
 
 	baseChange := change.ChangeSet{FullScope: true, BaseOrigin: change.BaseUnavailable}
+	// A worktree materializes the whole repository, so the module sits at the
+	// same prefix below it that it occupies below the git root. Taking the
+	// worktree root as the module root builds every base check outside the
+	// module, where there is no go.mod and nothing resolves.
+	baseRoot := filepath.Join(wt.Dir, filepath.FromSlash(in.repository.ModulePrefix))
 	baseTarget, basePlan, err := e.buildTarget(ctx, targetInput{
-		root: wt.Dir, modulePath: in.repository.ModulePath,
+		root: baseRoot, modulePath: in.repository.ModulePath,
 		change: baseChange, mode: in.mode, contract: in.contract,
 		config: in.config, restrict: &scopeRestriction{
 			lint: headTarget.packages, tests: headTarget.testPackages,
@@ -780,6 +916,11 @@ func (e *Engine) baseRun(ctx context.Context, base string, t *target, checks []C
 			return cached, nil
 		}
 	}
+	// After the cache lookup, so a reused snapshot never pays to parse a base
+	// tree whose findings are already known.
+	if err := t.prepare(ctx); err != nil {
+		return runOutput{}, err
+	}
 	out, err := e.schedule(ctx, checks)
 	if err != nil {
 		return runOutput{}, err
@@ -835,12 +976,12 @@ func snapshotIfGit(ctx context.Context, git repo.Git, r repo.Repository) (repo.S
 // bytes it was parsed from, which is what tells cached evidence apart from
 // evidence produced under a policy that has since been edited.
 func loadProjectConfig(root string) (policy.Config, string, error) {
-	data, err := os.ReadFile(filepath.Join(root, "goharness.yaml"))
+	data, err := os.ReadFile(filepath.Join(root, policy.ConfigFileName))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return policy.Config{}, "none", nil
 		}
-		return policy.Config{}, "", fmt.Errorf("reading goharness.yaml: %w", err)
+		return policy.Config{}, "", fmt.Errorf("reading %s: %w", policy.ConfigFileName, err)
 	}
 	cfg, err := policy.ParseConfig(data)
 	if err != nil {

@@ -9,11 +9,19 @@ import (
 	"slices"
 )
 
-// MaxDerivedEntries bounds one kind of derived document. The cache is keyed by
-// content, so entries are never overwritten and would otherwise grow with every
-// base revision a repository ever verified; the oldest are dropped once the
-// directory passes this size.
+// MaxDerivedEntries bounds a kind whose documents describe a whole run. The
+// cache is keyed by content, so entries are never overwritten and would
+// otherwise grow with every base revision a repository ever verified; the
+// oldest are dropped once the directory passes this size.
 const MaxDerivedEntries = 128
+
+// MaxPerPackageEntries bounds a kind whose documents describe one package.
+//
+// A repository writes one entry per package per revision here, so the bound has
+// to be a multiple of the package count of a large module or the cache evicts
+// what the next run is about to ask for and never warms up. These documents are
+// small, and an oversized directory costs disk rather than correctness.
+const MaxPerPackageEntries = 8192
 
 // derivedDir holds results the harness computed rather than downloaded. They
 // are reproducible from their key, so losing one costs time and nothing else.
@@ -28,18 +36,19 @@ func (c *Cache) ReadDerived(kind, key string, out any) error {
 }
 
 // WriteDerived stores a derived document under its key and trims the kind back
-// to its bound.
-func (c *Cache) WriteDerived(kind, key string, document any) error {
+// to maxEntries. The bound is the caller's because it follows from how much one
+// document describes, which the cache cannot see.
+func (c *Cache) WriteDerived(kind, key string, document any, maxEntries int) error {
 	if err := writeJSON(filepath.Join(c.derivedDir(kind), key+".json"), document); err != nil {
 		return err
 	}
-	return c.trimDerived(kind)
+	return c.trimDerived(kind, maxEntries)
 }
 
 // trimDerived keeps the oldest entries from accumulating without limit. A
 // failure to trim is not a failure to cache: the document is already published,
 // and the next write tries again.
-func (c *Cache) trimDerived(kind string) error {
+func (c *Cache) trimDerived(kind string, maxEntries int) error {
 	dir := c.derivedDir(kind)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -48,7 +57,7 @@ func (c *Cache) trimDerived(kind string) error {
 		}
 		return fmt.Errorf("listing %s: %w", dir, err)
 	}
-	if len(entries) <= MaxDerivedEntries {
+	if len(entries) <= maxEntries {
 		return nil
 	}
 	type aged struct {
@@ -64,7 +73,7 @@ func (c *Cache) trimDerived(kind string) error {
 		dated = append(dated, aged{name: e.Name(), age: info.ModTime().UnixNano()})
 	}
 	slices.SortFunc(dated, func(a, b aged) int { return int(a.age - b.age) })
-	for _, e := range dated[:max(0, len(dated)-MaxDerivedEntries)] {
+	for _, e := range dated[:max(0, len(dated)-maxEntries)] {
 		if err := os.Remove(filepath.Join(dir, e.name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("trimming %s: %w", dir, err)
 		}

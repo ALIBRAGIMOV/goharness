@@ -68,8 +68,13 @@ func (p ResolvedPolicy) Rule(id string) (Rule, bool) {
 }
 
 // Decorate stamps policy metadata onto raw check output: classification, the
-// owning pack, and the documentation URL. Unknown rule IDs stay advisory so an
+// owning pack, the consequence class, the remedy bucket where a rule has more
+// than one, and the documentation URL. Unknown rule IDs stay advisory so an
 // unmapped linter can never block a change on policy the operator never saw.
+//
+// It runs over base evidence as well as head evidence, so the two sides of a
+// comparison are always decorated by the same policy and states compare on the
+// same fields.
 func (p ResolvedPolicy) Decorate(e evidence.Evidence) evidence.Evidence {
 	rule, ok := p.rules[e.RuleID]
 	if !ok {
@@ -79,6 +84,12 @@ func (p ResolvedPolicy) Decorate(e evidence.Evidence) evidence.Evidence {
 	}
 	e.PolicySource = rule.Pack
 	e.Classification = rule.EvidenceClassification()
+	e.Consequence = string(rule.Consequence)
+	if e.RuleID == RuleErrcheck {
+		remedy, consequence := ErrcheckRemedy(e.Message)
+		e.RemedyClass = remedy
+		e.Consequence = string(consequence)
+	}
 	if e.DocURL == "" {
 		e.DocURL = rule.DocURL
 	}
@@ -99,13 +110,27 @@ func (p ResolvedPolicy) excepted(e evidence.Evidence) bool {
 		if !p.now.Before(exc.Expires.AddDate(0, 0, 1)) {
 			continue
 		}
-		if scopeMatches(exc.Scope, e.File) {
+		// The package is consulted only where there is no file to consult. Evidence
+		// that names a file is judged on that file alone, so this closes the gap
+		// without widening any scope that already had somewhere to land.
+		location := e.File
+		if location == "" {
+			location = e.Package
+		}
+		if scopeMatches(exc.Scope, location) {
 			return true
 		}
 	}
 	return false
 }
 
+// scopeMatches decides whether an exception's scope covers a location, which is
+// a file where the producing tool knew one and the package otherwise.
+//
+// Some evidence is package-scoped by nature: a leaked goroutine belongs to a
+// test binary, not to a line. Refusing every empty file made such a finding
+// unreachable by any exception, however narrow and well argued, which is not
+// strictness but an accident of where the value happened to be empty.
 func scopeMatches(scope, file string) bool {
 	if scope == "" || file == "" {
 		return false

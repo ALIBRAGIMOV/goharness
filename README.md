@@ -14,7 +14,7 @@ most code is written by AI coding agents and "done" stopped meaning anything.
 ```console
 $ goharness verify
 REJECTED  failing claims: test-effectiveness
-goharness 0.5.0  mode=verify  module github.com/acme/billing (go 1.26)
+goharness 0.6.0  mode=verify  module github.com/acme/billing (go 1.26)
 tools: go go1.26.6, golangci-lint 2.12.2 (pin 2.12.2), x/vuln v1.7.0
 scope: 7 changed files against 4f2ab1c9d3e5 (merge-base with default branch), 12 packages, 9 test packages
 risk domains: concurrency, tests
@@ -141,11 +141,31 @@ Finish every task by running `goharness verify --agent` and resolving every FAIL
 and INCONCLUSIVE claim until the verdict is ADMITTED.
 ```
 
+[docs/agent-contract.md](docs/agent-contract.md) is the longer fragment: the
+completion protocol, the order to read the report in, the two things never to
+do, and where the on-ramps are for a repository that does not pass yet.
+
 In `--agent` mode stdout is exactly one `goharness.report/v2` JSON document:
 the verdict, the claim table, every finding with `blocking` and, where a tool
 can state the fix rather than guess it, `fix.command`, plus every obligation
 the run could not discharge with the action that would produce it. Run
 `goharness help` and the whole protocol is on one screen.
+
+The document is ordered so that working it top down is the right order to work
+it. Every finding carries a consequence class, and `evidence[]` is sorted by it:
+silent data loss first, then unsafe behaviour, then structural, then hygiene. A
+`summary` block carries the counts every consumer used to recompute, a
+`coverage` block says what the run judged and what it left out, and
+`--evidence top` trims a large report to the findings that matter while
+declaring exactly how many it omitted; `goharness explain <fingerprint>
+--report r.json` resolves any of the rest. Where a rule's fix is mechanical,
+`goharness fix --rule <ID>` performs it, so a thousand of them are one command
+rather than an argument about the rule.
+
+`goharness diff before.json after.json` compares two reports on fingerprint
+identity and states what was fixed, what was introduced and what remains. It is
+progress accounting a supervisor can check without trusting the agent's account
+of its own work.
 
 ## What a change cannot do to the gate
 
@@ -165,7 +185,9 @@ takes nothing in the tree at its word:
   `GOFLAGS`, with `GOTOOLCHAIN=local`, and without the harness's own settings.
 
 Each route has a case in `internal/verify/bypass_test.go` asserting it stays
-closed. A bypass found in the field becomes a test before it becomes a fix.
+closed. A bypass found in the field becomes a test before it becomes a fix. The
+full reasoning, route by route with its residual risk, is in
+[docs/threat-model.md](docs/threat-model.md).
 
 ## What it will not blame you for
 
@@ -228,4 +250,8 @@ a performance regression and several complexity violations in its own code.
 - [docs/architecture.md](docs/architecture.md): pinned versions and architecture decisions
 - [docs/admission-model.md](docs/admission-model.md): claims model, risk planner, CLI and agent contract
 - [docs/toolchain.md](docs/toolchain.md): provisioning, checksums, offline vulnerability database
+- [docs/adopting-alongside-golangci.md](docs/adopting-alongside-golangci.md): adopting the gate in a repository that already runs golangci-lint
+- [docs/agent-contract.md](docs/agent-contract.md): a copy-pasteable CLAUDE.md/AGENTS.md fragment for repositories that adopt goharness
+- [docs/threat-model.md](docs/threat-model.md): the routes to an unearned ADMITTED, the mechanism closing each, and the test that pins it
+- [docs/releases/0.6.md](docs/releases/0.6.md): what 0.6 changed
 

@@ -18,12 +18,17 @@ import (
 // could have been admitted without the evidence to justify it. They exist to
 // stay red if a closure ever regresses, so every one of them asserts a verdict
 // that is not ADMITTED, or asserts that a grant had no effect.
+//
+// Every case runs under every repository layout. Two closures in this file once
+// held only where the module sat at the git root, and stayed green for a year
+// because no fixture ever built anything else; a closure that holds in one
+// layout and not another is not a closure.
 
 // baseline builds a two-commit fixture so that a base revision exists, which is
 // what the contract authentication and the diff-reading checks need.
-func baseline(t *testing.T) *fixture {
+func baseline(t *testing.T, lay layout) *fixture {
 	t.Helper()
-	f := newFixture(t)
+	f := newFixtureIn(t, lay)
 	f.write("lib/lib.go", cleanLibrary)
 	f.write("lib/lib_test.go", cleanLibraryTest)
 	f.commit("clean baseline")
@@ -33,113 +38,159 @@ func baseline(t *testing.T) *fixture {
 }
 
 func TestBypassSelfGrantedPolicyEditIsRefused(t *testing.T) {
-	useGolangci(t)
-	f := baseline(t)
-	f.write("goharness.task.yaml", "goal: sneak a policy change past the gate\nallowPolicyEdit: true\n")
-	f.write("goharness.yaml", "# an exception the change wrote for itself\n")
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("goharness.task.yaml", "goal: sneak a policy change past the gate\nallowPolicyEdit: true\n")
+		f.write("goharness.yaml", "# an exception the change wrote for itself\n")
 
-	result := run(t, f, verify.ModeVerify)
-	requireVerdict(t, result, admission.VerdictRejected)
-	blocking := blockingRules(result.Evidence)
-	for _, want := range []string{policy.RulePolicyGrant, policy.RulePolicyEdit} {
-		if !slices.Contains(blocking, want) {
-			t.Fatalf("blocking rules = %v, want %s", blocking, want)
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictRejected)
+		blocking := blockingRules(result.Evidence)
+		for _, want := range []string{policy.RulePolicyGrant, policy.RulePolicyEdit} {
+			if !slices.Contains(blocking, want) {
+				t.Fatalf("blocking rules = %v, want %s", blocking, want)
+			}
 		}
-	}
-	if result.Contract.AllowPolicyEdit {
-		t.Fatal("an uncommitted contract granted allowPolicyEdit")
-	}
+		if result.Contract.AllowPolicyEdit {
+			t.Fatal("an uncommitted contract granted allowPolicyEdit")
+		}
+	})
 }
 
 func TestBypassSelfGrantedAPIBreakIsRefused(t *testing.T) {
-	useGolangci(t)
-	f := newFixture(t)
-	f.write("api/api.go", publicAPIBase)
-	f.write("api/api_test.go", publicAPITest)
-	f.commit("published api")
-	f.write("lib/lib.go", cleanLibrary)
-	f.write("lib/lib_test.go", cleanLibraryTest)
-	f.commit("second commit so a parent revision exists")
-	f.write("api/api.go", publicAPIBreak)
-	f.write("goharness.task.yaml", "goal: remove Farewell\nallowApiBreak: true\n")
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := newFixtureIn(t, lay)
+		f.write("api/api.go", publicAPIBase)
+		f.write("api/api_test.go", publicAPITest)
+		f.commit("published api")
+		f.write("lib/lib.go", cleanLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.commit("second commit so a parent revision exists")
+		f.write("api/api.go", publicAPIBreak)
+		f.write("goharness.task.yaml", "goal: remove Farewell\nallowApiBreak: true\n")
 
-	result := run(t, f, verify.ModeVerify)
-	requireVerdict(t, result, admission.VerdictRejected)
-	blocking := blockingRules(result.Evidence)
-	for _, want := range []string{policy.RulePolicyGrant, policy.RuleAPIBreak} {
-		if !slices.Contains(blocking, want) {
-			t.Fatalf("blocking rules = %v, want %s", blocking, want)
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictRejected)
+		blocking := blockingRules(result.Evidence)
+		for _, want := range []string{policy.RulePolicyGrant, policy.RuleAPIBreak} {
+			if !slices.Contains(blocking, want) {
+				t.Fatalf("blocking rules = %v, want %s", blocking, want)
+			}
 		}
-	}
+	})
 }
 
 func TestBypassGeneratedHeaderOnNewCodeIsStillLinted(t *testing.T) {
-	useGolangci(t)
-	f := baseline(t)
-	f.write("lib/touch.go", generatedHeaderLibrary)
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("lib/touch.go", generatedHeaderLibrary)
 
-	result := run(t, f, verify.ModeVerify)
-	requireVerdict(t, result, admission.VerdictRejected)
-	if !slices.Contains(blockingRules(result.Evidence), "GCL-errcheck") {
-		t.Fatalf("a generated header exempted new code from the linter: %v", blockingRules(result.Evidence))
-	}
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictRejected)
+		if !slices.Contains(blockingRules(result.Evidence), "GCL-errcheck") {
+			t.Fatalf("a generated header exempted new code from the linter: %v", blockingRules(result.Evidence))
+		}
+	})
 }
 
 // TestGeneratedCodeTheChangeLeavesAloneStaysExempt is the false-positive guard
 // for the exemption: a repository full of generated code is still adoptable,
 // because only the generated files a change touches are judged.
 func TestGeneratedCodeTheChangeLeavesAloneStaysExempt(t *testing.T) {
-	useGolangci(t)
-	f := newFixture(t)
-	f.write("lib/lib.go", cleanLibrary)
-	f.write("lib/lib_test.go", cleanLibraryTest)
-	f.write("lib/touch.go", generatedHeaderLibrary)
-	f.commit("baseline with generated code")
-	f.write("lib/lib.go", renamedAnswerLibrary)
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", cleanLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.write("lib/touch.go", generatedHeaderLibrary)
+		f.commit("baseline with generated code")
+		f.write("lib/lib.go", renamedAnswerLibrary)
 
-	result := run(t, f, verify.ModeVerify)
-	requireVerdict(t, result, admission.VerdictAdmitted)
-	if slices.Contains(ruleIDs(result.Evidence), "GCL-errcheck") {
-		t.Fatalf("untouched generated code produced evidence: %v", ruleIDs(result.Evidence))
-	}
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictAdmitted)
+		if slices.Contains(ruleIDs(result.Evidence), "GCL-errcheck") {
+			t.Fatalf("untouched generated code produced evidence: %v", ruleIDs(result.Evidence))
+		}
+	})
 }
 
 func TestBypassCodeOutsideTheBuildIsNotSilentlyAdmitted(t *testing.T) {
-	useGolangci(t)
-	f := baseline(t)
-	f.write("lib/hidden.go", excludedLibrary)
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("lib/hidden.go", excludedLibrary)
 
-	result := run(t, f, verify.ModeVerify)
-	requireVerdict(t, result, admission.VerdictInconclusive)
-	if !hasUnproducible(result.Unproducible, admission.KindChangeVisible) {
-		t.Fatalf("a changed file outside the build produced no obligation: %+v", result.Unproducible)
-	}
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictInconclusive)
+		if !hasUnproducible(result.Unproducible, admission.KindChangeVisible) {
+			t.Fatalf("a changed file outside the build produced no obligation: %+v", result.Unproducible)
+		}
+	})
 }
 
 func TestBypassUnderscorePrefixedFileIsNotSilentlyAdmitted(t *testing.T) {
-	useGolangci(t)
-	f := baseline(t)
-	f.write("lib/_hidden.go", cleanLibrary)
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("lib/_hidden.go", cleanLibrary)
 
-	result := run(t, f, verify.ModeVerify)
-	requireVerdict(t, result, admission.VerdictInconclusive)
-	if !hasUnproducible(result.Unproducible, admission.KindChangeVisible) {
-		t.Fatalf("an underscore-prefixed changed file produced no obligation: %+v", result.Unproducible)
-	}
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictInconclusive)
+		if !hasUnproducible(result.Unproducible, admission.KindChangeVisible) {
+			t.Fatalf("an underscore-prefixed changed file produced no obligation: %+v", result.Unproducible)
+		}
+	})
 }
 
 // TestTestdataChangesStayOutOfScope is the false-positive guard for the
 // visibility obligation: testdata is outside package scope by Go convention,
 // which is exactly what keeps the harness's own fixtures from tripping it.
 func TestTestdataChangesStayOutOfScope(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("lib/testdata/sample.go", excludedLibrary)
+
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictAdmitted)
+		if hasUnproducible(result.Unproducible, admission.KindChangeVisible) {
+			t.Fatalf("a testdata file was counted as unexamined change: %+v", result.Unproducible)
+		}
+	})
+}
+
+// TestBypassChangeOutsideTheModuleIsNotJudgedAsCode is the false-positive guard
+// that pairs with the coordinate normalization: a monorepo's other directories
+// change constantly, and a file the module does not contain is neither evidence
+// against the change nor a gap in coverage.
+func TestBypassChangeOutsideTheModuleIsNotJudgedAsCode(t *testing.T) {
 	useGolangci(t)
-	f := baseline(t)
-	f.write("lib/testdata/sample.go", excludedLibrary)
+	f := baseline(t, subdirLayout())
+	f.write("lib/inside.go", cleanSecondLibrary)
+	f.writeRepo("frontend/app.go", excludedLibrary)
+	f.writeRepo("README.md", "# monorepo\n")
 
 	result := run(t, f, verify.ModeVerify)
 	requireVerdict(t, result, admission.VerdictAdmitted)
 	if hasUnproducible(result.Unproducible, admission.KindChangeVisible) {
-		t.Fatalf("a testdata file was counted as unexamined change: %+v", result.Unproducible)
+		t.Fatalf("a file outside the module was counted as unexamined change: %+v", result.Unproducible)
+	}
+	for _, file := range result.Change.Files {
+		if file == "frontend/app.go" || file == "README.md" {
+			t.Fatalf("a file outside the module entered the change set: %v", result.Change.Files)
+		}
+	}
+	if !slices.Contains(result.Change.OutsideModule, "frontend/app.go") {
+		t.Fatalf("a changed file outside the module was dropped without record: %v", result.Change.OutsideModule)
+	}
+	// The other half of the invariant: what the module does contain arrives
+	// module-relative, with no repository prefix left on it for a downstream join
+	// to double.
+	if !slices.Contains(result.Change.Files, "lib/inside.go") {
+		t.Fatalf("a changed file inside the module did not arrive module-relative: %v", result.Change.Files)
 	}
 }
 
@@ -155,35 +206,39 @@ echo '{"Issues":[]}'
 `
 
 func TestBypassForgedLinterIsNotTrusted(t *testing.T) {
-	f := baseline(t)
-	f.writeExecutable(tool.GolangciLintLocalPath, forgedLinter)
-	f.write("lib/lib.go", uncheckedErrorLibrary)
-	isolateLinterSources(t)
+	eachLayout(t, func(t *testing.T, lay layout) {
+		f := baseline(t, lay)
+		f.writeExecutable(tool.GolangciLintLocalPath, forgedLinter)
+		f.write("lib/lib.go", uncheckedErrorLibrary)
+		isolateLinterSources(t)
 
-	result := run(t, f, verify.ModeVerify)
-	requireVerdict(t, result, admission.VerdictInconclusive)
-	if !hasUnproducible(result.Unproducible, admission.KindLintCorrectness) {
-		t.Fatalf("a forged linter was believed: %+v", result.Unproducible)
-	}
-	if result.Golangci.SHA256 != "" {
-		t.Fatalf("a forged linter was accepted with sha256 %q", result.Golangci.SHA256)
-	}
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictInconclusive)
+		if !hasUnproducible(result.Unproducible, admission.KindLintCorrectness) {
+			t.Fatalf("a forged linter was believed: %+v", result.Unproducible)
+		}
+		if result.Golangci.SHA256 != "" {
+			t.Fatalf("a forged linter was accepted with sha256 %q", result.Golangci.SHA256)
+		}
+	})
 }
 
 // TestBypassGoflagsCannotSilenceTheTestSuite closes the quietest route of all:
 // GOFLAGS is spliced into every go invocation, so one -run pattern makes a
 // broken suite report success without touching a line of code.
 func TestBypassGoflagsCannotSilenceTheTestSuite(t *testing.T) {
-	useGolangci(t)
-	f := baseline(t)
-	f.write("lib/lib.go", wrongAnswerLibrary)
-	t.Setenv("GOFLAGS", "-run=NoTestHasThisName")
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("lib/lib.go", wrongAnswerLibrary)
+		t.Setenv("GOFLAGS", "-run=NoTestHasThisName")
 
-	result := run(t, f, verify.ModeVerify)
-	requireVerdict(t, result, admission.VerdictRejected)
-	if !slices.Contains(blockingRules(result.Evidence), policy.RuleTestFailure) {
-		t.Fatalf("GOFLAGS silenced the test suite: %v", blockingRules(result.Evidence))
-	}
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictRejected)
+		if !slices.Contains(blockingRules(result.Evidence), policy.RuleTestFailure) {
+			t.Fatalf("GOFLAGS silenced the test suite: %v", blockingRules(result.Evidence))
+		}
+	})
 }
 
 // isolateLinterSources puts every trusted golangci-lint out of the run's reach,
@@ -215,19 +270,21 @@ func hasUnproducible(items []admission.Unproducible, kind admission.EvidenceKind
 // model: a working-tree contract that only narrows what the change may do is
 // honoured in full, because nothing it declares can weaken the verdict.
 func TestContractMayStillTightenTheGate(t *testing.T) {
-	useGolangci(t)
-	f := baseline(t)
-	f.write("worker/worker.go", cleanLibrary)
-	f.write("goharness.task.yaml", "goal: touch only the library\nscope:\n  - lib/\n")
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("worker/worker.go", cleanLibrary)
+		f.write("goharness.task.yaml", "goal: touch only the library\nscope:\n  - lib/\n")
 
-	result := run(t, f, verify.ModeVerify)
-	requireVerdict(t, result, admission.VerdictRejected)
-	if !slices.Contains(blockingRules(result.Evidence), policy.RuleScopeViolation) {
-		t.Fatalf("declared scope was ignored: %v", blockingRules(result.Evidence))
-	}
-	if len(result.Contract.IgnoredGrants) != 0 {
-		t.Fatalf("a contract without grants reported ignored grants: %v", result.Contract.IgnoredGrants)
-	}
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictRejected)
+		if !slices.Contains(blockingRules(result.Evidence), policy.RuleScopeViolation) {
+			t.Fatalf("declared scope was ignored: %v", blockingRules(result.Evidence))
+		}
+		if len(result.Contract.IgnoredGrants) != 0 {
+			t.Fatalf("a contract without grants reported ignored grants: %v", result.Contract.IgnoredGrants)
+		}
+	})
 }
 
 // TestFlakyTestIsInconclusiveNotRejected is the adoption case that decides
@@ -235,18 +292,51 @@ func TestContractMayStillTightenTheGate(t *testing.T) {
 // differently each run must not be allowed to blame the change in front of it,
 // and must not be allowed to pass either.
 func TestFlakyTestIsInconclusiveNotRejected(t *testing.T) {
-	useGolangci(t)
-	f := baseline(t)
-	f.write("lib/flaky_test.go", flakyLibraryTest)
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("lib/flaky_test.go", flakyLibraryTest)
 
-	result := run(t, f, verify.ModeVerify)
-	if result.Decision.Verdict == admission.VerdictRejected {
-		t.Fatalf("a flake rejected the change: %v", blockingRules(result.Evidence))
+		result := run(t, f, verify.ModeVerify)
+		if result.Decision.Verdict == admission.VerdictRejected {
+			t.Fatalf("a flake rejected the change: %v", blockingRules(result.Evidence))
+		}
+		if !hasUnproducible(result.Unproducible, admission.KindTestsPass) {
+			t.Fatalf("a flake produced no obligation: %+v", result.Unproducible)
+		}
+		if slices.Contains(ruleIDs(result.Evidence), policy.RuleTestFailure) {
+			t.Fatalf("a flake was recorded as a test failure: %v", ruleIDs(result.Evidence))
+		}
+	})
+}
+
+// TestBypassHeadCacheCannotReachTheMandatoryCore bounds the one thing a
+// per-package head cache adds to the threat model.
+//
+// The cached answer is content-addressed, so an entry only ever applies to
+// bytes it was computed from. What it cannot rule out is someone with write
+// access to the cache directory seeding an entry for content they are about to
+// commit, which would make that package's findings for the cached check
+// disappear. The containment is that the cache speaks for the two formatting
+// checks and nothing else: no mandatory rule, and nothing ungrandfatherable,
+// can be answered from it, so the rules the harness exists to enforce are
+// decided by a fresh computation every run. This test fails the moment a
+// cached check starts producing one of them.
+func TestBypassHeadCacheCannotReachTheMandatoryCore(t *testing.T) {
+	t.Parallel()
+	cached := []string{policy.RuleFormatGofmt, policy.RuleFormatGoimports}
+	for _, ruleID := range cached {
+		if slices.Contains(policy.MandatoryRuleIDs(), ruleID) {
+			t.Fatalf("%s is mandatory and answerable from the head cache", ruleID)
+		}
+		if policy.IsUngrandfatherable(ruleID) {
+			t.Fatalf("%s blocks as pre-existing debt and is answerable from the head cache", ruleID)
+		}
 	}
-	if !hasUnproducible(result.Unproducible, admission.KindTestsPass) {
-		t.Fatalf("a flake produced no obligation: %+v", result.Unproducible)
-	}
-	if slices.Contains(ruleIDs(result.Evidence), policy.RuleTestFailure) {
-		t.Fatalf("a flake was recorded as a test failure: %v", ruleIDs(result.Evidence))
+	// The guard is only worth having while the list above is the whole list, so
+	// it is pinned rather than derived: a new cached check has to be added here
+	// deliberately, which is where someone reads the paragraph above.
+	if got := len(cached); got != 2 {
+		t.Fatalf("%d checks answer from the head cache; the containment argument covers 2", got)
 	}
 }

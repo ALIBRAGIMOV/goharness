@@ -26,15 +26,37 @@ type corpusRepo struct {
 	name   string
 	url    string
 	commit string
+	// modulePrefix is the module's directory below the repository root, empty
+	// when they coincide. A very large share of real Go repositories keep their
+	// module in a subdirectory, and every defect the 0.6 coordinate work closed
+	// was invisible to a corpus that contained none of them.
+	modulePrefix string
 }
 
 func corpusRepos() []corpusRepo {
 	return []corpusRepo{
-		{"google/uuid", "https://github.com/google/uuid", "0f11ee6918f41a04c201eceeadf612a377bc7fbc"},
-		{"gorilla/mux", "https://github.com/gorilla/mux", "b4617d0b9670ad14039b2739167fd35a60f557c5"},
-		{"sirupsen/logrus", "https://github.com/sirupsen/logrus", "d40e25cd45ed9c6b2b66e6b97573a0413e4c23bd"},
-		{"rs/zerolog", "https://github.com/rs/zerolog", "116c8060e034e8d46855354d22db2acbc8df9e1e"},
+		{name: "google/uuid", url: "https://github.com/google/uuid", commit: "0f11ee6918f41a04c201eceeadf612a377bc7fbc"},
+		{name: "gorilla/mux", url: "https://github.com/gorilla/mux", commit: "b4617d0b9670ad14039b2739167fd35a60f557c5"},
+		{name: "sirupsen/logrus", url: "https://github.com/sirupsen/logrus", commit: "d40e25cd45ed9c6b2b66e6b97573a0413e4c23bd"},
+		{name: "rs/zerolog", url: "https://github.com/rs/zerolog", commit: "116c8060e034e8d46855354d22db2acbc8df9e1e"},
+		{
+			name: "open-telemetry/opentelemetry-go-contrib/propagators/b3",
+			url:  "https://github.com/open-telemetry/opentelemetry-go-contrib",
+			// A repository of many modules, none of them at the root: the layout
+			// that made ADMITTED unreachable before the coordinate systems were
+			// unified.
+			commit:       "89837128476902ae5334ee36aedc2b4684a6b0cb",
+			modulePrefix: "propagators/b3",
+		},
 	}
+}
+
+// moduleDir is where the harness is pointed for this repository.
+func (r corpusRepo) moduleDir(checkout string) string {
+	if r.modulePrefix == "" {
+		return checkout
+	}
+	return filepath.Join(checkout, filepath.FromSlash(r.modulePrefix))
 }
 
 // TestCorpus runs the harness against real repositories at pinned revisions and
@@ -75,7 +97,10 @@ func runCorpusMode(
 	t *testing.T, repo corpusRepo, dir string, mode verify.Mode, before string, hits map[string]int,
 ) {
 	t.Helper()
-	options := verify.Options{Mode: mode, Dir: dir}
+	// Dir names the module, which in a multi-module repository is not the
+	// checkout root; the porcelain guard still watches the whole checkout,
+	// because a run must leave every part of the tree alone.
+	options := verify.Options{Mode: mode, Dir: repo.moduleDir(dir)}
 	if mode == verify.ModeVerify {
 		options.Base = repo.commit + "~5"
 	}
@@ -119,7 +144,7 @@ func checkoutCorpus(t *testing.T, repo corpusRepo) string {
 	dir := filepath.Join(t.TempDir(), filepath.Base(repo.url))
 	runCorpusCommand(t, "", "git", "clone", "--quiet", repo.url, dir)
 	runCorpusCommand(t, dir, "git", "checkout", "--quiet", repo.commit)
-	runCorpusCommand(t, dir, "go", "mod", "download", "all")
+	runCorpusCommand(t, repo.moduleDir(dir), "go", "mod", "download", "all")
 	return dir
 }
 

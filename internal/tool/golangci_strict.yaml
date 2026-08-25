@@ -7,7 +7,6 @@ linters:
   default: none
   enable:
     - bodyclose
-    - dupl
     - errcheck
     - errname
     - errorlint
@@ -33,9 +32,6 @@ linters:
     - unused
     - usestdlibvars
   settings:
-    dupl:
-      # Advisory-first: a high threshold reports only substantial copies.
-      threshold: 180
     errcheck:
       check-type-assertions: true
       check-blank: true
@@ -83,7 +79,6 @@ linters:
     rules:
       - path: _test\.go
         linters:
-          - dupl
           - gochecknoglobals
           - gosec
 

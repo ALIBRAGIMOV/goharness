@@ -29,9 +29,21 @@ func (f fakeGit) Run(_ context.Context, _ string, args ...string) (string, error
 func (f fakeGit) Available(context.Context) bool { return true }
 
 func TestParseGoMod(t *testing.T) {
-	module, directive := parseGoMod("module example.com/x\n\ngo 1.26\n\nrequire foo v1.0.0\n")
-	if module != "example.com/x" || directive != "1.26" {
-		t.Fatalf("got module %q directive %q", module, directive)
+	mod := parseGoMod("module example.com/x\n\ngo 1.26\n\nrequire foo v1.0.0\n")
+	if mod.path != "example.com/x" || mod.goDirective != "1.26" {
+		t.Fatalf("got module %q directive %q", mod.path, mod.goDirective)
+	}
+	if mod.toolchain != "" {
+		t.Fatalf("a go.mod without a toolchain line reported %q", mod.toolchain)
+	}
+}
+
+// TestParseGoModReadsTheToolchainFloor covers the directive that decides whether
+// a vulnerability scan is judging the standard library the module accepts.
+func TestParseGoModReadsTheToolchainFloor(t *testing.T) {
+	mod := parseGoMod("module example.com/x\n\ngo 1.26.3\n\ntoolchain go1.26.6\n")
+	if mod.goDirective != "1.26.3" || mod.toolchain != "go1.26.6" {
+		t.Fatalf("got directive %q toolchain %q", mod.goDirective, mod.toolchain)
 	}
 }
 
@@ -138,5 +150,55 @@ func mkdirAll(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o750); err != nil {
 		t.Fatalf("creating %s: %v", path, err)
+	}
+}
+
+// TestDiscoverRecordsTheModulePrefix pins the one value that translates between
+// the two coordinate systems a monorepo run has to reconcile: git reports paths
+// from the repository root and every check joins them onto the module root.
+//
+// The prefix comes from git rather than from filepath.Rel because GitRoot is
+// symlink-resolved and Root is not, so a computed relative path disagrees with
+// git on any machine whose temporary or home directory is a symlink.
+func TestDiscoverRecordsTheModulePrefix(t *testing.T) {
+	root := t.TempDir()
+	module := filepath.Join(root, "backend")
+	if err := os.MkdirAll(module, 0o750); err != nil {
+		t.Fatalf("creating the module directory: %v", err)
+	}
+	writeFile(t, filepath.Join(module, "go.mod"), "module example.com/x\n\ngo 1.26\n")
+	git := fakeGit{responses: map[string]string{
+		"rev-parse --show-toplevel": root,
+		"rev-parse --show-prefix":   "backend/\n",
+		"rev-parse --verify HEAD":   "abc123",
+	}}
+
+	r, err := Discover(t.Context(), git, module)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if r.ModulePrefix != "backend" {
+		t.Fatalf("module prefix = %q, want %q", r.ModulePrefix, "backend")
+	}
+}
+
+// TestDiscoverAtTheGitRootHasNoPrefix is the guard that keeps the translation
+// inert where the two roots coincide, which is where every previous fixture
+// lived and why the defect stayed hidden for so long.
+func TestDiscoverAtTheGitRootHasNoPrefix(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module example.com/x\n\ngo 1.26\n")
+	git := fakeGit{responses: map[string]string{
+		"rev-parse --show-toplevel": root,
+		"rev-parse --show-prefix":   "\n",
+		"rev-parse --verify HEAD":   "abc123",
+	}}
+
+	r, err := Discover(t.Context(), git, root)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if r.ModulePrefix != "" {
+		t.Fatalf("module prefix at the git root = %q, want empty", r.ModulePrefix)
 	}
 }

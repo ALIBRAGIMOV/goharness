@@ -22,6 +22,15 @@ type declIndex struct {
 	// constants holds package-level constant names, so a size or bound written
 	// as a named constant is recognised as fixed at compile time.
 	constants map[string]bool
+	// containers holds every name this unit declares anywhere with a slice, map,
+	// channel, function or interface type. One such declaration is enough: a name
+	// that means a collection somewhere in the package is not read as a count.
+	containers map[string]bool
+	// channels and nonChannels record where a name was declared with a channel
+	// type and where it was declared with anything else, so a name used for both
+	// in one package resolves to neither.
+	channels    map[string]bool
+	nonChannels map[string]bool
 }
 
 // isConstant reports whether a name is a package-level constant of this unit.
@@ -29,15 +38,35 @@ func (idx declIndex) isConstant(name string) bool {
 	return idx.constants[name]
 }
 
+// isContainer reports whether this unit declares the name anywhere with a type
+// that holds elements rather than a count.
+//
+// Only a positive answer is meaningful. A named type may well be an integer,
+// and a name this unit never declares belongs to another package, so both are
+// left to the caller's default rather than guessed at here.
+func (idx declIndex) isContainer(name string) bool {
+	return idx.containers[name]
+}
+
+// isChannel reports whether this unit declares the name as a channel and never
+// as anything else.
+func (idx declIndex) isChannel(name string) bool {
+	return idx.channels[name] && !idx.nonChannels[name]
+}
+
 func indexDeclarations(files []*ast.File) declIndex {
 	idx := declIndex{
-		funcs:     map[string]*ast.FuncDecl{},
-		methods:   map[string]*ast.FuncDecl{},
-		ambiguous: map[string]bool{},
-		imports:   map[string]bool{},
-		constants: map[string]bool{},
+		funcs:       map[string]*ast.FuncDecl{},
+		methods:     map[string]*ast.FuncDecl{},
+		ambiguous:   map[string]bool{},
+		imports:     map[string]bool{},
+		constants:   map[string]bool{},
+		containers:  map[string]bool{},
+		channels:    map[string]bool{},
+		nonChannels: map[string]bool{},
 	}
 	for _, file := range files {
+		idx.indexDeclaredTypes(file)
 		for _, spec := range file.Imports {
 			idx.imports[importLocalName(spec)] = true
 		}
@@ -64,6 +93,51 @@ func indexDeclarations(files []*ast.File) declIndex {
 		}
 	}
 	return idx
+}
+
+// indexDeclaredTypes records the shape of every name the file declares with an
+// explicit type: struct fields, parameters, results and typed variables alike.
+// A heuristic that has to tell a worker count from a work queue needs this much
+// and no more, so a name whose type is a named or imported one is recorded
+// nowhere and stays unknown.
+func (idx declIndex) indexDeclaredTypes(file *ast.File) {
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch decl := n.(type) {
+		case *ast.Field:
+			for _, name := range decl.Names {
+				idx.recordType(name.Name, decl.Type)
+			}
+		case *ast.ValueSpec:
+			if decl.Type == nil {
+				return true
+			}
+			for _, name := range decl.Names {
+				idx.recordType(name.Name, decl.Type)
+			}
+		}
+		return true
+	})
+}
+
+func (idx declIndex) recordType(name string, typ ast.Expr) {
+	switch t := typ.(type) {
+	case *ast.ChanType:
+		idx.channels[name] = true
+		idx.containers[name] = true
+	case *ast.ArrayType:
+		// An array has a fixed length and is a legitimate bound; a slice, which is
+		// the same node with no length, is exactly the input-sized thing the
+		// bounded-spawn rule exists to catch.
+		idx.nonChannels[name] = true
+		if t.Len == nil {
+			idx.containers[name] = true
+		}
+	case *ast.MapType, *ast.FuncType, *ast.InterfaceType:
+		idx.nonChannels[name] = true
+		idx.containers[name] = true
+	default:
+		idx.nonChannels[name] = true
+	}
 }
 
 func (idx declIndex) indexConstants(decl *ast.GenDecl) {

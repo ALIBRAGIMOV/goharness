@@ -293,3 +293,60 @@ func TestVerificationEnvStripsWhatCouldChangeAVerdict(t *testing.T) {
 		}
 	}
 }
+
+// TestCompareGoVersionsOrdersNumerically covers the comparison a security floor
+// rests on. go1.26.10 is newer than go1.26.9 and sorts before it as text, so a
+// string comparison would call a patched host older than the floor it satisfies
+// and turn a clean scan inconclusive.
+func TestCompareGoVersionsOrdersNumerically(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"go1.26.4", "go1.26.6", -1},
+		{"go1.26.6", "go1.26.4", 1},
+		{"go1.26.6", "go1.26.6", 0},
+		{"go1.26.10", "go1.26.9", 1},
+		{"go1.9", "go1.10", -1},
+		{"go1.26", "go1.26.0", -1},
+		{"go1.27rc1", "go1.27", 0},
+		{"devel +abc", "devel +def", 0},
+	}
+	for _, tc := range cases {
+		got := CompareGoVersions(tc.a, tc.b)
+		if (got < 0) != (tc.want < 0) || (got > 0) != (tc.want > 0) {
+			t.Fatalf("CompareGoVersions(%q, %q) = %d, want sign %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// TestResolveGoVersionRunsSanitisedInTheModule holds the invariant the field
+// report's second blocker broke: the version that decides which standard
+// library is judged is read from the module, under the same sanitised
+// environment as every other check, and never from wherever the operator stood.
+func TestResolveGoVersionRunsSanitisedInTheModule(t *testing.T) {
+	t.Parallel()
+	runner := &stubRunner{result: Result{Stdout: "go1.26.6\n"}}
+	got, err := ResolveGoVersion(t.Context(), runner, "/modules/backend")
+	if err != nil {
+		t.Fatalf("ResolveGoVersion: %v", err)
+	}
+	if got != "go1.26.6" {
+		t.Fatalf("resolved version = %q", got)
+	}
+	if runner.last.Dir != "/modules/backend" {
+		t.Fatalf("the probe ran in %q, not in the module", runner.last.Dir)
+	}
+	if !slices.Equal(runner.last.Args, []string{"env", "GOVERSION"}) {
+		t.Fatalf("probe args = %v", runner.last.Args)
+	}
+}
+
+func TestResolveGoVersionReportsAFailingProbe(t *testing.T) {
+	t.Parallel()
+	runner := &stubRunner{result: Result{ExitCode: 1, Stderr: "go: cannot find main module"}}
+	if _, err := ResolveGoVersion(t.Context(), runner, "/nowhere"); err == nil {
+		t.Fatal("a failing go env probe reported a version")
+	}
+}

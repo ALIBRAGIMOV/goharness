@@ -176,3 +176,63 @@ func TestVerificationMakesNoNetworkRequests(t *testing.T) {
 		}
 	}
 }
+
+// TestToolchainBelowTheModuleFloorMakesSecurityInconclusive covers the second of
+// the two blockers a production audit exposed.
+//
+// Verification pins GOTOOLCHAIN=local so it downloads nothing, and under that
+// setting the go command ignores a module's toolchain directive. A module that
+// names a newer toolchain has usually named it because the newer standard
+// library is the one without the vulnerabilities, so a scan below the floor is
+// judging a configuration the module rejects. Reporting it clean is the one
+// place in this product where silent under-reporting is least affordable.
+func TestToolchainBelowTheModuleFloorMakesSecurityInconclusive(t *testing.T) {
+	useGolangci(t)
+	provisionSnapshot(t)
+	f := vulnerableFixture(t)
+	const floor = "go1.99.0"
+	f.write("go.mod", "module example.com/fixture\n\ngo 1.26\n\ntoolchain "+floor+"\n\nrequire "+
+		toolcachetest.FixtureModulePath+" "+toolcachetest.FixtureVersion+"\n")
+	f.commit("declare a security floor above the host toolchain")
+
+	result := run(t, f, verify.ModeAudit)
+	if slices.Contains(ruleIDs(result.Evidence), policy.RuleGovulncheck) {
+		t.Fatalf("a scan below the module's floor still produced security evidence: %v",
+			ruleIDs(result.Evidence))
+	}
+
+	claim := claimFor(t, result, admission.DimSecurity)
+	if claim.State != admission.ClaimInconclusive {
+		t.Fatalf("security claim = %s (%s), want INCONCLUSIVE", claim.State, claim.Reason)
+	}
+	var reason string
+	for _, u := range result.Unproducible {
+		if u.Kind == admission.KindVulnerabilityScan {
+			reason = u.Reason
+		}
+	}
+	// Both versions, because the operator's next action depends on the distance
+	// between them and a reason that names neither is a reason they cannot act on.
+	if !strings.Contains(reason, floor) || !strings.Contains(reason, result.GoVersion) {
+		t.Fatalf("the gap does not name both versions (host %q, floor %q): %q",
+			result.GoVersion, floor, reason)
+	}
+	requireVerdict(t, result, admission.VerdictInconclusive)
+}
+
+// TestToolchainAtOrAboveTheFloorStillScans is the false-positive guard: the
+// floor check must not turn every module that names a toolchain into an
+// unanswerable security question.
+func TestToolchainAtOrAboveTheFloorStillScans(t *testing.T) {
+	useGolangci(t)
+	provisionSnapshot(t)
+	f := vulnerableFixture(t)
+	f.write("go.mod", "module example.com/fixture\n\ngo 1.26\n\ntoolchain go1.26.1\n\nrequire "+
+		toolcachetest.FixtureModulePath+" "+toolcachetest.FixtureVersion+"\n")
+	f.commit("declare a floor the host already clears")
+
+	result := run(t, f, verify.ModeAudit)
+	if !slices.Contains(blockingRules(result.Evidence), policy.RuleGovulncheck) {
+		t.Fatalf("a satisfied floor suppressed the scan: %v", ruleIDs(result.Evidence))
+	}
+}

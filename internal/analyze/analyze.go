@@ -67,16 +67,31 @@ type unit struct {
 	decls    declIndex
 }
 
-// Scan parses the given files, grouped by package directory so that a scanner
-// can resolve a call against declarations in sibling files, and runs every
-// enabled scanner family over them.
-func Scan(ctx context.Context, root string, relFiles []string, opts Options) ([]Finding, error) {
+// ParsedScope is one parse of a file set, grouped by package directory so that
+// a scanner can resolve a call against declarations in sibling files.
+//
+// It exists so that the scanners which answer different questions about the
+// same syntax read and parse it once between them rather than once each. The
+// parsed trees are never written to, so the scanners may run concurrently over
+// one scope; a caller that needs a different file set builds a different scope
+// rather than mutating this one.
+type ParsedScope struct {
+	units []*unit
+}
+
+// Parse reads and parses every given file once.
+func Parse(ctx context.Context, root string, relFiles []string) (*ParsedScope, error) {
 	units, err := parseUnits(ctx, root, relFiles)
 	if err != nil {
 		return nil, err
 	}
+	return &ParsedScope{units: units}, nil
+}
+
+// Scan runs every enabled scanner family over the parsed scope.
+func (s *ParsedScope) Scan(ctx context.Context, opts Options) ([]Finding, error) {
 	var out []Finding
-	for _, u := range units {
+	for _, u := range s.units {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -84,6 +99,15 @@ func Scan(ctx context.Context, root string, relFiles []string, opts Options) ([]
 	}
 	sortFindings(out)
 	return out, nil
+}
+
+// Scan parses the given files and runs every enabled scanner family over them.
+func Scan(ctx context.Context, root string, relFiles []string, opts Options) ([]Finding, error) {
+	scope, err := Parse(ctx, root, relFiles)
+	if err != nil {
+		return nil, err
+	}
+	return scope.Scan(ctx, opts)
 }
 
 // ScanFile runs the always-on scanners over one file's source, resolving calls

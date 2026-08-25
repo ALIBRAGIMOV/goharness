@@ -44,9 +44,111 @@ type Document struct {
 	Claims                  []admission.QualityClaim     `json:"claims"`
 	UnmetObligations        []admission.RequiredEvidence `json:"unmetObligations"`
 	Unproducible            []Unproducible               `json:"unproducible"`
-	Evidence                []Finding                    `json:"evidence"`
-	Failures                []verify.CheckFailure        `json:"failures"`
-	Timing                  Timing                       `json:"timing"`
+	Summary                 Summary                      `json:"summary"`
+	Coverage                Coverage                     `json:"coverage"`
+	// Baseline is the burn-down of the acknowledged-debt ledger, present only in
+	// an audit that read one. Absent everywhere else, so a report from a run with
+	// no ledger is byte-for-byte what it always was.
+	Baseline *Baseline `json:"baseline,omitempty"`
+	// PolicyShadow is what the repository's own lint configuration hides from
+	// itself. A section, never a claim: it is absent from every verdict, every
+	// count, and every exit code.
+	PolicyShadow *PolicyShadow `json:"policyShadow,omitempty"`
+	Evidence     []Finding     `json:"evidence"`
+	// EvidenceTruncated says the evidence list is a selection rather than the
+	// whole set, and EvidenceOmitted says how much is missing. Truncation is
+	// always declared: a consumer must never have to guess whether it holds the
+	// complete enumeration, because the enumeration being complete is the whole
+	// reason to trust it.
+	EvidenceTruncated bool                  `json:"evidenceTruncated"`
+	EvidenceOmitted   int                   `json:"evidenceOmitted"`
+	Failures          []verify.CheckFailure `json:"failures"`
+	Timing            Timing                `json:"timing"`
+}
+
+// Summary is the aggregation every consumer of this document rebuilds by hand.
+//
+// The counts are over the same final evidence set the document carries, so a
+// truncated rendering still reports the totals of the run rather than of what
+// survived truncation. Blocking and Advisory partition the set on the predicate
+// the verdict itself used; New, Preexisting and Fixed partition it on the base
+// comparison, and are all zero when there was none.
+type Summary struct {
+	Total         int            `json:"total"`
+	Blocking      int            `json:"blocking"`
+	Advisory      int            `json:"advisory"`
+	New           int            `json:"new"`
+	Preexisting   int            `json:"preexisting"`
+	Fixed         int            `json:"fixed"`
+	ByConsequence map[string]int `json:"byConsequence"`
+	ByRule        map[string]int `json:"byRule"`
+	ByDimension   map[string]int `json:"byDimension"`
+	ByRemedyClass map[string]int `json:"byRemedyClass"`
+	ByFile        map[string]int `json:"byFile"`
+}
+
+// Coverage states what the verdict does and does not rest on.
+//
+// The harness already refuses to claim what it did not prove; this is the other
+// half of that discipline, which is stating what it did not look at. An
+// ADMITTED whose scope is invisible cannot be audited by the person who has to
+// stand behind it. Head only: the base tree is an input to a comparison, not
+// something this run makes a claim about.
+type Coverage struct {
+	PackageCount         int      `json:"packageCount"`
+	Packages             []string `json:"packages"`
+	FilesJudged          int      `json:"filesJudged"`
+	GeneratedExemptCount int      `json:"generatedExemptCount"`
+	GeneratedExempt      []string `json:"generatedExempt"`
+	TestPackageCount     int      `json:"testPackageCount"`
+	TestPackages         []string `json:"testPackages"`
+	// LeakInjectionBlocked names the test packages whose own TestMain kept the
+	// goroutine-leak detector out. It was reachable only as prose inside an
+	// unproducible reason, which is not somewhere a consumer can act on.
+	LeakInjectionBlocked []string `json:"leakInjectionBlocked"`
+}
+
+// Baseline is the burn-down of an acknowledged-debt ledger.
+//
+// A ratchet is only honest while its progress is visible. Without these counts
+// a ledger that never shrinks looks exactly like one that is being worked down,
+// and a repository could sit at ADMITTED for years on the strength of a
+// document nobody reads. Recorded is the revision the ledger names; a reader
+// who finds it far behind head is looking at a stagnant ratchet.
+type Baseline struct {
+	RecordedAt   string `json:"recordedAt"`
+	Entries      int    `json:"entries"`
+	StillPresent int    `json:"stillPresent"`
+	FixedSince   int    `json:"fixedSince"`
+	// New counts the blocking findings the ledger does not acknowledge. It is the
+	// number that has to be zero, and the bar it measures never moves.
+	New int `json:"new"`
+	// Unbaselineable counts the blocking findings whose rules can never be
+	// acknowledged by any ledger: suppressions, the policy guards, generated
+	// prose. They are why an entry for one of them has no effect.
+	Unbaselineable int `json:"unbaselineable"`
+}
+
+// PolicyShadow is the repository's own lint configuration measured against the
+// strict pack.
+type PolicyShadow struct {
+	File     string        `json:"file"`
+	Analysed bool          `json:"analysed"`
+	Reason   string        `json:"reason,omitempty"`
+	Entries  []ShadowEntry `json:"entries"`
+}
+
+// ShadowEntry is one detected mechanism and the findings behind it.
+type ShadowEntry struct {
+	ID        string   `json:"id"`
+	Mechanism string   `json:"mechanism"`
+	Detail    string   `json:"detail"`
+	RuleIDs   []string `json:"ruleIds"`
+	// Attributed says whether FindingsInShadow is exact. Where it is false the
+	// count is zero and Note says why no exact one exists.
+	Attributed       bool   `json:"attributed"`
+	FindingsInShadow int    `json:"findingsInShadow"`
+	Note             string `json:"note,omitempty"`
 }
 
 // Finding is one piece of evidence as the protocol presents it: the finding
@@ -70,8 +172,13 @@ type Unproducible struct {
 
 // Versions records every pin that could change a verdict.
 type Versions struct {
-	Goharness           string `json:"goharness"`
-	Go                  string `json:"go"`
+	Goharness string `json:"goharness"`
+	Go        string `json:"go"`
+	// GoStdlib is the toolchain the checks actually ran against, which for the
+	// security claim is the standard library that was judged. It can differ from
+	// Go, which is the toolchain this binary was built with, and two runs that
+	// disagree about it are not comparable however alike the rest looks.
+	GoStdlib            string `json:"goStdlib"`
 	GolangciLint        string `json:"golangciLint"`
 	GolangciLintPin     string `json:"golangciLintPin"`
 	GolangciLintMatches bool   `json:"golangciLintMatchesPin"`
@@ -131,6 +238,10 @@ type ChangeInfo struct {
 	BaseCompared bool     `json:"baseCompared"`
 	FullScope    bool     `json:"fullScope"`
 	Files        []string `json:"files"`
+	// OutsideModule names changed files the repository contains and the module
+	// does not. In a monorepo their absence from Files is a decision, and a
+	// reader cannot audit a decision that leaves no trace.
+	OutsideModule []string `json:"outsideModule"`
 }
 
 // PlanInfo records the obligations and the checks that discharge them.
@@ -150,9 +261,43 @@ type Timing struct {
 	ChecksMs map[string]int64 `json:"checksMs"`
 }
 
-// Build converts a verification result into the JSON document.
+// Options tune the rendering only. Nothing here can change the verdict, the
+// claims, or the counts: they are computed from the whole evidence set before
+// any of this applies.
+type Options struct {
+	// EvidenceLimit truncates evidence[] to the highest-consequence findings.
+	// Zero or negative means the complete set, which stays the default.
+	EvidenceLimit int
+}
+
+// Build converts a verification result into the complete JSON document.
 func Build(version string, r verify.Result) Document {
+	return BuildWithOptions(version, r, Options{})
+}
+
+// BuildWithOptions converts a verification result into the JSON document,
+// applying any rendering limits after the document is complete.
+func BuildWithOptions(version string, r verify.Result, opts Options) Document {
+	doc := buildFull(version, r)
+	return truncateEvidence(doc, opts.EvidenceLimit)
+}
+
+// truncateEvidence keeps the highest-consequence findings and says how many it
+// dropped. The evidence set is already in consequence order, so "the top" needs
+// no second sort and means the same thing every run.
+func truncateEvidence(doc Document, limit int) Document {
+	if limit <= 0 || len(doc.Evidence) <= limit {
+		return doc
+	}
+	doc.EvidenceOmitted = len(doc.Evidence) - limit
+	doc.EvidenceTruncated = true
+	doc.Evidence = doc.Evidence[:limit]
+	return doc
+}
+
+func buildFull(version string, r verify.Result) Document {
 	decision := r.Decision
+	findings := buildFindings(r.Evidence)
 	return Document{
 		Schema:                  SchemaID,
 		Verdict:                 string(decision.Verdict),
@@ -164,6 +309,7 @@ func Build(version string, r verify.Result) Document {
 		Versions: Versions{
 			Goharness:           version,
 			Go:                  tool.GoVersion(),
+			GoStdlib:            r.GoVersion,
 			GolangciLint:        r.Golangci.Version,
 			GolangciLintPin:     tool.GolangciLintPin,
 			GolangciLintMatches: r.Golangci.MatchesPin(),
@@ -182,9 +328,118 @@ func Build(version string, r verify.Result) Document {
 		Claims:           normalizeClaims(decision.Claims),
 		UnmetObligations: nonNilObligations(decision.UnmetObligations),
 		Unproducible:     buildUnproducible(r.Unproducible),
-		Evidence:         buildFindings(r.Evidence),
+		Summary:          buildSummary(findings),
+		Coverage:         buildCoverage(r),
+		Baseline:         buildBaseline(r.Debt, findings),
+		PolicyShadow:     buildPolicyShadow(r.PolicyShadow),
+		Evidence:         findings,
 		Failures:         nonNilFailures(r.Failures),
 		Timing:           buildTiming(r),
+	}
+}
+
+func buildSummary(findings []Finding) Summary {
+	s := Summary{
+		Total:         len(findings),
+		ByConsequence: map[string]int{},
+		ByRule:        map[string]int{},
+		ByDimension:   map[string]int{},
+		ByRemedyClass: map[string]int{},
+		ByFile:        map[string]int{},
+	}
+	for _, f := range findings {
+		if f.Blocking {
+			s.Blocking++
+		} else {
+			s.Advisory++
+		}
+		switch f.State {
+		case evidence.StateNew:
+			s.New++
+		case evidence.StatePreexisting:
+			s.Preexisting++
+		case evidence.StateFixed:
+			s.Fixed++
+		case evidence.StateUncompared:
+		}
+		s.ByRule[f.RuleID]++
+		if f.Consequence != "" {
+			s.ByConsequence[f.Consequence]++
+		}
+		if f.RemedyClass != "" {
+			s.ByRemedyClass[f.RemedyClass]++
+		}
+		if dim, ok := admission.DimensionOf(f.RuleID); ok {
+			s.ByDimension[string(dim)]++
+		}
+		if f.File != "" {
+			s.ByFile[f.File]++
+		}
+	}
+	return s
+}
+
+// buildBaseline measures the ledger against this run.
+//
+// Fixed findings are counted as a set difference over fingerprints and nothing
+// cleverer. Occurrence indexes make identical findings distinguishable in
+// identity order, so removing one of several leaves the survivors named exactly
+// as they were and the last index is the one that disappears; any counting rule
+// that tried to be smarter than "this fingerprint is no longer here" would be
+// counting something other than what the ledger recorded.
+func buildBaseline(ledger *policy.DebtLedger, findings []Finding) *Baseline {
+	if ledger == nil {
+		return nil
+	}
+	acknowledged := ledger.Fingerprints()
+	present := make(map[string]bool, len(findings))
+	out := &Baseline{RecordedAt: ledger.RecordedAt, Entries: len(ledger.Entries)}
+	for _, f := range findings {
+		present[f.Fingerprint] = true
+		if !f.Blocking {
+			continue
+		}
+		if !acknowledged[f.Fingerprint] {
+			out.New++
+		}
+		if policy.IsUngrandfatherable(f.RuleID) {
+			out.Unbaselineable++
+		}
+	}
+	for _, e := range ledger.Entries {
+		if present[e.Fingerprint] {
+			out.StillPresent++
+		}
+	}
+	out.FixedSince = out.Entries - out.StillPresent
+	return out
+}
+
+func buildPolicyShadow(s *verify.PolicyShadow) *PolicyShadow {
+	if s == nil {
+		return nil
+	}
+	entries := make([]ShadowEntry, 0, len(s.Entries))
+	for _, e := range s.Entries {
+		entries = append(entries, ShadowEntry{
+			ID: e.ID, Mechanism: e.Mechanism, Detail: e.Detail,
+			RuleIDs: nonNil(e.RuleIDs), Attributed: e.Attributed,
+			FindingsInShadow: e.Findings, Note: e.Note,
+		})
+	}
+	return &PolicyShadow{File: s.File, Analysed: s.Analysed, Reason: s.Reason, Entries: entries}
+}
+
+func buildCoverage(r verify.Result) Coverage {
+	return Coverage{
+		PackageCount:         len(r.Execution.Packages),
+		Packages:             nonNil(r.Execution.Packages),
+		FilesJudged:          len(r.Execution.Files),
+		GeneratedExemptCount: len(r.GeneratedExempt),
+		GeneratedExempt:      nonNil(r.GeneratedExempt),
+		TestPackageCount:     len(r.Execution.Tests),
+		TestPackages:         nonNil(r.Execution.Tests),
+		LeakInjectionBlocked: nonNil(r.LeakBlockedPackages),
 	}
 }
 
@@ -232,11 +487,12 @@ func buildVulnDB(r verify.Result) *VulnDB {
 
 func buildChange(r verify.Result) ChangeInfo {
 	return ChangeInfo{
-		Base:         r.Change.Base,
-		BaseOrigin:   string(r.Change.BaseOrigin),
-		BaseCompared: r.BaseCompared,
-		FullScope:    r.Change.FullScope,
-		Files:        nonNil(r.Change.Files),
+		Base:          r.Change.Base,
+		BaseOrigin:    string(r.Change.BaseOrigin),
+		BaseCompared:  r.BaseCompared,
+		FullScope:     r.Change.FullScope,
+		Files:         nonNil(r.Change.Files),
+		OutsideModule: nonNil(r.Change.OutsideModule),
 	}
 }
 
@@ -318,11 +574,16 @@ func nonNilObligations(s []admission.RequiredEvidence) []admission.RequiredEvide
 	return s
 }
 
-// WriteJSON renders the JSON report.
+// WriteJSON renders the complete JSON report.
 func WriteJSON(w io.Writer, version string, r verify.Result) error {
+	return WriteJSONWithOptions(w, version, r, Options{})
+}
+
+// WriteJSONWithOptions renders the JSON report under rendering limits.
+func WriteJSONWithOptions(w io.Writer, version string, r verify.Result, opts Options) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(Build(version, r)); err != nil {
+	if err := enc.Encode(BuildWithOptions(version, r, opts)); err != nil {
 		return fmt.Errorf("writing JSON report: %w", err)
 	}
 	return nil

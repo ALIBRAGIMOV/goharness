@@ -31,6 +31,52 @@ func TestRegistryEntriesAreComplete(t *testing.T) {
 	}
 }
 
+// TestEveryRuleCarriesAConsequence keeps the consequence mapping total the way
+// the dimension mapping is. A rule with no class sorts last and tells a reader
+// nothing about what it costs to leave alone, which is the one thing the class
+// exists to say.
+func TestEveryRuleCarriesAConsequence(t *testing.T) {
+	t.Parallel()
+	counts := map[policy.Consequence]int{}
+	for _, r := range policy.Registry() {
+		if !policy.ValidConsequence(r.Consequence) {
+			t.Errorf("rule %s has consequence %q, which is not one of the four classes", r.ID, r.Consequence)
+			continue
+		}
+		counts[r.Consequence]++
+	}
+	for _, class := range []policy.Consequence{
+		policy.ConsequenceSilentLoss, policy.ConsequenceUnsafeBehavior,
+		policy.ConsequenceStructural, policy.ConsequenceHygiene,
+	} {
+		if counts[class] == 0 {
+			t.Errorf("no rule is classified %s; a class no rule uses is a class the reader cannot trust", class)
+		}
+		t.Logf("%-16s %d rules", class, counts[class])
+	}
+}
+
+// TestConsequenceRankOrdersTheClasses pins the order the report presents
+// evidence in. Reordering it changes which findings a truncated report shows.
+func TestConsequenceRankOrdersTheClasses(t *testing.T) {
+	t.Parallel()
+	ordered := []policy.Consequence{
+		policy.ConsequenceSilentLoss, policy.ConsequenceUnsafeBehavior,
+		policy.ConsequenceStructural, policy.ConsequenceHygiene,
+	}
+	for i := 1; i < len(ordered); i++ {
+		if policy.ConsequenceRank(ordered[i-1]) >= policy.ConsequenceRank(ordered[i]) {
+			t.Fatalf("%s does not rank before %s", ordered[i-1], ordered[i])
+		}
+	}
+	if policy.ConsequenceRank("") <= policy.ConsequenceRank(policy.ConsequenceHygiene) {
+		t.Fatal("an unclassified finding must sort after every classified one")
+	}
+	if policy.ValidConsequence("") || policy.ValidConsequence("invented") {
+		t.Fatal("ValidConsequence accepted a class the model does not define")
+	}
+}
+
 func TestRegistryIsSortedByID(t *testing.T) {
 	rules := policy.Registry()
 	ids := make([]string, 0, len(rules))
@@ -81,6 +127,30 @@ func TestLoopVariableRuleIsSuperseded(t *testing.T) {
 	}
 	if rule.GoVersionConstraint != ">=1.22" {
 		t.Fatalf("go constraint = %q, want >=1.22", rule.GoVersionConstraint)
+	}
+}
+
+// TestDuplicationIsCheckedOnce records why GCL-dupl is registered but never
+// runs: two full passes were producing two advisory rows about one duplication.
+// The entry stays so that evidence recorded before the change still resolves to
+// a rule, and this test is what stops it being quietly re-enabled.
+func TestDuplicationIsCheckedOnce(t *testing.T) {
+	t.Parallel()
+	rule, ok := policy.Lookup("GCL-dupl")
+	if !ok {
+		t.Fatal("GCL-dupl is not registered; a superseded rule keeps its entry")
+	}
+	if rule.Classification != policy.ClassSuperseded {
+		t.Fatalf("classification = %q, want superseded", rule.Classification)
+	}
+	if slices.Contains(policy.EnabledLinters(), "dupl") {
+		t.Fatal("dupl is still enabled, so duplication is computed twice")
+	}
+	if _, found := policy.Lookup(rule.Enforcement); !found {
+		t.Fatalf("GCL-dupl names %q as its enforcement, which is not a registered rule", rule.Enforcement)
+	}
+	if !strings.Contains(rule.Rationale, "GH-DUP-001") {
+		t.Fatal("the rationale does not name the rule that took over")
 	}
 }
 
@@ -213,6 +283,47 @@ func TestDecorateAppliesClassificationAndScopedExceptions(t *testing.T) {
 	}
 }
 
+// TestPackageScopedEvidenceIsReachableByAnException covers the evidence that
+// belongs to a package rather than to a line, of which a leaked goroutine is
+// the standing example.
+//
+// Matching a scope against the file alone left such a finding unreachable by
+// any exception, however narrow and well argued. That is not strictness: the
+// rule is outside the mandatory core precisely because it was meant to be
+// exceptable, and the gap was an accident of which field happened to be empty.
+func TestPackageScopedEvidenceIsReachableByAnException(t *testing.T) {
+	t.Parallel()
+	cfg := policy.Config{Exceptions: []policy.Exception{{
+		RuleID: policy.RuleGoroutineLeak, Scope: "example.com/x/internal/httpserver",
+		Reason: "r", Owner: "o", Expires: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC),
+	}}}
+	resolved, err := policy.Resolve(cfg, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	inScope := resolved.Decorate(evidence.Evidence{
+		RuleID: policy.RuleGoroutineLeak, Package: "example.com/x/internal/httpserver"})
+	if inScope.Classification != evidence.ClassificationAdvisory {
+		t.Fatalf("a package-scoped finding was unreachable by its exception: %q", inScope.Classification)
+	}
+	outOfScope := resolved.Decorate(evidence.Evidence{
+		RuleID: policy.RuleGoroutineLeak, Package: "example.com/x/internal/worker"})
+	if outOfScope.Classification != evidence.ClassificationRequired {
+		t.Fatalf("an exception reached a package it does not name: %q", outOfScope.Classification)
+	}
+	// The package is a fallback, never an alternative: a finding that names a
+	// file is judged on that file, so an exception scoped to the package must not
+	// reach a file the exception does not cover.
+	elsewhere := resolved.Decorate(evidence.Evidence{
+		RuleID: policy.RuleGoroutineLeak, File: "cmd/server/main.go",
+		Package: "example.com/x/internal/httpserver"})
+	if elsewhere.Classification != evidence.ClassificationRequired {
+		t.Fatalf("a package scope excused a finding in a file it does not name: %q",
+			elsewhere.Classification)
+	}
+}
+
 func TestExpiredExceptionsStopApplying(t *testing.T) {
 	cfg := policy.Config{Exceptions: []policy.Exception{{
 		RuleID: "GCL-gosec", Scope: "a/", Reason: "r", Owner: "o",
@@ -236,5 +347,65 @@ func TestUnknownRuleIDsStayAdvisory(t *testing.T) {
 	got := resolved.Decorate(evidence.Evidence{RuleID: "GCL-someLinterWeNeverEnabled", File: "a.go"})
 	if got.Classification != evidence.ClassificationAdvisory {
 		t.Fatalf("unmapped rule classification = %q, want advisory", got.Classification)
+	}
+}
+
+// TestMandatoryCoreDoesNotShrink pins the two sets that decide what no
+// configuration and no history can excuse.
+//
+// Both are listed literally rather than counted, so removing a member is an
+// edit to this test rather than a line inside a refactor, and the diff says out
+// loud that the gate now accepts something it used to refuse. That is the
+// review this repository wants: a draft of the 0.6 plan proposed dropping the
+// em-dash rule from the ungrandfatherable set so that a large body of
+// pre-existing findings would stop blocking, which would have let an agent
+// launder exactly the signal the rule detects by committing before verifying.
+// Adding a member is fine and needs only this list extended.
+func TestMandatoryCoreDoesNotShrink(t *testing.T) {
+	t.Parallel()
+	wantMandatory := []string{
+		policy.RuleSuppressNolint,
+		policy.RuleSuppressStaticcheck,
+		policy.RuleSuppressNosec,
+		policy.RuleSuppressRevive,
+		policy.RulePolicyEdit,
+		policy.RulePolicyGrant,
+		policy.RuleCommentEmDash,
+		policy.RuleCompile,
+	}
+	wantUngrandfatherable := []string{
+		policy.RuleSuppressNolint,
+		policy.RuleSuppressStaticcheck,
+		policy.RuleSuppressNosec,
+		policy.RuleSuppressRevive,
+		policy.RulePolicyEdit,
+		policy.RulePolicyGrant,
+		policy.RuleCommentEmDash,
+	}
+	assertCoversAll(t, "MandatoryRuleIDs", wantMandatory, policy.MandatoryRuleIDs())
+	assertCoversAll(t, "UngrandfatherableRuleIDs", wantUngrandfatherable, policy.UngrandfatherableRuleIDs())
+}
+
+func assertCoversAll(t *testing.T, name string, want, got []string) {
+	t.Helper()
+	for _, id := range want {
+		if !slices.Contains(got, id) {
+			t.Fatalf("%s no longer contains %s; the gate now accepts what it refused, "+
+				"which is a policy decision and needs its own justification, not a test edit", name, id)
+		}
+	}
+}
+
+// TestEveryMandatoryRuleIsRefusedAnException keeps the two halves of the core
+// consistent: a rule listed as mandatory that configuration could still except
+// away would be mandatory in name only.
+func TestEveryMandatoryRuleIsRefusedAnException(t *testing.T) {
+	t.Parallel()
+	for _, id := range policy.MandatoryRuleIDs() {
+		src := "exceptions:\n  - rule: " + id +
+			"\n    scope: lib/\n    reason: testing the refusal\n    owner: harness\n    expires: 2099-01-01\n"
+		if _, err := policy.ParseConfig([]byte(src)); err == nil {
+			t.Fatalf("configuration was allowed to except the mandatory rule %s", id)
+		}
 	}
 }

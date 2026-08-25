@@ -43,6 +43,9 @@ type Config struct {
 // ExpiresLayout is the date format accepted for exception expiry.
 const ExpiresLayout = "2006-01-02"
 
+// ConfigFileName is the project policy file, at the module root.
+const ConfigFileName = "goharness.yaml"
+
 // ParseConfig decodes the restricted goharness.yaml subset: two optional
 // top-level keys, each a list of flat string mappings. Anything outside that
 // shape is an error rather than a silently ignored key.
@@ -93,22 +96,22 @@ func ParseConfig(src []byte) (Config, error) {
 			}
 			section = strings.TrimSuffix(body, ":")
 			if section != "exceptions" && section != "rules" && section != "architecture" {
-				return Config{}, fmt.Errorf("goharness.yaml line %d: unknown top-level key %q", lineNo+1, section)
+				return Config{}, fmt.Errorf("%s line %d: unknown top-level key %q", ConfigFileName, lineNo+1, section)
 			}
 		case strings.HasPrefix(body, "- "):
 			if err := flush(); err != nil {
 				return Config{}, err
 			}
 			current = map[string]string{}
-			if err := putField(current, strings.TrimPrefix(body, "- "), lineNo+1); err != nil {
+			if err := putField(ConfigFileName, current, strings.TrimPrefix(body, "- "), lineNo+1); err != nil {
 				return Config{}, err
 			}
 		case current != nil:
-			if err := putField(current, body, lineNo+1); err != nil {
+			if err := putField(ConfigFileName, current, body, lineNo+1); err != nil {
 				return Config{}, err
 			}
 		default:
-			return Config{}, fmt.Errorf("goharness.yaml line %d: unexpected content %q", lineNo+1, body)
+			return Config{}, fmt.Errorf("%s line %d: unexpected content %q", ConfigFileName, lineNo+1, body)
 		}
 	}
 	if err := flush(); err != nil {
@@ -117,10 +120,13 @@ func ParseConfig(src []byte) (Config, error) {
 	return cfg, nil
 }
 
-func putField(dst map[string]string, body string, lineNo int) error {
+// putField records one "key: value" line of a restricted document. The file
+// name is a parameter because two files share this shape and an error that
+// names the wrong one sends the reader to the wrong document.
+func putField(file string, dst map[string]string, body string, lineNo int) error {
 	key, value, ok := strings.Cut(body, ":")
 	if !ok {
-		return fmt.Errorf("goharness.yaml line %d: expected key: value, got %q", lineNo, body)
+		return fmt.Errorf("%s line %d: expected key: value, got %q", file, lineNo, body)
 	}
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
@@ -128,7 +134,7 @@ func putField(dst map[string]string, body string, lineNo int) error {
 		value = unquoted
 	}
 	if _, exists := dst[key]; exists {
-		return fmt.Errorf("goharness.yaml line %d: duplicate key %q", lineNo, key)
+		return fmt.Errorf("%s line %d: duplicate key %q", file, lineNo, key)
 	}
 	dst[key] = value
 	return nil

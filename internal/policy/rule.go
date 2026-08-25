@@ -43,6 +43,46 @@ const (
 	LifecycleDeprecated   Lifecycle = "deprecated"
 )
 
+// Consequence says what goes wrong if a finding is left alone. It is triage
+// data, never verdict data: the decision rule reads Classification and nothing
+// else, and no consequence class makes a required rule advisory or the reverse.
+//
+// It exists because consequence is wildly uneven inside a single rule set. A
+// discarded write to a compliance audit trail and a typographic em dash are
+// both "required", and a consumer that allocates effort by count starts with
+// whichever is cheapest to emit. The class is the document's own answer to
+// "what should I fix first".
+type Consequence string
+
+// Consequence classes, in the order a reader should work them.
+const (
+	// ConsequenceSilentLoss covers data or errors that disappear without a trace:
+	// a discarded domain write, a failure returned as nil, an unread iteration
+	// error. Nothing observes the loss, so nothing but this finding reports it.
+	ConsequenceSilentLoss Consequence = evidence.ConsequenceSilentLoss
+	// ConsequenceUnsafeBehavior covers code that can misbehave, exhaust a
+	// resource, or be exploited, and the inline suppressions that keep such a
+	// finding out of sight.
+	ConsequenceUnsafeBehavior Consequence = evidence.ConsequenceUnsafeBehavior
+	// ConsequenceStructural covers the shape of the codebase and of its evidence:
+	// complexity, globals, layering, broken API contracts, weakened tests.
+	ConsequenceStructural Consequence = evidence.ConsequenceStructural
+	// ConsequenceHygiene covers findings whose cost is legibility alone.
+	ConsequenceHygiene Consequence = evidence.ConsequenceHygiene
+)
+
+// ConsequenceRank orders the classes for presentation. An unrecognised or empty
+// class sorts last, so evidence from a rule outside the registry never displaces
+// evidence the registry can speak for.
+func ConsequenceRank(c Consequence) int {
+	return evidence.ConsequenceRank(string(c))
+}
+
+// ValidConsequence reports whether a class is one of the four the model defines.
+func ValidConsequence(c Consequence) bool {
+	return ConsequenceRank(c) < 4
+}
+
 // Pack names composing the default strict policy.
 const (
 	PackGoCore            = "go/core"
@@ -60,11 +100,16 @@ type Rule struct {
 	Pack                string
 	Classification      Classification
 	Lifecycle           Lifecycle
+	Consequence         Consequence
 	Rationale           string
 	Enforcement         string
 	DocURL              string
 	PinnedCommit        string
 	GoVersionConstraint string
+	// Pattern is the compliant shape, for the rules whose remediation an operator
+	// would otherwise have to design from scratch. Empty for rules whose fix is
+	// obvious once the rationale is read.
+	Pattern string
 }
 
 // EvidenceClassification projects a rule classification onto the two values

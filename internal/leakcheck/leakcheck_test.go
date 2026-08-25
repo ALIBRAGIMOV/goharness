@@ -117,3 +117,34 @@ func TestHasTestMainDetection(t *testing.T) {
 		t.Fatalf("HasTestMain = %v, %v; want true, nil", found, err)
 	}
 }
+
+// TestLeakOriginNamesASourceLocation covers the anchor that turns a
+// package-scoped leak finding into something a reader can open. goleak has the
+// leaked goroutine's stack at detection time and the harness discarded it,
+// leaving every leak finding with no location at all.
+func TestLeakOriginNamesASourceLocation(t *testing.T) {
+	t.Parallel()
+	const output = `found unexpected goroutines:
+[Goroutine 21 in state chan receive, with example.com/x/lib.Start.func1 on top of the stack:
+goroutine 21 [chan receive]:
+example.com/x/lib.Start.func1()
+	/src/x/lib/lib.go:19 +0x34
+created by example.com/x/lib.Start in goroutine 20
+	/src/x/lib/lib.go:17 +0x64
+]
+`
+	got, ok := leakcheck.LeakOrigin(output)
+	if !ok {
+		t.Fatalf("no origin extracted from goleak output")
+	}
+	if got != "/src/x/lib/lib.go:19" {
+		t.Fatalf("origin = %q, want the first stack frame with its line and no address", got)
+	}
+}
+
+func TestLeakOriginReportsAbsenceRatherThanGuessing(t *testing.T) {
+	t.Parallel()
+	if got, ok := leakcheck.LeakOrigin("found unexpected goroutines:\nno frames here\n"); ok {
+		t.Fatalf("an output with no stack frame yielded %q", got)
+	}
+}

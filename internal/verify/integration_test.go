@@ -21,7 +21,7 @@ import (
 
 func run(t *testing.T, f *fixture, mode verify.Mode) verify.Result {
 	t.Helper()
-	result, err := verify.Run(t.Context(), "test", verify.Options{Mode: mode, Dir: f.dir})
+	result, err := verify.Run(t.Context(), "test", verify.Options{Mode: mode, Dir: f.verifyDir()})
 	if err != nil {
 		t.Fatalf("verify.Run(%s): %v", mode, err)
 	}
@@ -102,58 +102,78 @@ func TestSuppressionAndEmDashInsideStringLiteralsAreAdmitted(t *testing.T) {
 	}
 }
 
+// TestNewlyIntroducedLintProblemRejectsTheChange runs under every layout
+// because it is the shortest end-to-end statement the harness makes: a defect
+// the change introduced blocks it, and the evidence names the file in the
+// module's own coordinates. Both halves failed for a module below the git root,
+// and the base comparison this exercises builds its own worktree, where the
+// module has to be found again at the same prefix.
 func TestNewlyIntroducedLintProblemRejectsTheChange(t *testing.T) {
-	useGolangci(t)
-	f := newFixture(t)
-	f.write("lib/lib.go", cleanLibrary)
-	f.write("lib/lib_test.go", cleanLibraryTest)
-	f.commit("clean baseline")
-	f.write("lib/lib.go", uncheckedErrorLibrary)
-	f.commit("introduce an unchecked error")
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", cleanLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.commit("clean baseline")
+		f.write("lib/lib.go", uncheckedErrorLibrary)
+		f.commit("introduce an unchecked error")
 
-	result := run(t, f, verify.ModeVerify)
-	if !result.BaseCompared {
-		t.Fatalf("base comparison did not run; change = %+v", result.Change)
-	}
-	requireVerdict(t, result, admission.VerdictRejected)
-	if !slices.Contains(blockingRules(result.Evidence), "GCL-errcheck") {
-		t.Fatalf("blocking rules = %v, want GCL-errcheck", blockingRules(result.Evidence))
-	}
-	for _, e := range result.Evidence {
-		if e.RuleID == "GCL-errcheck" && e.State != evidence.StateNew {
-			t.Fatalf("errcheck finding state = %q, want %q", e.State, evidence.StateNew)
+		result := run(t, f, verify.ModeVerify)
+		if !result.BaseCompared {
+			t.Fatalf("base comparison did not run; change = %+v", result.Change)
 		}
-	}
+		requireVerdict(t, result, admission.VerdictRejected)
+		if !slices.Contains(blockingRules(result.Evidence), "GCL-errcheck") {
+			t.Fatalf("blocking rules = %v, want GCL-errcheck", blockingRules(result.Evidence))
+		}
+		for _, e := range result.Evidence {
+			if e.RuleID != "GCL-errcheck" {
+				continue
+			}
+			if e.State != evidence.StateNew {
+				t.Fatalf("errcheck finding state = %q, want %q", e.State, evidence.StateNew)
+			}
+			if e.File != "lib/lib.go" {
+				t.Fatalf("evidence file = %q, want the module-relative path", e.File)
+			}
+		}
+	})
 }
 
+// TestPreexistingDebtDoesNotBlockVerify is the false-positive guard of the case
+// above, and runs under every layout for the same reason: the base worktree is
+// where the module prefix has to be applied a second time, and a base the
+// harness cannot build is a base against which everything looks new.
 func TestPreexistingDebtDoesNotBlockVerify(t *testing.T) {
-	useGolangci(t)
-	f := newFixture(t)
-	f.write("lib/lib.go", uncheckedErrorLibrary)
-	f.write("lib/lib_test.go", cleanLibraryTest)
-	f.commit("baseline that already carries debt")
-	f.write("lib/lib.go", debtPlusAdditionLibrary)
-	f.commit("unrelated addition")
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", uncheckedErrorLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.commit("baseline that already carries debt")
+		f.write("lib/lib.go", debtPlusAdditionLibrary)
+		f.commit("unrelated addition")
 
-	result := run(t, f, verify.ModeVerify)
-	if !result.BaseCompared {
-		t.Fatalf("base comparison did not run; change = %+v", result.Change)
-	}
-	requireVerdict(t, result, admission.VerdictAdmitted)
+		result := run(t, f, verify.ModeVerify)
+		if !result.BaseCompared {
+			t.Fatalf("base comparison did not run; change = %+v", result.Change)
+		}
+		requireVerdict(t, result, admission.VerdictAdmitted)
 
-	var sawDebt bool
-	for _, e := range result.Evidence {
-		if e.RuleID != "GCL-errcheck" {
-			continue
+		var sawDebt bool
+		for _, e := range result.Evidence {
+			if e.RuleID != "GCL-errcheck" {
+				continue
+			}
+			sawDebt = true
+			if e.State != evidence.StatePreexisting {
+				t.Fatalf("debt state = %q, want %q", e.State, evidence.StatePreexisting)
+			}
 		}
-		sawDebt = true
-		if e.State != evidence.StatePreexisting {
-			t.Fatalf("debt state = %q, want %q", e.State, evidence.StatePreexisting)
+		if !sawDebt {
+			t.Fatalf("pre-existing debt was not reported at all: %v", ruleIDs(result.Evidence))
 		}
-	}
-	if !sawDebt {
-		t.Fatalf("pre-existing debt was not reported at all: %v", ruleIDs(result.Evidence))
-	}
+	})
 }
 
 func TestChangedPackagePullsInReverseDependentTests(t *testing.T) {
@@ -509,7 +529,7 @@ func TestConfigCannotExceptAMandatoryRule(t *testing.T) {
 		"    owner: nobody\n"+
 		"    expires: 2099-12-31\n")
 
-	_, err := verify.Run(t.Context(), "test", verify.Options{Mode: verify.ModeFast, Dir: f.dir})
+	_, err := verify.Run(t.Context(), "test", verify.Options{Mode: verify.ModeFast, Dir: f.verifyDir()})
 	if err == nil {
 		t.Fatal("an exception for a mandatory rule was accepted")
 	}
@@ -531,7 +551,7 @@ func TestExplicitBaseFlagChangesWhatCountsAsNew(t *testing.T) {
 	f.commit("unrelated addition")
 
 	againstParent, err := verify.Run(t.Context(), "test",
-		verify.Options{Mode: verify.ModeVerify, Dir: f.dir})
+		verify.Options{Mode: verify.ModeVerify, Dir: f.verifyDir()})
 	if err != nil {
 		t.Fatalf("verify against the parent commit: %v", err)
 	}
@@ -541,7 +561,7 @@ func TestExplicitBaseFlagChangesWhatCountsAsNew(t *testing.T) {
 	}
 
 	againstClean, err := verify.Run(t.Context(), "test",
-		verify.Options{Mode: verify.ModeVerify, Dir: f.dir, Base: clean})
+		verify.Options{Mode: verify.ModeVerify, Dir: f.verifyDir(), Base: clean})
 	if err != nil {
 		t.Fatalf("verify against the clean commit: %v", err)
 	}
@@ -789,7 +809,7 @@ func TestTimeoutIsInconclusiveNeverRejected(t *testing.T) {
 	f.write("lib/lib.go", debtPlusAdditionLibrary)
 
 	result, err := verify.Run(t.Context(), "test", verify.Options{
-		Mode: verify.ModeVerify, Dir: f.dir, Timeout: time.Nanosecond,
+		Mode: verify.ModeVerify, Dir: f.verifyDir(), Timeout: time.Nanosecond,
 	})
 	if err != nil {
 		t.Fatalf("verify.Run with an exhausted timeout: %v", err)
@@ -813,7 +833,7 @@ func TestCancellationIsInconclusiveAndCleansUp(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	result, err := verify.Run(ctx, "test", verify.Options{Mode: verify.ModeVerify, Dir: f.dir})
+	result, err := verify.Run(ctx, "test", verify.Options{Mode: verify.ModeVerify, Dir: f.verifyDir()})
 	if err != nil {
 		t.Fatalf("verify.Run on a cancelled context: %v", err)
 	}

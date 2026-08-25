@@ -48,9 +48,23 @@ type Repository struct {
 	Root        string
 	ModulePath  string
 	GoDirective string
-	GitRoot     string
-	HasGit      bool
-	HasCommits  bool
+	// ToolchainDirective is the go.mod `toolchain` line, empty when absent. A
+	// module that names one is declaring a floor, often a security floor, and a
+	// scan performed below it is judging a configuration the module forbids.
+	ToolchainDirective string
+	GitRoot            string
+	// ModulePrefix is Root's slash-form path below GitRoot, without a trailing
+	// slash and empty when the two coincide. Git reports paths from the
+	// repository root while every check joins them onto the module root, so this
+	// is the one value that translates between the two coordinate systems.
+	ModulePrefix string
+	HasGit       bool
+	HasCommits   bool
+	// Head is the commit the working tree sits on, empty when there is none. A
+	// document that records what a repository acknowledged has to name the
+	// revision it was true of, and that revision is the only copy of such a
+	// document the harness ever trusts.
+	Head string
 }
 
 // ErrNoModule is returned when no go.mod is found at or above the start
@@ -64,19 +78,30 @@ func Discover(ctx context.Context, git Git, dir string) (Repository, error) {
 	if err != nil {
 		return Repository{}, fmt.Errorf("resolving %q: %w", dir, err)
 	}
-	root, modPath, goDirective, err := findModule(abs)
+	mod, err := findModule(abs)
 	if err != nil {
 		return Repository{}, err
 	}
-	r := Repository{Root: root, ModulePath: modPath, GoDirective: goDirective}
+	r := Repository{
+		Root: mod.root, ModulePath: mod.path,
+		GoDirective: mod.goDirective, ToolchainDirective: mod.toolchain,
+	}
 
-	gitRoot, inRepo := tryGit(ctx, git, root, "rev-parse", "--show-toplevel")
+	gitRoot, inRepo := tryGit(ctx, git, mod.root, "rev-parse", "--show-toplevel")
 	if !inRepo {
 		return r, nil
 	}
 	r.GitRoot = resolveSymlinks(strings.TrimSpace(gitRoot))
 	r.HasGit = true
-	_, r.HasCommits = tryGit(ctx, git, root, "rev-parse", "--verify", "HEAD")
+	// git answers this itself rather than being asked to agree with a computed
+	// relative path: GitRoot is symlink-resolved and Root is not, so deriving the
+	// prefix with filepath.Rel would disagree with git on any machine whose
+	// temporary or home directory is a symlink.
+	prefix, _ := tryGit(ctx, git, mod.root, "rev-parse", "--show-prefix")
+	r.ModulePrefix = strings.Trim(strings.TrimSpace(prefix), "/")
+	head, hasCommits := tryGit(ctx, git, mod.root, "rev-parse", "--verify", "HEAD")
+	r.HasCommits = hasCommits
+	r.Head = strings.TrimSpace(head)
 	return r, nil
 }
 
@@ -98,27 +123,37 @@ func resolveSymlinks(p string) string {
 	return resolved
 }
 
-func findModule(start string) (root, modulePath, goDirective string, err error) {
+// moduleFile is the part of a go.mod the harness reads.
+type moduleFile struct {
+	root        string
+	path        string
+	goDirective string
+	toolchain   string
+}
+
+func findModule(start string) (moduleFile, error) {
 	dir := start
 	for {
 		candidate := filepath.Join(dir, "go.mod")
 		data, readErr := os.ReadFile(candidate)
 		if readErr == nil {
-			mod, directive := parseGoMod(string(data))
-			if mod == "" {
-				return "", "", "", fmt.Errorf("%s has no module directive", candidate)
+			mod := parseGoMod(string(data))
+			if mod.path == "" {
+				return moduleFile{}, fmt.Errorf("%s has no module directive", candidate)
 			}
-			return dir, mod, directive, nil
+			mod.root = dir
+			return mod, nil
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", "", "", fmt.Errorf("%w (searched upward from %s)", ErrNoModule, start)
+			return moduleFile{}, fmt.Errorf("%w (searched upward from %s)", ErrNoModule, start)
 		}
 		dir = parent
 	}
 }
 
-func parseGoMod(src string) (modulePath, goDirective string) {
+func parseGoMod(src string) moduleFile {
+	var mod moduleFile
 	for line := range strings.SplitSeq(src, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
@@ -126,14 +161,18 @@ func parseGoMod(src string) (modulePath, goDirective string) {
 		}
 		switch fields[0] {
 		case "module":
-			if modulePath == "" {
-				modulePath = fields[1]
+			if mod.path == "" {
+				mod.path = fields[1]
 			}
 		case "go":
-			if goDirective == "" {
-				goDirective = fields[1]
+			if mod.goDirective == "" {
+				mod.goDirective = fields[1]
+			}
+		case "toolchain":
+			if mod.toolchain == "" {
+				mod.toolchain = fields[1]
 			}
 		}
 	}
-	return modulePath, goDirective
+	return mod
 }

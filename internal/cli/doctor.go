@@ -49,6 +49,7 @@ func runDoctor(ctx context.Context, args []string, streams Streams) int {
 	} else {
 		out.line("%s module         %s (go %s) at %s", mark(true), r.ModulePath, r.GoDirective, r.Root)
 		out.line("%s git repository %s", mark(true), gitStateLabel(r))
+		healthy = reportToolchainFloor(ctx, out, runner, r) && healthy
 	}
 
 	healthy = reportGolangci(ctx, out, runner, r) && healthy
@@ -315,4 +316,41 @@ func gitStateLabel(r repo.Repository) string {
 	default:
 		return r.GitRoot
 	}
+}
+
+// reportToolchainFloor compares the toolchain that will run the checks with the
+// one the module's go.mod requires.
+//
+// Verification pins GOTOOLCHAIN=local, and under that setting the go command
+// ignores a module's toolchain directive. A module below its own floor still
+// builds, so nothing else in the run would mention it, yet the vulnerability
+// scan would be judging a standard library the module has declared it does not
+// accept. Six minutes into an audit is the wrong moment to learn that.
+func reportToolchainFloor(ctx context.Context, out *printer, runner tool.Runner, r repo.Repository) bool {
+	resolved, err := tool.ResolveGoVersion(ctx, runner, r.Root)
+	if err != nil {
+		out.line("%s checks run on  could not be resolved: %v", mark(false), err)
+		out.line("      fix: make sure the go command runs inside %s", r.Root)
+		return false
+	}
+	if r.ToolchainDirective == "" {
+		out.line("%s checks run on  %s, module declares no floor", mark(true), resolved)
+		return true
+	}
+	if tool.CompareGoVersions(resolved, r.ToolchainDirective) >= 0 {
+		out.line("%s checks run on  %s, at or above the module floor %s",
+			mark(true), resolved, r.ToolchainDirective)
+		return true
+	}
+	// A warning, not a failure, for the same reason a missing vulnerability
+	// database is one: the condition degrades evidence rather than breaking the
+	// harness, and the consequence is already carried where it cannot be argued
+	// away, by the security claim going INCONCLUSIVE. Everything still compiles;
+	// what is no longer true is that the scan judged the standard library this
+	// module accepts.
+	out.line("[warn] checks run on  %s is below the module floor %s; "+
+		"`goharness audit` reports its security claim INCONCLUSIVE", resolved, r.ToolchainDirective)
+	out.line("      fix: install %s; verification pins GOTOOLCHAIN=local and will not download it",
+		r.ToolchainDirective)
+	return true
 }

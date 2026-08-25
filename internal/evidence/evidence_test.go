@@ -1,6 +1,7 @@
 package evidence_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
@@ -50,6 +51,44 @@ func TestFinalizeIsDeterministicAndLineIndependent(t *testing.T) {
 	}
 	if first[0].RuleID != "A" || first[2].RuleID != "B" {
 		t.Fatalf("presentation order is wrong: %v", []string{first[0].RuleID, first[1].RuleID, first[2].RuleID})
+	}
+}
+
+// TestConsequenceOrdersPresentationOnly is the guard on the one way consequence
+// classes could do damage.
+//
+// Occurrence indexes are assigned in identity order, and the fingerprint is
+// built from them. If consequence ever reached that ordering, reclassifying a
+// rule would silently rename every repeated finding of it, every base
+// comparison would read the rename as "fixed, and a new one appeared", and a
+// recorded baseline would be invalidated by an edit to a registry field. So the
+// class may move a finding up the page and nothing else.
+func TestConsequenceOrdersPresentationOnly(t *testing.T) {
+	t.Parallel()
+	items := []evidence.Evidence{
+		{RuleID: "A", File: "a.go", Line: 3, Message: "repeated"},
+		{RuleID: "A", File: "a.go", Line: 9, Message: "repeated"},
+		{RuleID: "B", File: "b.go", Line: 1, Message: "other"},
+	}
+	plain := evidence.Finalize(slices.Clone(items))
+
+	classified := slices.Clone(items)
+	classified[0].Consequence = evidence.ConsequenceHygiene
+	classified[1].Consequence = evidence.ConsequenceHygiene
+	classified[2].Consequence = evidence.ConsequenceSilentLoss
+	got := evidence.Finalize(classified)
+
+	if got[0].RuleID != "B" {
+		t.Fatalf("silent loss did not sort first: %v", []string{got[0].RuleID, got[1].RuleID, got[2].RuleID})
+	}
+	byPrint := map[string]bool{}
+	for _, e := range plain {
+		byPrint[e.Fingerprint] = true
+	}
+	for _, e := range got {
+		if !byPrint[e.Fingerprint] {
+			t.Fatalf("classifying %s %s changed its fingerprint to %s", e.RuleID, e.File, e.Fingerprint)
+		}
 	}
 }
 

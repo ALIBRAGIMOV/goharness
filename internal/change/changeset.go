@@ -46,12 +46,21 @@ type Entry struct {
 
 // ChangeSet is the set of files a verification run considers changed, together
 // with the base it was computed against.
+//
+// Every path in Files and Entries is module-relative in slash form. That is the
+// single coordinate system the rest of the harness joins against a module root,
+// and mixing a repository-relative path into it silently disables every check
+// that recognises a file by name.
 type ChangeSet struct {
 	Base       string
 	BaseOrigin BaseOrigin
 	Files      []string
 	Entries    []Entry
 	FullScope  bool
+	// OutsideModule names the changed files the repository contains and this
+	// module does not. They are neither evidence nor a gap in coverage, but a
+	// reader of a monorepo report needs to see that they were seen and set aside.
+	OutsideModule []string
 }
 
 // HasBase reports whether a base revision was resolved and base/head comparison
@@ -125,6 +134,14 @@ func Build(ctx context.Context, git repo.Git, r repo.Repository, base string, or
 		cs.BaseOrigin = BaseUnavailable
 		return cs, nil
 	}
+	// Every query runs at the repository root. git diff reports the whole
+	// repository wherever it is invoked, but ls-files reports only what lies
+	// below the working directory, so asking from the module would make the
+	// untracked half of the change set narrower than the tracked half.
+	queryDir := r.Root
+	if r.GitRoot != "" {
+		queryDir = r.GitRoot
+	}
 	seen := map[string]Status{}
 	record := func(path string, status Status) {
 		path = strings.TrimSpace(path)
@@ -145,15 +162,22 @@ func Build(ctx context.Context, git repo.Git, r repo.Repository, base string, or
 		statusCommands = append(statusCommands,
 			[]string{"diff", "--name-status", "--diff-filter=ACMRTD", base, "HEAD"})
 	}
-	plainCommands := [][]string{{"ls-files", "--others", "--exclude-standard"}}
+	// --full-name makes ls-files answer from the repository root, which is where
+	// git diff already answers from. Without it the two subcommands disagree by
+	// exactly the module prefix and the change set carries both coordinate
+	// systems at once.
+	plainCommands := [][]string{{"ls-files", "--others", "--exclude-standard", "--full-name"}}
 	if !r.HasCommits {
 		statusCommands = nil
-		plainCommands = [][]string{{"ls-files"}, {"ls-files", "--others", "--exclude-standard"}}
+		plainCommands = [][]string{
+			{"ls-files", "--full-name"},
+			{"ls-files", "--others", "--exclude-standard", "--full-name"},
+		}
 		cs.FullScope = true
 	}
 
 	for _, args := range statusCommands {
-		out, err := git.Run(ctx, r.Root, args...)
+		out, err := git.Run(ctx, queryDir, args...)
 		if err != nil {
 			return ChangeSet{}, fmt.Errorf("listing changed files (git %s): %w", strings.Join(args, " "), err)
 		}
@@ -165,7 +189,7 @@ func Build(ctx context.Context, git repo.Git, r repo.Repository, base string, or
 		}
 	}
 	for _, args := range plainCommands {
-		out, err := git.Run(ctx, r.Root, args...)
+		out, err := git.Run(ctx, queryDir, args...)
 		if err != nil {
 			return ChangeSet{}, fmt.Errorf("listing changed files (git %s): %w", strings.Join(args, " "), err)
 		}
@@ -174,17 +198,42 @@ func Build(ctx context.Context, git repo.Git, r repo.Repository, base string, or
 		}
 	}
 
-	files := make([]string, 0, len(seen))
+	repoPaths := make([]string, 0, len(seen))
 	for f := range seen {
-		files = append(files, f)
+		repoPaths = append(repoPaths, f)
 	}
-	sort.Strings(files)
-	cs.Files = files
-	cs.Entries = make([]Entry, 0, len(files))
-	for _, f := range files {
-		cs.Entries = append(cs.Entries, Entry{Path: f, Status: seen[f]})
+	sort.Strings(repoPaths)
+
+	cs.Entries = make([]Entry, 0, len(repoPaths))
+	cs.Files = make([]string, 0, len(repoPaths))
+	for _, repoPath := range repoPaths {
+		rel, inModule := moduleRelative(repoPath, r.ModulePrefix)
+		if !inModule {
+			cs.OutsideModule = append(cs.OutsideModule, repoPath)
+			continue
+		}
+		cs.Files = append(cs.Files, rel)
+		cs.Entries = append(cs.Entries, Entry{Path: rel, Status: seen[repoPath]})
 	}
 	return cs, nil
+}
+
+// moduleRelative translates one repository-relative path into the module's
+// coordinate system, reporting whether the module contains it at all.
+//
+// This is the single place the translation happens. Every git subcommand the
+// change set reads is asked for repository-relative paths, so a caller never
+// has to know which convention a particular subcommand prefers, and a path that
+// reaches a check can only be module-relative.
+func moduleRelative(repoPath, modulePrefix string) (string, bool) {
+	if modulePrefix == "" {
+		return repoPath, true
+	}
+	rest, ok := strings.CutPrefix(repoPath, modulePrefix+"/")
+	if !ok || rest == "" {
+		return "", false
+	}
+	return rest, true
 }
 
 // parseNameStatus reads one "M\tpath" or "R100\told\tnew" record.

@@ -2,6 +2,7 @@ package verify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/format"
 	"maps"
@@ -9,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"golang.org/x/tools/imports"
@@ -47,10 +49,25 @@ type target struct {
 	isBase      bool
 	contract    admission.TaskContract
 	analyzeOpts analyze.Options
+	// parsed is the one parse of judged that every syntax-driven check reads.
+	// The coordinator builds it before scheduling and never writes to it again,
+	// which is what lets three checks share it without sharing mutable state.
+	parsed *analyze.ParsedScope
+	// packageScopes groups judged by package directory, with the content digest
+	// each package's cached answers are addressed by. Built with parsed, and read
+	// only afterwards, for the same reason.
+	packageScopes []packageScope
+	// module is the digest of the module requirements, which decide which imports
+	// resolve and therefore what goimports concludes.
+	module string
 
 	// vulnDB records the snapshot the scan actually used, so the report can
 	// state which database produced the security evidence.
 	vulnDB *toolcache.VulnDBManifest
+	// leakBlocked names the test packages whose existing TestMain kept the leak
+	// detector out. Written by the race check and read once the schedule has
+	// returned, exactly as vulnDB is.
+	leakBlocked []string
 }
 
 // checksFor builds the runnable DAG for the planned checks that belong to this
@@ -104,6 +121,20 @@ func (t *target) newEvidence(ruleID, toolName, version string, sev evidence.Seve
 	}
 }
 
+// nativeRemediation is the command that closes a native finding, for the rules
+// whose fix the harness performs itself. It follows the gofmt precedent: when a
+// tool can state the fix exactly, arguing about the rule becomes moot.
+func nativeRemediation(ruleID string) (evidence.Remediation, bool) {
+	fixer, ok := analyze.FixerFor(ruleID)
+	if !ok {
+		return evidence.Remediation{}, false
+	}
+	return evidence.Remediation{
+		Command: "goharness fix --rule " + fixer.RuleID,
+		Summary: fixer.Summary,
+	}, true
+}
+
 func (t *target) rel(p string) string {
 	if p == "" {
 		return ""
@@ -132,6 +163,9 @@ func (t *target) fromFindings(findings []analyze.Finding, producer string) []evi
 		e = t.engine.Policy.Decorate(e)
 		if f.Advisory {
 			e.Classification = evidence.ClassificationAdvisory
+		}
+		if fix, ok := nativeRemediation(f.RuleID); ok {
+			e.Fix = &fix
 		}
 		out = append(out, e)
 	}
@@ -179,60 +213,184 @@ func (t *target) runCompile(ctx context.Context) (checkResult, error) {
 	return checkResult{evidence: out}, nil
 }
 
+// formatCheck describes one formatting question: what its answers are stored
+// under, how a package is judged, and how a finding reads once policy has been
+// applied to it.
+type formatCheck struct {
+	kind    string
+	ruleID  string
+	tool    string
+	message string
+	fix     string
+	judge   func(context.Context, packageScope) ([]formatFinding, error)
+}
+
 func (t *target) runGofmt(ctx context.Context) (checkResult, error) {
+	return t.runFormatCheck(ctx, formatCheck{
+		kind:    gofmtEvidenceKind,
+		ruleID:  policy.RuleFormatGofmt,
+		tool:    "gofmt",
+		message: "file is not gofmt-formatted; run gofmt to see the canonical form",
+		fix:     "gofmt -w ",
+		judge:   t.gofmtPackage,
+	})
+}
+
+func (t *target) runGoimports(ctx context.Context) (checkResult, error) {
+	return t.runFormatCheck(ctx, formatCheck{
+		kind:    goimportsEvidenceKind,
+		ruleID:  policy.RuleFormatGoimports,
+		tool:    "goimports",
+		message: "import block is not goimports-normalized",
+		fix:     "goimports -w ",
+		judge:   t.goimportsPackage,
+	})
+}
+
+// runFormatCheck answers one formatting question package by package, reusing
+// what a previous run concluded about a package whose files have not moved
+// since.
+//
+// The formatting checks are where this pays. Both are pure functions of a
+// file's bytes and the toolchain, and goimports in particular resolves imports
+// from scratch for every file it is handed, which on a repository of any size
+// is the largest thing the harness owns. In an agent's repair loop, where two
+// files of hundreds changed, everything else was already answered.
+//
+// The cached answer is the raw per-file finding, not evidence: classification
+// and fingerprints are rebuilt here on every run, so a policy edit is picked up
+// even where a package's files did not change.
+func (t *target) runFormatCheck(ctx context.Context, check formatCheck) (checkResult, error) {
+	// A nil scope list would make this check report no findings at all, which is
+	// a silent pass rather than an error. It is a harness fault, phrased as one.
+	if t.packageScopes == nil {
+		return checkResult{}, harnessError{err: errors.New(
+			"a formatting check was scheduled before the scope was grouped by package")}
+	}
+	cacheable := t.headCacheable()
 	var out []evidence.Evidence
-	for _, rel := range t.judged {
+	for _, pkg := range t.packageScopes {
 		if err := ctx.Err(); err != nil {
 			return checkResult{}, err
 		}
+		var findings []formatFinding
+		key, hit := "", false
+		if cacheable {
+			key = t.engine.headKey(check.kind, pkg, t.module)
+			findings, hit = readHeadEntry[[]formatFinding](t.engine, check.kind, key)
+		}
+		if !hit {
+			computed, err := check.judge(ctx, pkg)
+			if err != nil {
+				return checkResult{}, err
+			}
+			findings = computed
+			if cacheable {
+				writeHeadEntry(t.engine, check.kind, key, findings)
+			}
+		}
+		for _, f := range findings {
+			e := t.newEvidence(check.ruleID, check.tool, tool.GoVersion(),
+				evidence.SeverityError, f.File, 0, 0, "", check.message)
+			e.Fix = &evidence.Remediation{Command: check.fix + f.File}
+			out = append(out, e)
+		}
+	}
+	return checkResult{evidence: out}, nil
+}
+
+// gofmtPackage reports the files in one package that gofmt would rewrite. A
+// file that does not parse is the compile check's finding, so it is passed over
+// here rather than reported twice.
+func (t *target) gofmtPackage(ctx context.Context, pkg packageScope) ([]formatFinding, error) {
+	var out []formatFinding
+	for _, rel := range pkg.files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		src, err := os.ReadFile(filepath.Join(t.root, filepath.FromSlash(rel)))
 		if err != nil {
-			return checkResult{}, fmt.Errorf("reading %s: %w", rel, err)
+			return nil, fmt.Errorf("reading %s: %w", rel, err)
 		}
 		formatted, err := format.Source(src)
 		if err != nil {
 			continue
 		}
 		if string(formatted) != string(src) {
-			e := t.newEvidence(policy.RuleFormatGofmt, "gofmt", tool.GoVersion(),
-				evidence.SeverityError, rel, 0, 0, "",
-				"file is not gofmt-formatted; run gofmt to see the canonical form")
-			e.Fix = &evidence.Remediation{Command: "gofmt -w " + rel}
-			out = append(out, e)
+			out = append(out, formatFinding{File: rel})
 		}
 	}
-	return checkResult{evidence: out}, nil
+	return out, nil
 }
 
-func (t *target) runGoimports(ctx context.Context) (checkResult, error) {
+// goimportsPackage reports the files in one package whose import block
+// goimports would rewrite.
+func (t *target) goimportsPackage(ctx context.Context, pkg packageScope) ([]formatFinding, error) {
 	options := &imports.Options{Comments: true, TabIndent: true, TabWidth: 8}
-	var out []evidence.Evidence
-	for _, rel := range t.judged {
+	var out []formatFinding
+	for _, rel := range pkg.files {
 		if err := ctx.Err(); err != nil {
-			return checkResult{}, err
+			return nil, err
 		}
 		full := filepath.Join(t.root, filepath.FromSlash(rel))
 		src, err := os.ReadFile(full)
 		if err != nil {
-			return checkResult{}, fmt.Errorf("reading %s: %w", rel, err)
+			return nil, fmt.Errorf("reading %s: %w", rel, err)
 		}
 		processed, err := imports.Process(full, src, options)
 		if err != nil {
 			continue
 		}
 		if string(processed) != string(src) {
-			e := t.newEvidence(policy.RuleFormatGoimports, "goimports", tool.GoVersion(),
-				evidence.SeverityError, rel, 0, 0, "",
-				"import block is not goimports-normalized")
-			e.Fix = &evidence.Remediation{Command: "goimports -w " + rel}
-			out = append(out, e)
+			out = append(out, formatFinding{File: rel})
 		}
 	}
-	return checkResult{evidence: out}, nil
+	return out, nil
+}
+
+// prepare builds everything the checks share before any of them starts.
+//
+// It is the coordinator's job because the alternative is several checks racing
+// to derive the same thing from the same files, which is either repeated work
+// or shared mutable state, and the architecture rules out the second.
+func (t *target) prepare(ctx context.Context) error {
+	if err := t.parseScope(ctx); err != nil {
+		return err
+	}
+	return t.scopePackages(ctx)
+}
+
+// parseScope gives the syntax-driven checks the single parse they share.
+func (t *target) parseScope(ctx context.Context) error {
+	if t.parsed != nil {
+		return nil
+	}
+	scope, err := analyze.Parse(ctx, t.root, t.judged)
+	if err != nil {
+		return err
+	}
+	t.parsed = scope
+	return nil
+}
+
+// syntax returns the parsed scope, or the fault of having scheduled a
+// syntax-driven check before anything parsed for it. Phrasing that as a harness
+// fault keeps it out of the evidence channel, where it would read as a defect
+// in the repository.
+func (t *target) syntax() (*analyze.ParsedScope, error) {
+	if t.parsed == nil {
+		return nil, harnessError{err: errors.New(
+			"a syntax-driven check was scheduled before the scope was parsed")}
+	}
+	return t.parsed, nil
 }
 
 func (t *target) runNative(ctx context.Context) (checkResult, error) {
-	findings, err := analyze.Scan(ctx, t.root, t.judged, t.analyzeOpts)
+	scope, err := t.syntax()
+	if err != nil {
+		return checkResult{}, err
+	}
+	findings, err := scope.Scan(ctx, t.analyzeOpts)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -240,7 +398,11 @@ func (t *target) runNative(ctx context.Context) (checkResult, error) {
 }
 
 func (t *target) runMetrics(ctx context.Context) (checkResult, error) {
-	metrics, err := analyze.ComputeMetrics(ctx, t.root, t.judged)
+	scope, err := t.syntax()
+	if err != nil {
+		return checkResult{}, err
+	}
+	metrics, err := scope.Metrics(ctx)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -248,7 +410,11 @@ func (t *target) runMetrics(ctx context.Context) (checkResult, error) {
 }
 
 func (t *target) runClone(ctx context.Context) (checkResult, error) {
-	findings, err := analyze.CloneFindings(ctx, t.root, t.judged)
+	scope, err := t.syntax()
+	if err != nil {
+		return checkResult{}, err
+	}
+	findings, err := scope.Clones(ctx)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -327,7 +493,20 @@ func (t *target) runVisibility(_ context.Context) (checkResult, error) {
 	if t.isBase {
 		return checkResult{}, nil
 	}
-	unexamined := t.graph.Unexamined(t.engine.ChangedEntries)
+	unexamined, faults := t.graph.Unexamined(t.engine.ChangedEntries)
+	// A file the harness could not read is a fault in the harness, and saying so
+	// in the vocabulary of build constraints would send the reader hunting for a
+	// defect the repository does not have. It ends the check as a failure, which
+	// is the channel that carries harness faults and is attributed to goharness.
+	if len(faults) > 0 {
+		named := make([]string, 0, min(len(faults), maxNamedFiles))
+		for _, fault := range faults[:min(len(faults), maxNamedFiles)] {
+			named = append(named, fault.Path+" ("+fault.Err.Error()+")")
+		}
+		return checkResult{}, harnessError{err: fmt.Errorf(
+			"goharness could not resolve %d changed file(s) and so cannot report what examined them: %s",
+			len(faults), strings.Join(named, "; "))}
+	}
 	if len(unexamined) == 0 {
 		return checkResult{}, nil
 	}
@@ -364,8 +543,13 @@ func (t *target) editedGeneratedFile(entry change.Entry) (bool, error) {
 // file check), so guarding it would add friction without adding protection;
 // what matters is that using allowPolicyEdit leaves an explicit, reportable
 // record of the decision.
+//
+// The acknowledged-debt ledger belongs here for the same reason the policy file
+// does: it decides what stops blocking, so writing to it is altering the gate.
+// Only the committed copy has any effect, and this is what makes the edit that
+// produced it visible instead of silent.
 func isPolicyFile(rel string) bool {
-	return rel == "goharness.yaml"
+	return rel == policy.ConfigFileName || rel == policy.DebtFileName
 }
 
 // runMigration reports migrations that the change rewrote rather than added.
@@ -501,7 +685,7 @@ func (t *target) runGolangci(ctx context.Context) (checkResult, error) {
 			continue
 		}
 		pkg, _ := t.graph.PackageForFile(file)
-		out = append(out, t.newEvidence("GCL-"+issue.FromLinter, "golangci-lint", g.Version,
+		out = append(out, t.newEvidence(policy.GolangciRuleID(issue.FromLinter), "golangci-lint", g.Version,
 			severityFor(issue.Severity), file, issue.Pos.Line, issue.Pos.Column,
 			pkg, issue.Text))
 	}
@@ -572,6 +756,7 @@ func (t *target) runLeakRaceTests(ctx context.Context) (_ checkResult, err error
 	}
 
 	var res checkResult
+	t.leakBlocked = blocked
 	if len(blocked) > 0 {
 		res.unproducible = append(res.unproducible, admission.Unproducible{
 			Kind: admission.KindLeakClean,
@@ -634,9 +819,15 @@ func (t *target) interpretLeakRun(ctx context.Context, failures []tool.TestFailu
 		if !ok {
 			msg = "tests leave goroutines running after completion"
 		}
+		// A leak belongs to a package rather than to a line, but "nowhere" is not
+		// a location: with an empty file a reader has nothing to open and a scoped
+		// exception can never match. The package directory is the most precise
+		// anchor that is true, and goleak's own stack head names the origin when
+		// it falls inside this tree.
+		file, line := t.leakAnchor(f)
 		res.evidence = append(res.evidence, t.newEvidence(policy.RuleGoroutineLeak,
 			"goleak "+leakcheck.Version, tool.GoVersion(),
-			evidence.SeverityError, "", 0, 0, f.Package, msg))
+			evidence.SeverityError, file, line, 0, f.Package, msg))
 	}
 	confirmed, flaky, err := t.confirmFailures(ctx, failed, []string{"-race"})
 	if err != nil {
@@ -855,6 +1046,25 @@ func (t *target) runModTidy(ctx context.Context) (checkResult, error) {
 // having no database to check against. A stale snapshot still scans; its age is
 // surfaced in the report and by doctor.
 func (t *target) runVulnScan(ctx context.Context) (checkResult, error) {
+	if t.engine.GoVersion == "" {
+		reason := "the Go toolchain version could not be resolved, so the standard " +
+			"library this scan would judge is unknown"
+		if t.engine.GoVersionErr != nil {
+			reason += ": " + t.engine.GoVersionErr.Error()
+		}
+		return checkResult{unproducible: []admission.Unproducible{{
+			Kind:   admission.KindVulnerabilityScan,
+			Reason: reason,
+			Remedy: "make sure the go command runs inside this module; `goharness doctor` reports the same probe",
+		}}}, nil
+	}
+	if reason, below := t.belowToolchainFloor(); below {
+		return checkResult{unproducible: []admission.Unproducible{{
+			Kind:   admission.KindVulnerabilityScan,
+			Reason: reason,
+			Remedy: "install the toolchain the module requires, or lower the go.mod toolchain directive if it no longer reflects a floor",
+		}}}, nil
+	}
 	cache, err := toolcache.Open()
 	if err != nil {
 		return checkResult{unproducible: vulnUnproducible(err.Error())}, nil
@@ -868,7 +1078,7 @@ func (t *target) runVulnScan(ctx context.Context) (checkResult, error) {
 		return checkResult{unproducible: vulnUnproducible(readable.reason)}, nil
 	}
 
-	findings, err := tool.RunVulnScan(ctx, t.root, cache.VulnDBURL(), []string{"./..."})
+	findings, err := tool.RunVulnScan(ctx, t.root, cache.VulnDBURL(), t.engine.GoVersion, []string{"./..."})
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -906,4 +1116,56 @@ func vulnUnproducible(reason string) []admission.Unproducible {
 		Reason: reason,
 		Remedy: "run goharness setup",
 	}}
+}
+
+// belowToolchainFloor reports whether the toolchain performing this scan is
+// older than the one the module's go.mod requires.
+//
+// Verification pins GOTOOLCHAIN=local so that it downloads nothing, and under
+// that setting the go command ignores the module's toolchain directive
+// entirely. A module that names a newer toolchain has usually named it for a
+// reason, and the reason is often that the newer standard library is the one
+// without the vulnerabilities. Scanning below the floor and reporting the
+// module clean would be answering a question nobody asked: the honest answer is
+// that this run cannot settle the claim.
+func (t *target) belowToolchainFloor() (string, bool) {
+	required := t.engine.ToolchainFloor
+	if required == "" || t.engine.GoVersion == "" {
+		return "", false
+	}
+	if tool.CompareGoVersions(t.engine.GoVersion, required) >= 0 {
+		return "", false
+	}
+	return "the installed toolchain is " + t.engine.GoVersion + ", below the " + required +
+		" floor go.mod declares, so a scan here would judge a standard library this module " +
+		"does not accept and no scan was performed", true
+}
+
+// leakAnchor locates a leak as precisely as the tools allow.
+//
+// goleak's stack head is used only when it points inside this tree: a goroutine
+// parked in the standard library or a dependency is real, but naming a file the
+// reader cannot edit is worse than naming the package they can. The line is
+// reported for navigation only; fingerprints exclude it, so a leak keeps its
+// identity when the file above it moves.
+func (t *target) leakAnchor(f tool.TestFailure) (file string, line int) {
+	if origin, ok := leakcheck.LeakOrigin(f.Output); ok {
+		path, lineText, _ := strings.Cut(origin, ":")
+		rel := t.rel(path)
+		if !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
+			return rel, parseLine(lineText)
+		}
+	}
+	if dir, _, ok := t.graph.DirAndName(f.Package); ok {
+		return t.rel(dir), 0
+	}
+	return "", 0
+}
+
+func parseLine(text string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(text))
+	if err != nil {
+		return 0
+	}
+	return n
 }

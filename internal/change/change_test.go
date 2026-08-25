@@ -148,3 +148,64 @@ func TestHasBase(t *testing.T) {
 		t.Fatal("an unresolved base was reported as available")
 	}
 }
+
+// TestUnexaminedSeparatesToolFaultsFromCodeFacts holds the taxonomy line that a
+// production audit crossed.
+//
+// "N changed Go files were compiled by nothing in this run" is a claim about the
+// repository. When the harness has merely failed to find a file, that claim is
+// false, and an agent told its file is compiled by nothing goes hunting for a
+// build-constraint problem that does not exist. A file the harness cannot
+// resolve must leave through a different channel than a file the toolchain
+// deliberately excluded, so that the report can attribute it to goharness.
+func TestUnexaminedSeparatesToolFaultsFromCodeFacts(t *testing.T) {
+	g, err := change.LoadGraph(t.Context(), buildModule(t))
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+	unexamined, faults := g.Unexamined([]change.Entry{
+		{Path: "nowhere/at/all/ghost.go", Status: change.StatusAdded},
+	})
+	if len(unexamined) != 0 {
+		t.Fatalf("a file the harness could not resolve was reported as a fact about the code: %+v", unexamined)
+	}
+	if len(faults) != 1 || faults[0].Path != "nowhere/at/all/ghost.go" {
+		t.Fatalf("an unresolvable file did not reach the fault channel: %+v", faults)
+	}
+	if faults[0].Err == nil {
+		t.Fatal("a harness fault carried no error to attribute it with")
+	}
+}
+
+// TestUnexaminedStillReportsRealExclusions is the false-positive guard: the
+// taxonomy split must not turn a genuine coverage gap into silence.
+func TestUnexaminedStillReportsRealExclusions(t *testing.T) {
+	root := buildModule(t)
+	writeSource(t, root, "hidden/hidden.go",
+		"//go:build ignore\n\npackage hidden\n\n// Value is never compiled in this configuration.\nconst Value = 1\n")
+	g, err := change.LoadGraph(t.Context(), root)
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+	unexamined, faults := g.Unexamined([]change.Entry{
+		{Path: "hidden/hidden.go", Status: change.StatusAdded},
+	})
+	if len(faults) != 0 {
+		t.Fatalf("a build-constraint exclusion was blamed on the harness: %+v", faults)
+	}
+	if len(unexamined) != 1 {
+		t.Fatalf("a file outside the build was not reported as unexamined: %+v", unexamined)
+	}
+}
+
+// writeSource adds one file to an already built fixture module.
+func writeSource(t *testing.T, root, rel, content string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(full), err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", rel, err)
+	}
+}

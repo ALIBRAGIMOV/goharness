@@ -12,6 +12,7 @@ import (
 
 	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
+	"github.com/ALIBRAGIMOV/goharness/internal/tool"
 )
 
 // ExportSurface maps every exported symbol of the given packages to its
@@ -27,6 +28,11 @@ func ExportSurface(ctx context.Context, root string, patterns []string) (map[str
 		Dir:     root,
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedImports |
 			packages.NeedDeps | packages.NeedTypes | packages.NeedSyntax,
+		// The loader shells out to the go command, so it needs the same sanitised
+		// environment as every other subprocess. Inheriting the caller's would let
+		// GOFLAGS add a build tag and change which declarations this surface
+		// contains, and GOTOOLCHAIN send verification off to download a release.
+		Env: tool.VerificationEnv(nil),
 	}
 	loaded, err := packages.Load(cfg, patterns...)
 	if err != nil {

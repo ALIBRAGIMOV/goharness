@@ -21,6 +21,11 @@ import (
 // baseEvidenceKind names the derived documents this file owns.
 const baseEvidenceKind = "base-evidence"
 
+// evidenceDecoration identifies the set of fields the harness stamps onto a
+// finding. Adding one means every stored snapshot is now incomplete, so this
+// moves whenever the decoration does and the stale entries simply miss.
+const evidenceDecoration = "consequence+remedy+fix"
+
 // baseSnapshot is what running the checks over the base revision produced.
 //
 // Caching it is sound because every input is in the key: the base revision is a
@@ -62,7 +67,14 @@ type baseCacheInput struct {
 func (e *Engine) baseCacheKey(in baseCacheInput) string {
 	parts := []string{
 		"goharness=" + e.Version,
+		// A cached document stores evidence as it was recorded, so a release that
+		// adds a decorated field would read old entries back missing it and reach a
+		// different report than the same run with --no-cache. The version string
+		// does not move within a development cycle, so the decoration the evidence
+		// model carries is named here in its own right.
+		"decoration=" + evidenceDecoration,
 		"go=" + tool.GoVersion(),
+		"gostdlib=" + e.GoVersion,
 		"golangci=" + e.Golangci.Version + "@" + e.Golangci.SHA256,
 		"xvuln=" + tool.XVulnVersion(),
 		"goleak=" + leakcheck.Version,
@@ -118,7 +130,7 @@ func (e *Engine) writeBaseSnapshot(key, base string, out runOutput) {
 		Evidence: out.Evidence, Failures: out.Failures,
 		Unproducible: out.Unproducible, Produced: out.Produced,
 	}
-	if err := cache.WriteDerived(baseEvidenceKind, key, doc); err != nil {
+	if err := cache.WriteDerived(baseEvidenceKind, key, doc, toolcache.MaxDerivedEntries); err != nil {
 		e.Logger.Info("base evidence not cached", zap.String("key", key), zap.Error(err))
 	}
 }

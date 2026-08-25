@@ -77,8 +77,44 @@ type Evidence struct {
 	Message        string         `json:"message"`
 	State          State          `json:"state,omitempty"`
 	Classification Classification `json:"classification"`
-	DocURL         string         `json:"docUrl,omitempty"`
-	Fix            *Remediation   `json:"fix,omitempty"`
+	// Consequence is what leaving this finding alone costs, taken from the rule
+	// and, where a rule covers several remedies, refined by RemedyClass. It orders
+	// the document; it never decides the verdict.
+	Consequence string `json:"consequence,omitempty"`
+	// RemedyClass names the shape of the fix for rules whose findings do not all
+	// have the same one. It is what turns hundreds of unchecked-error rows into a
+	// handful of decisions.
+	RemedyClass string       `json:"remedyClass,omitempty"`
+	DocURL      string       `json:"docUrl,omitempty"`
+	Fix         *Remediation `json:"fix,omitempty"`
+}
+
+// Consequence classes, as they appear on a finding. They are spelled here
+// because the finding model is what carries them across every package; the
+// policy registry names the same four values as a typed enum and is where a
+// rule's class is decided.
+const (
+	ConsequenceSilentLoss     = "silent-loss"
+	ConsequenceUnsafeBehavior = "unsafe-behavior"
+	ConsequenceStructural     = "structural"
+	ConsequenceHygiene        = "hygiene"
+)
+
+// ConsequenceRank orders the classes for presentation. Anything unrecognised,
+// the empty string included, sorts last.
+func ConsequenceRank(c string) int {
+	switch c {
+	case ConsequenceSilentLoss:
+		return 0
+	case ConsequenceUnsafeBehavior:
+		return 1
+	case ConsequenceStructural:
+		return 2
+	case ConsequenceHygiene:
+		return 3
+	default:
+		return 4
+	}
 }
 
 // NormalizeMessage collapses whitespace and strips volatile substrings so that
@@ -194,8 +230,14 @@ func assignFingerprints(items []identified) {
 	}
 }
 
-// SortPresentation orders evidence by rule ID, file, line, column, then
-// fingerprint so repeated runs render byte-identically.
+// SortPresentation orders evidence by consequence class, then by rule ID, file,
+// line, column and fingerprint so repeated runs render byte-identically.
+//
+// Consequence leads because the document is read in order and a consumer that
+// allocates effort by position should meet the silent data loss before the
+// typography. It is presentation only: sortIdentity, which decides occurrence
+// indexes and therefore fingerprints, must never learn about it, or every
+// repeated finding would be renamed by a change to a rule's class.
 func SortPresentation(items []Evidence) {
 	sort.SliceStable(items, func(i, j int) bool {
 		return lessPresentation(items[i], items[j])
@@ -227,6 +269,9 @@ func sortIdentity(items []identified) {
 }
 
 func lessPresentation(a, b Evidence) bool {
+	if ra, rb := ConsequenceRank(a.Consequence), ConsequenceRank(b.Consequence); ra != rb {
+		return ra < rb
+	}
 	if a.RuleID != b.RuleID {
 		return a.RuleID < b.RuleID
 	}

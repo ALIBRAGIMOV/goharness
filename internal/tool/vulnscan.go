@@ -79,13 +79,25 @@ type vulnFrame struct {
 // lookup and no subprocess. The database is addressed as a file URL so the scan
 // is strictly offline, and -C selects the directory without touching the
 // process working directory, which keeps concurrent checks independent.
-func RunVulnScan(ctx context.Context, dir, dbURL string, patterns []string) ([]VulnFinding, error) {
+//
+// goVersion decides which standard-library vulnerabilities apply and must be
+// passed explicitly. Left out of the environment, x/vuln resolves it by running
+// `go env GOVERSION` with neither a directory nor an environment of its own,
+// which reads the harness's own working directory and the operator's raw shell:
+// the same commit then scans against a different standard library depending on
+// where the operator was standing, and under-reports in whichever of the two is
+// wrong. Naming it here is what makes the security evidence a function of the
+// repository rather than of the invocation.
+func RunVulnScan(ctx context.Context, dir, dbURL, goVersion string, patterns []string) ([]VulnFinding, error) {
+	if goVersion == "" {
+		return nil, errors.New("vulnerability scan: the scanned Go version was not resolved")
+	}
 	args := []string{"-C", dir, "-format", "json", "-mode", "source", "-db", dbURL}
 	args = append(args, patterns...)
 
 	var stdout, stderr bytes.Buffer
 	cmd := scan.Command(ctx, args...)
-	cmd.Env = VerificationEnv(nil)
+	cmd.Env = append(VerificationEnv(nil), "GOVERSION="+goVersion)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

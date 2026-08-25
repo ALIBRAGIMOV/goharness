@@ -165,6 +165,31 @@ func HasTestFiles(absDir string) (bool, error) {
 	return false, nil
 }
 
+// LeakOrigin is the first source location goleak attributed to a leaked
+// goroutine's stack, in "file:line" form as the runtime printed it.
+//
+// goleak knows where the goroutine came from and prints it; dropping that on
+// the floor left every leak finding with no location at all, so a reader had no
+// place to jump to and a scoped exception had nothing to match against. The
+// line number is not part of any fingerprint, so surfacing it costs no
+// stability.
+func LeakOrigin(output string) (string, bool) {
+	for line := range strings.SplitSeq(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(trimmed, "/")
+		if !ok {
+			continue
+		}
+		// A stack frame line is a path followed by ":line +0xoffset"; the offset is
+		// an address and must not reach the report.
+		location, _, _ := strings.Cut(rest, " ")
+		if path, lineNo, found := strings.Cut(location, ":"); found && lineNo != "" {
+			return "/" + path + ":" + lineNo, true
+		}
+	}
+	return "", false
+}
+
 // LeakMessage extracts a deterministic description from goleak output, keeping
 // the leaked functions and dropping goroutine IDs and addresses.
 func LeakMessage(output string) (string, bool) {

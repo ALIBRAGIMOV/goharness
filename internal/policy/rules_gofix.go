@@ -14,6 +14,10 @@ type fixAnalyzerSpec struct {
 	name      string
 	title     string
 	rationale string
+	// consequence is the class the analyzer's findings belong to. The excluded
+	// analyzers leave it empty: they produce no rule, so there is nothing to
+	// classify.
+	consequence Consequence
 	// excluded holds the reason an analyzer of the suite is deliberately not
 	// run. An excluded analyzer gets no registry entry, so it can never produce
 	// evidence, and the reason stays next to the decision.
@@ -32,39 +36,39 @@ func goFixAnalyzerSpecs() []fixAnalyzerSpec {
 // construct with the standard library or language feature that now expresses it.
 func goFixSimplicitySpecs() []fixAnalyzerSpec {
 	return []fixAnalyzerSpec{
-		{name: "any", title: "interface{} where any says the same thing",
+		{name: "any", consequence: ConsequenceHygiene, title: "interface{} where any says the same thing",
 			rationale: "any has been the spelling since Go 1.18; interface{} is the older form of an identical type."},
-		{name: "fmtappendf", title: "[]byte(fmt.Sprintf(...)) instead of fmt.Appendf",
+		{name: "fmtappendf", consequence: ConsequenceHygiene, title: "[]byte(fmt.Sprintf(...)) instead of fmt.Appendf",
 			rationale: "The conversion allocates a string only to copy it into a byte slice."},
-		{name: "forvar", title: "Redundant re-declaration of a loop variable",
+		{name: "forvar", consequence: ConsequenceHygiene, title: "Redundant re-declaration of a loop variable",
 			rationale: "x := x inside a loop body has been unnecessary since Go 1.22 gave each iteration its own variable."},
-		{name: "mapsloop", title: "Explicit loop over a map that the maps package expresses",
+		{name: "mapsloop", consequence: ConsequenceHygiene, title: "Explicit loop over a map that the maps package expresses",
 			rationale: "maps.Copy, maps.Keys and their siblings say what the loop is for in one line."},
-		{name: "minmax", title: "if/else that computes a minimum or a maximum",
+		{name: "minmax", consequence: ConsequenceHygiene, title: "if/else that computes a minimum or a maximum",
 			rationale: "min and max are builtins; the three-line form hides which value wins."},
-		{name: "newexpr", title: "Helper function that only wraps a value in a pointer",
+		{name: "newexpr", consequence: ConsequenceHygiene, title: "Helper function that only wraps a value in a pointer",
 			rationale: "Go 1.26's new(expr) removes the generic pointer helper every codebase used to carry."},
-		{name: "rangeint", title: "Three-clause for loop counting to a bound",
+		{name: "rangeint", consequence: ConsequenceHygiene, title: "Three-clause for loop counting to a bound",
 			rationale: "for i := range n states the bound once instead of three times."},
-		{name: "reflecttypefor", title: "reflect.TypeOf on a zero value instead of TypeFor",
+		{name: "reflecttypefor", consequence: ConsequenceHygiene, title: "reflect.TypeOf on a zero value instead of TypeFor",
 			rationale: "reflect.TypeFor[T]() names the type directly and cannot be handed the wrong value."},
-		{name: "slicescontains", title: "Loop that searches a slice for a value",
+		{name: "slicescontains", consequence: ConsequenceHygiene, title: "Loop that searches a slice for a value",
 			rationale: "slices.Contains and slices.ContainsFunc replace a loop whose only result is a boolean."},
-		{name: "slicessort", title: "sort.Slice on a slice of basic types",
+		{name: "slicessort", consequence: ConsequenceHygiene, title: "sort.Slice on a slice of basic types",
 			rationale: "slices.Sort is faster and removes a comparison function that can be written backwards."},
-		{name: "stditerators", title: "Len/At iteration over a standard library collection",
+		{name: "stditerators", consequence: ConsequenceHygiene, title: "Len/At iteration over a standard library collection",
 			rationale: "Iterator methods remove index arithmetic that can run off the end."},
-		{name: "stringsbuilder", title: "String concatenation with += in a loop",
+		{name: "stringsbuilder", consequence: ConsequenceHygiene, title: "String concatenation with += in a loop",
 			rationale: "Repeated concatenation is quadratic; strings.Builder is linear."},
-		{name: "stringscut", title: "strings.Index followed by slicing",
+		{name: "stringscut", consequence: ConsequenceHygiene, title: "strings.Index followed by slicing",
 			rationale: "strings.Cut returns the two halves and whether the separator was there, which is what the index was for."},
-		{name: "stringscutprefix", title: "HasPrefix followed by TrimPrefix",
+		{name: "stringscutprefix", consequence: ConsequenceHygiene, title: "HasPrefix followed by TrimPrefix",
 			rationale: "strings.CutPrefix does the test and the trim once instead of scanning twice."},
-		{name: "stringsseq", title: "Ranging over strings.Split or strings.Fields",
+		{name: "stringsseq", consequence: ConsequenceHygiene, title: "Ranging over strings.Split or strings.Fields",
 			rationale: "SplitSeq and FieldsSeq iterate without allocating the intermediate slice."},
-		{name: "testingcontext", title: "context.WithCancel in a test instead of t.Context",
+		{name: "testingcontext", consequence: ConsequenceHygiene, title: "context.WithCancel in a test instead of t.Context",
 			rationale: "t.Context is cancelled when the test ends, so the test cannot leak the goroutines it started."},
-		{name: "waitgroup", title: "wg.Add(1) / go / defer wg.Done() around a goroutine",
+		{name: "waitgroup", consequence: ConsequenceHygiene, title: "wg.Add(1) / go / defer wg.Done() around a goroutine",
 			rationale: "wg.Go pairs the counter with the goroutine, which is the pairing this trio gets wrong when it is edited."},
 	}
 }
@@ -74,11 +78,11 @@ func goFixSimplicitySpecs() []fixAnalyzerSpec {
 // toolchain stopped reading.
 func goFixMigrationSpecs() []fixAnalyzerSpec {
 	return []fixAnalyzerSpec{
-		{name: "inline", title: "Call of an API its author marked //go:fix inline",
+		{name: "inline", consequence: ConsequenceStructural, title: "Call of an API its author marked //go:fix inline",
 			rationale: "A //go:fix inline directive is the author saying this call site can be migrated mechanically and safely. Staying on the old spelling is debt with a published, one-command fix; the inliner refuses any rewrite that would change behaviour, including argument evaluation order."},
-		{name: "plusbuild", title: "Obsolete // +build constraint",
+		{name: "plusbuild", consequence: ConsequenceStructural, title: "Obsolete // +build constraint",
 			rationale: "Only //go:build is read since Go 1.18. The leftover line is a second source of truth that no tool checks against the first."},
-		{name: "hostport", title: "Address for net.Dial built by formatting",
+		{name: "hostport", consequence: ConsequenceUnsafeBehavior, title: "Address for net.Dial built by formatting",
 			rationale: "fmt.Sprintf(\"%s:%d\", host, port) produces an unusable address for any IPv6 host; net.JoinHostPort does not."},
 	}
 }
@@ -144,6 +148,7 @@ func gofixRules() []Rule {
 			Pack:           PackGoFix,
 			Classification: ClassAdvisory,
 			Lifecycle:      LifecycleExperimental,
+			Consequence:    s.consequence,
 			Rationale:      s.rationale + " The fix is machine-applicable: the toolchain produces the exact edit.",
 			Enforcement:    "go fix -json, analyzer " + s.name + " (run `go tool fix help " + s.name + "`)",
 			DocURL:         goFixDoc,

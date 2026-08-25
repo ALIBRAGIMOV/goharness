@@ -25,23 +25,37 @@ type cloneSite struct {
 	name string
 }
 
-// CloneFindings reports functions whose statement shape is identical to
-// another function in scope, ignoring identifiers and literals. It is advisory:
-// whether two identical shapes should be one function or deliberately separate
-// is a design decision the scanner cannot make.
-func CloneFindings(ctx context.Context, root string, relFiles []string) ([]Finding, error) {
-	units, err := parseUnits(ctx, root, relFiles)
-	if err != nil {
-		return nil, err
-	}
+// Clones reports functions whose statement shape is identical to another
+// function in scope, ignoring identifiers and literals. It is advisory: whether
+// two identical shapes should be one function or deliberately separate is a
+// design decision the scanner cannot make.
+//
+// Duplication is a property of the scope rather than of one package, so the
+// shapes are collected across every unit before any of them is judged.
+func (s *ParsedScope) Clones(ctx context.Context) ([]Finding, error) {
 	byShape := map[string][]cloneSite{}
-	for _, u := range units {
+	for _, u := range s.units {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		u.collectShapes(byShape)
 	}
+	return groupClones(byShape), nil
+}
 
+// CloneFindings parses the given files and reports the functions among them
+// that share a statement shape.
+func CloneFindings(ctx context.Context, root string, relFiles []string) ([]Finding, error) {
+	scope, err := Parse(ctx, root, relFiles)
+	if err != nil {
+		return nil, err
+	}
+	return scope.Clones(ctx)
+}
+
+// groupClones turns the collected shapes into findings, reporting every site
+// but the first of each shape against that first one.
+func groupClones(byShape map[string][]cloneSite) []Finding {
 	var out []Finding
 	for _, shape := range slices.Sorted(maps.Keys(byShape)) {
 		sites := byShape[shape]
@@ -68,13 +82,13 @@ func CloneFindings(ctx context.Context, root string, relFiles []string) ([]Findi
 		}
 	}
 	sortFindings(out)
-	return out, nil
+	return out
 }
 
 // collectShapes skips test files. An arrange-act-assert body legitimately
 // repeats its shape across cases, so a clone report there is noise rather than
-// a design signal; the dupl linter is excluded from test files for the same
-// reason, and the two must agree.
+// a design signal. This scanner is the only duplication check the harness runs,
+// so the exemption has to live here rather than in a linter configuration.
 func (u *unit) collectShapes(byShape map[string][]cloneSite) {
 	for i, file := range u.files {
 		if strings.HasSuffix(u.relPaths[i], "_test.go") {
