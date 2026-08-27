@@ -88,6 +88,30 @@ func Parse(ctx context.Context, root string, relFiles []string) (*ParsedScope, e
 	return &ParsedScope{units: units}, nil
 }
 
+// Restrict returns a view of this scope holding only the units in the given
+// package directories, or the scope itself when dirs is nil.
+//
+// The units are shared rather than copied. The parsed trees are never written
+// to, which is what already lets several scanners read one scope at once, and
+// what lets one parse serve both a directory-local scanner and one that has to
+// see everything.
+func (s *ParsedScope) Restrict(dirs []string) *ParsedScope {
+	if dirs == nil {
+		return s
+	}
+	keep := make(map[string]bool, len(dirs))
+	for _, dir := range dirs {
+		keep[dir] = true
+	}
+	units := make([]*unit, 0, len(dirs))
+	for _, u := range s.units {
+		if keep[u.dir] {
+			units = append(units, u)
+		}
+	}
+	return &ParsedScope{units: units}
+}
+
 // Scan runs every enabled scanner family over the parsed scope.
 func (s *ParsedScope) Scan(ctx context.Context, opts Options) ([]Finding, error) {
 	var out []Finding

@@ -31,6 +31,11 @@ const (
 	StatusAdded    Status = "added"
 	StatusModified Status = "modified"
 	StatusDeleted  Status = "deleted"
+	// StatusRenamed is a file that moved. It is its own status rather than an
+	// addition because the base revision holds the same code under another name,
+	// and a comparison that does not know that reports every finding in the file
+	// as introduced by the move.
+	StatusRenamed Status = "renamed"
 )
 
 // Describe renders a status for a report sentence.
@@ -42,6 +47,10 @@ func (s Status) Describe() string { return string(s) }
 type Entry struct {
 	Path   string
 	Status Status
+	// OldPath is where a renamed file came from, module-relative, and empty for
+	// every other status. It is what lets the base snapshot be read in head's
+	// coordinate system.
+	OldPath string
 }
 
 // ChangeSet is the set of files a verification run considers changed, together
@@ -142,60 +151,13 @@ func Build(ctx context.Context, git repo.Git, r repo.Repository, base string, or
 	if r.GitRoot != "" {
 		queryDir = r.GitRoot
 	}
-	seen := map[string]Status{}
-	record := func(path string, status Status) {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return
-		}
-		if existing, ok := seen[path]; ok && existing == StatusAdded {
-			return
-		}
-		seen[path] = status
-	}
-
-	statusCommands := [][]string{
-		{"diff", "--name-status", "--diff-filter=ACMRTD", "HEAD"},
-		{"diff", "--name-status", "--diff-filter=ACMRTD", "--cached", "HEAD"},
-	}
-	if cs.HasBase() {
-		statusCommands = append(statusCommands,
-			[]string{"diff", "--name-status", "--diff-filter=ACMRTD", base, "HEAD"})
-	}
-	// --full-name makes ls-files answer from the repository root, which is where
-	// git diff already answers from. Without it the two subcommands disagree by
-	// exactly the module prefix and the change set carries both coordinate
-	// systems at once.
-	plainCommands := [][]string{{"ls-files", "--others", "--exclude-standard", "--full-name"}}
-	if !r.HasCommits {
-		statusCommands = nil
-		plainCommands = [][]string{
-			{"ls-files", "--full-name"},
-			{"ls-files", "--others", "--exclude-standard", "--full-name"},
-		}
-		cs.FullScope = true
-	}
-
-	for _, args := range statusCommands {
-		out, err := git.Run(ctx, queryDir, args...)
-		if err != nil {
-			return ChangeSet{}, fmt.Errorf("listing changed files (git %s): %w", strings.Join(args, " "), err)
-		}
-		for line := range strings.SplitSeq(out, "\n") {
-			path, status, ok := parseNameStatus(line)
-			if ok {
-				record(path, status)
-			}
-		}
-	}
-	for _, args := range plainCommands {
-		out, err := git.Run(ctx, queryDir, args...)
-		if err != nil {
-			return ChangeSet{}, fmt.Errorf("listing changed files (git %s): %w", strings.Join(args, " "), err)
-		}
-		for line := range strings.SplitSeq(out, "\n") {
-			record(line, StatusAdded)
-		}
+	// Entries are keyed by repository-relative path here and translated into the
+	// module's coordinates once, below.
+	seen := map[string]Entry{}
+	statuses, plain := listings(cs, r, base)
+	cs.FullScope = !r.HasCommits
+	if err := collect(ctx, git, queryDir, statuses, plain, seen); err != nil {
+		return ChangeSet{}, err
 	}
 
 	repoPaths := make([]string, 0, len(seen))
@@ -213,9 +175,89 @@ func Build(ctx context.Context, git repo.Git, r repo.Repository, base string, or
 			continue
 		}
 		cs.Files = append(cs.Files, rel)
-		cs.Entries = append(cs.Entries, Entry{Path: rel, Status: seen[repoPath]})
+		cs.Entries = append(cs.Entries, moduleEntry(seen[repoPath], rel, r.ModulePrefix))
 	}
 	return cs, nil
+}
+
+// listings returns the git queries that between them name every changed file:
+// the ones reporting a status per path, and the ones reporting bare paths.
+//
+// --full-name makes ls-files answer from the repository root, which is where git
+// diff already answers from. Without it the two subcommands disagree by exactly
+// the module prefix and the change set carries both coordinate systems at once.
+func listings(cs ChangeSet, r repo.Repository, base string) (statuses, plain [][]string) {
+	untracked := []string{"ls-files", "--others", "--exclude-standard", "--full-name"}
+	if !r.HasCommits {
+		return nil, [][]string{{"ls-files", "--full-name"}, untracked}
+	}
+	statuses = [][]string{
+		{"diff", "--name-status", "--diff-filter=ACMRTD", "HEAD"},
+		{"diff", "--name-status", "--diff-filter=ACMRTD", "--cached", "HEAD"},
+	}
+	if cs.HasBase() {
+		statuses = append(statuses,
+			[]string{"diff", "--name-status", "--diff-filter=ACMRTD", base, "HEAD"})
+	}
+	return statuses, [][]string{untracked}
+}
+
+// collect runs the listings and records what they name into seen.
+//
+// The first strong status for a path wins. An addition and a rename both say the
+// base revision does not hold this path under this name, and a later plain diff
+// reporting the same file as modified would erase that.
+func collect(
+	ctx context.Context, git repo.Git, dir string, statuses, plain [][]string, seen map[string]Entry,
+) error {
+	record := func(e Entry) {
+		e.Path = strings.TrimSpace(e.Path)
+		if e.Path == "" {
+			return
+		}
+		if existing, ok := seen[e.Path]; ok && existing.Status != StatusModified {
+			return
+		}
+		seen[e.Path] = e
+	}
+	for _, args := range statuses {
+		out, err := git.Run(ctx, dir, args...)
+		if err != nil {
+			return fmt.Errorf("listing changed files (git %s): %w", strings.Join(args, " "), err)
+		}
+		for line := range strings.SplitSeq(out, "\n") {
+			if e, ok := parseNameStatus(line); ok {
+				record(e)
+			}
+		}
+	}
+	for _, args := range plain {
+		out, err := git.Run(ctx, dir, args...)
+		if err != nil {
+			return fmt.Errorf("listing changed files (git %s): %w", strings.Join(args, " "), err)
+		}
+		for line := range strings.SplitSeq(out, "\n") {
+			record(Entry{Path: line, Status: StatusAdded})
+		}
+	}
+	return nil
+}
+
+// moduleEntry translates one recorded entry into the module's coordinates. A
+// rename whose source lies outside the module is an addition as far as this
+// module can tell, which is the honest reading: the base revision of this module
+// holds nothing under that name.
+func moduleEntry(e Entry, rel, modulePrefix string) Entry {
+	e.Path = rel
+	if e.Status != StatusRenamed {
+		return e
+	}
+	oldRel, inModule := moduleRelative(e.OldPath, modulePrefix)
+	if !inModule || oldRel == rel {
+		return Entry{Path: rel, Status: StatusAdded}
+	}
+	e.OldPath = oldRel
+	return e
 }
 
 // moduleRelative translates one repository-relative path into the module's
@@ -237,24 +279,46 @@ func moduleRelative(repoPath, modulePrefix string) (string, bool) {
 }
 
 // parseNameStatus reads one "M\tpath" or "R100\told\tnew" record.
-func parseNameStatus(line string) (path string, status Status, ok bool) {
+//
+// The source of a rename is kept. Discarding it and calling the destination an
+// addition is what once made a branch that moved a file introduce every finding
+// that file already carried.
+func parseNameStatus(line string) (Entry, bool) {
 	fields := strings.Split(strings.TrimSpace(line), "\t")
 	if len(fields) < 2 || fields[0] == "" {
-		return "", "", false
+		return Entry{}, false
 	}
-	path = fields[len(fields)-1]
+	path := fields[len(fields)-1]
 	switch fields[0][0] {
 	case 'A':
-		return path, StatusAdded, true
+		return Entry{Path: path, Status: StatusAdded}, true
 	case 'D':
-		return path, StatusDeleted, true
+		return Entry{Path: path, Status: StatusDeleted}, true
 	case 'R':
-		// A rename adds the destination; the source is reported separately by
-		// the deletion filter when it matters.
-		return path, StatusAdded, true
+		if len(fields) < 3 {
+			return Entry{Path: path, Status: StatusAdded}, true
+		}
+		return Entry{Path: path, Status: StatusRenamed, OldPath: fields[len(fields)-2]}, true
 	default:
-		return path, StatusModified, true
+		return Entry{Path: path, Status: StatusModified}, true
 	}
+}
+
+// Renames maps each moved file's path at head onto the path it had at base,
+// module-relative. It is what a base evidence set is realigned through before
+// the two revisions are compared.
+func (c ChangeSet) Renames() map[string]string {
+	var out map[string]string
+	for _, e := range c.Entries {
+		if e.Status != StatusRenamed || e.OldPath == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[e.OldPath] = e.Path
+	}
+	return out
 }
 
 // GoFiles returns the change set entries that are Go source files.

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/admission"
+	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
 	"github.com/ALIBRAGIMOV/goharness/internal/toolcache"
@@ -339,4 +340,68 @@ func TestBypassHeadCacheCannotReachTheMandatoryCore(t *testing.T) {
 	if got := len(cached); got != 2 {
 		t.Fatalf("%d checks answer from the head cache; the containment argument covers 2", got)
 	}
+}
+
+// TestBypassMovingAFileDoesNotLaunderANewFinding closes the route the rename
+// realignment opens.
+//
+// A base snapshot is read in head's coordinates so that moving a file does not
+// hand its existing findings back as introduced. The route that buys is a change
+// that moves a file and edits it in the same breath, hoping the move carries the
+// edit past the comparison with it.
+func TestBypassMovingAFileDoesNotLaunderANewFinding(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", cleanLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.commit("clean baseline")
+		f.anchor()
+		f.move("lib/lib.go", "lib/answer.go")
+		f.write("lib/answer.go", suppressedLibrary)
+
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictRejected)
+		if !slices.Contains(blockingRules(result.Evidence), policy.RuleSuppressNolint) {
+			t.Fatalf("blocking rules = %v, want %s", blockingRules(result.Evidence), policy.RuleSuppressNolint)
+		}
+	})
+}
+
+// TestMovingAFileIntroducesNothingByItself is the false-positive guard on the
+// closure above, and the defect that made it necessary.
+//
+// A file is part of a finding's identity, so before the base snapshot was
+// realigned a branch that reorganised code was rejected for every finding the
+// moved files already carried and credited for fixing the same ones. The whole
+// directory moves here because a move across directories is the case that also
+// decides which directories the narrowed checks have to read at base.
+func TestMovingAFileIntroducesNothingByItself(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", unformattedLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.commit("baseline carrying formatting debt")
+		f.anchor()
+		f.move("lib", "pkg")
+
+		result := run(t, f, verify.ModeVerify)
+		var seen bool
+		for _, e := range result.Evidence {
+			if e.RuleID != policy.RuleFormatGofmt {
+				continue
+			}
+			seen = true
+			if e.State != evidence.StatePreexisting {
+				t.Fatalf("moving a file made its existing finding %s, want %s",
+					e.State, evidence.StatePreexisting)
+			}
+		}
+		if !seen {
+			t.Fatalf("the moved file's existing finding vanished entirely: %v",
+				ruleIDs(result.Evidence))
+		}
+		if got := blockingRules(result.Evidence); len(got) > 0 {
+			t.Fatalf("a move with no edit produced blocking findings: %v", got)
+		}
+	})
 }

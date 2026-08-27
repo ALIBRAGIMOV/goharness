@@ -40,11 +40,22 @@ order:
 4. `evidence[]` - already in consequence order: silent-loss, unsafe-behavior,
    structural, hygiene. Work it in that order, never by count. `blocking: false`
    is advisory or pre-existing debt and does not have to be fixed.
-5. `evidence[].fix.command` - the exact command that closes that finding.
-6. `failures[]` - a tool that could not run; never a statement about the code.
+5. `evidence[].state` and `evidence[].origin` - two different questions. `state`
+   is whether the base revision already had the finding; `origin` is whether it
+   sits in a file this change wrote. `new` plus `untouched` is a package the
+   change broke without editing, and it blocks like anything else that is new.
+6. `evidence[].fix.command` - the exact command that closes that finding.
+7. `failures[]` - a tool that could not run; never a statement about the code.
+
+`verify` renders the diff view by default: everything blocking, everything new or
+fixed, and debt in the files the change touched. `evidenceScope` names the view
+and `evidenceOmitted` counts the rows it withheld, so a short list is never
+mistaken for a clean run. No view ever withholds a finding whose `blocking` is
+true, so this changes how much there is to read and never what has to be fixed;
+`--evidence full` prints everything.
 
 `goharness explain RULE-ID` explains any rule. `goharness explain FINGERPRINT
---report r.json` explains one finding, including rows a truncated report omitted.
+--report r.json` explains one finding, including rows a narrowed report omitted.
 
 ## Two things never to do
 

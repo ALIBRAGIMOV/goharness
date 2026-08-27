@@ -67,6 +67,11 @@ type ExecutionPlan struct {
 	Packages []string
 	Files    []string
 	Tests    []string
+	// LocalScope names the package directories the directory-local checks
+	// examined, and is nil where they examined every directory in Packages. A
+	// run that looked at less than its scope has to say so, or an ADMITTED
+	// cannot be audited by the person who stands behind it.
+	LocalScope []string
 }
 
 // CheckIDs lists the planned check IDs in execution order.

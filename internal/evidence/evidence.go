@@ -37,6 +37,23 @@ const (
 	StateUncompared State = ""
 )
 
+// Origin says where a finding sits relative to the change, which is a different
+// question from State. State is identity against the base snapshot: did this
+// finding exist before? Origin is location against the diff: is this in code the
+// change wrote? A report of a branch needs both, and neither implies the other:
+// a change can break a package it never edited, and a file it did edit can carry
+// debt older than the change.
+type Origin string
+
+// Finding origins relative to the change under verification.
+const (
+	OriginChanged   Origin = "changed"
+	OriginUntouched Origin = "untouched"
+	// OriginUnscoped is the zero value: there was no diff to attribute against,
+	// which is every audit and every run without a base revision.
+	OriginUnscoped Origin = ""
+)
+
 // Classification decides whether a finding can block admission.
 type Classification string
 
@@ -64,18 +81,22 @@ type Remediation struct {
 // Evidence is a single normalized finding. Values are immutable once the
 // coordinator has assigned states; checks return them by value.
 type Evidence struct {
-	Fingerprint    string         `json:"fingerprint"`
-	RuleID         string         `json:"ruleId"`
-	PolicySource   string         `json:"policySource"`
-	Tool           string         `json:"tool"`
-	ToolVersion    string         `json:"toolVersion,omitempty"`
-	Severity       Severity       `json:"severity"`
-	File           string         `json:"file,omitempty"`
-	Line           int            `json:"line,omitempty"`
-	Column         int            `json:"column,omitempty"`
-	Package        string         `json:"package,omitempty"`
-	Message        string         `json:"message"`
-	State          State          `json:"state,omitempty"`
+	Fingerprint  string   `json:"fingerprint"`
+	RuleID       string   `json:"ruleId"`
+	PolicySource string   `json:"policySource"`
+	Tool         string   `json:"tool"`
+	ToolVersion  string   `json:"toolVersion,omitempty"`
+	Severity     Severity `json:"severity"`
+	File         string   `json:"file,omitempty"`
+	Line         int      `json:"line,omitempty"`
+	Column       int      `json:"column,omitempty"`
+	Package      string   `json:"package,omitempty"`
+	Message      string   `json:"message"`
+	State        State    `json:"state,omitempty"`
+	// Origin is decoration, never identity: it says where the finding sits
+	// relative to the diff and never reaches the fingerprint, exactly as
+	// Consequence does not.
+	Origin         Origin         `json:"origin,omitempty"`
 	Classification Classification `json:"classification"`
 	// Consequence is what leaving this finding alone costs, taken from the rule
 	// and, where a rule covers several remedies, refined by RemedyClass. It orders
@@ -304,6 +325,39 @@ func Finalize(items []Evidence) []Evidence {
 	}
 	SortPresentation(out)
 	return out
+}
+
+// Realign renames a base evidence set into the coordinate system of head, so a
+// file the change moved keeps the findings it already had.
+//
+// The file is part of a finding's identity. Without this, moving a file makes
+// every finding in it absent at base and therefore new, which blocks; and makes
+// every base twin absent at head and therefore fixed, which credits a repair
+// nobody performed. A branch that reorganises code would be rejected for defects
+// it did not introduce.
+//
+// The base side is rewritten rather than the head side, and the set is
+// renumbered afterwards, because head's fingerprints are the ones the report
+// publishes and a reader has to be able to look one up. Renaming only moves
+// findings between identity groups; a finding whose file the map does not name
+// keeps its group, its occurrence index and therefore its fingerprint.
+func Realign(items []Evidence, renames map[string]string) []Evidence {
+	if len(renames) == 0 || len(items) == 0 {
+		return items
+	}
+	moved := make([]Evidence, 0, len(items))
+	touched := false
+	for _, e := range items {
+		if to, ok := renames[e.File]; ok && to != e.File {
+			e.File = to
+			touched = true
+		}
+		moved = append(moved, e)
+	}
+	if !touched {
+		return items
+	}
+	return Finalize(moved)
 }
 
 // Comparison is the result of diffing a base evidence set against head.

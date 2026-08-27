@@ -2,11 +2,15 @@ package change_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/change"
+	"github.com/ALIBRAGIMOV/goharness/internal/repo"
+	"github.com/ALIBRAGIMOV/goharness/internal/tool"
 )
 
 const graphModule = "example.com/graph"
@@ -208,4 +212,86 @@ func writeSource(t *testing.T, root, rel, content string) {
 	if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
 		t.Fatalf("writing %s: %v", rel, err)
 	}
+}
+
+// TestRenamesAreCarriedThroughTheChangeSet pins the record git reports for a
+// move.
+//
+// A rename used to arrive as an addition with the source discarded, which made
+// every finding in a moved file absent at base and therefore introduced by the
+// move. The source path is what lets the base snapshot be read in head's
+// coordinates, so it has to survive the parse.
+func TestRenamesAreCarriedThroughTheChangeSet(t *testing.T) {
+	root := gitRepoWithAMove(t)
+	git := repo.ExecGit{Runner: tool.ExecRunner{}}
+	r, err := repo.Discover(t.Context(), git, root)
+	if err != nil {
+		t.Fatalf("discovering the fixture module: %v", err)
+	}
+	base, origin, err := change.ResolveBase(t.Context(), git, r, "")
+	if err != nil {
+		t.Fatalf("resolving the base revision: %v", err)
+	}
+	cs, err := change.Build(t.Context(), git, r, base, origin)
+	if err != nil {
+		t.Fatalf("building the change set: %v", err)
+	}
+
+	var moved change.Entry
+	for _, e := range cs.Entries {
+		if e.Path == "pkg/lib.go" {
+			moved = e
+		}
+	}
+	if moved.Status != change.StatusRenamed {
+		t.Fatalf("entry for the moved file = %+v, want status %s", moved, change.StatusRenamed)
+	}
+	if moved.OldPath != "lib/lib.go" {
+		t.Fatalf("OldPath = %q, want lib/lib.go", moved.OldPath)
+	}
+	if got := cs.Renames()["lib/lib.go"]; got != "pkg/lib.go" {
+		t.Fatalf("Renames()[lib/lib.go] = %q, want pkg/lib.go", got)
+	}
+}
+
+// gitRepoWithAMove builds a two-commit repository whose working tree has one
+// package directory moved.
+func gitRepoWithAMove(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolving temp dir: %v", err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=goharness fixture", "GIT_AUTHOR_EMAIL=harness@example.invalid",
+			"GIT_COMMITTER_NAME=goharness fixture", "GIT_COMMITTER_EMAIL=harness@example.invalid",
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, runErr := cmd.CombinedOutput(); runErr != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), runErr, out)
+		}
+	}
+	write := func(rel, content string) {
+		t.Helper()
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if mkErr := os.MkdirAll(filepath.Dir(full), 0o750); mkErr != nil {
+			t.Fatalf("creating %s: %v", filepath.Dir(full), mkErr)
+		}
+		if wErr := os.WriteFile(full, []byte(content), 0o600); wErr != nil {
+			t.Fatalf("writing %s: %v", rel, wErr)
+		}
+	}
+	run("init", "--quiet", "--initial-branch=main")
+	write("go.mod", "module "+graphModule+"\n\ngo 1.26\n")
+	write("lib/lib.go", "package lib\n\n// Value is a constant.\nconst Value = 1\n")
+	run("add", "-A")
+	run("commit", "--no-gpg-sign", "--quiet", "-m", "first")
+	write("NOTES.md", "second commit so a parent revision exists\n")
+	run("add", "-A")
+	run("commit", "--no-gpg-sign", "--quiet", "-m", "second")
+	run("mv", "lib", "pkg")
+	return root
 }

@@ -27,11 +27,12 @@ type Diff struct {
 	Schema string      `json:"schema"`
 	Old    DiffSubject `json:"old"`
 	New    DiffSubject `json:"new"`
-	// SubjectMismatch says the two reports describe different modules or were
-	// produced by different modes. Fingerprint identity is only meaningful inside
-	// one subject, so the comparison below is mechanical rather than a burn-down.
-	// It is a warning and never an error: two honest reports of different modules
-	// still diff, and refusing would hide that fact instead of stating it.
+	// SubjectMismatch says the two reports describe different modules, were
+	// produced by different modes, or were rendered under different evidence
+	// scopes. Fingerprint identity is only meaningful inside one subject, so the
+	// comparison below is mechanical rather than a burn-down. It is a warning and
+	// never an error: two honest reports of different modules still diff, and
+	// refusing would hide that fact instead of stating it.
 	SubjectMismatch bool              `json:"subjectMismatch"`
 	Verdict         VerdictTransition `json:"verdict"`
 	Claims          []ClaimTransition `json:"claims"`
@@ -56,6 +57,10 @@ type DiffSubject struct {
 	// which is not the same statement as a burn-down of the run.
 	Truncated bool `json:"truncated"`
 	Omitted   int  `json:"omitted"`
+	// Scope is the view the report was written under. Two reports rendered under
+	// different views hold different rows of the same run, so comparing them
+	// measures the flag as much as the work.
+	Scope string `json:"scope"`
 }
 
 // VerdictTransition is how the admission answer moved between the two runs.
@@ -134,10 +139,11 @@ const (
 func CompareDocuments(oldDoc, newDoc Document) Diff {
 	fixed, introduced, remaining := partitionByFingerprint(oldDoc.Evidence, newDoc.Evidence)
 	d := Diff{
-		Schema:          DiffSchemaID,
-		Old:             diffSubject(oldDoc),
-		New:             diffSubject(newDoc),
-		SubjectMismatch: oldDoc.Module.Path != newDoc.Module.Path || oldDoc.Mode != newDoc.Mode,
+		Schema: DiffSchemaID,
+		Old:    diffSubject(oldDoc),
+		New:    diffSubject(newDoc),
+		SubjectMismatch: oldDoc.Module.Path != newDoc.Module.Path ||
+			oldDoc.Mode != newDoc.Mode || oldDoc.EvidenceScope != newDoc.EvidenceScope,
 		Verdict: VerdictTransition{
 			From: oldDoc.Verdict, To: newDoc.Verdict,
 			Changed: oldDoc.Verdict != newDoc.Verdict,
@@ -163,6 +169,7 @@ func diffSubject(doc Document) DiffSubject {
 	return DiffSubject{
 		Module: doc.Module.Path, Mode: doc.Mode, Verdict: doc.Verdict,
 		Total: len(doc.Evidence), Truncated: doc.EvidenceTruncated, Omitted: doc.EvidenceOmitted,
+		Scope: doc.EvidenceScope,
 	}
 }
 
@@ -369,10 +376,12 @@ func WriteDiffText(w io.Writer, d Diff, opts DiffTextOptions) error {
 func writeDiffWarnings(b *strings.Builder, p Palette, d Diff, opts DiffTextOptions) {
 	if d.SubjectMismatch {
 		fmt.Fprintf(b, "%s\n", p.warn(fmt.Sprintf(
-			"warning: different subjects (module %s vs %s, mode %s vs %s); fingerprints "+
-				"identify findings within one subject, so these counts are mechanical",
+			"warning: different subjects (module %s vs %s, mode %s vs %s, "+
+				"evidence %s vs %s); fingerprints identify findings within one subject, "+
+				"so these counts are mechanical",
 			orUnknown(d.Old.Module), orUnknown(d.New.Module),
-			orUnknown(d.Old.Mode), orUnknown(d.New.Mode))))
+			orUnknown(d.Old.Mode), orUnknown(d.New.Mode),
+			orUnknown(d.Old.Scope), orUnknown(d.New.Scope))))
 	}
 	for _, s := range []struct {
 		label   string

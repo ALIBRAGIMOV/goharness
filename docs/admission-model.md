@@ -276,6 +276,53 @@ Two verification scopes:
   prints a deprecation note. `--baseline` records the run's blocking findings
   as acknowledged debt after the run completes; see the ledger section below.
 
+### Narrowing the directory-local checks (normative)
+
+A package directory whose judged files are byte-identical at base and head
+produces identical findings at both from any check that reads only that
+directory. Identical findings carry identical fingerprints, because occurrence
+indexes are keyed per rule, file and package rather than globally, so they pair
+in the comparison and can be neither `new` nor `fixed`. In `verify`, and only
+where a base comparison will actually happen, such a check therefore examines
+only the directories the change touched, on both sides of the comparison. Not
+looking there removes `preexisting` rows and nothing else.
+
+Two conditions bound this, and a case in `internal/verify/localscope_test.go`
+pins each:
+
+1. **The check must read one directory and nothing else.** Compilation, `go
+   vet`, `go fix`, golangci-lint, the tests and the vulnerability scan keep the
+   whole reverse-dependency closure, because a change in one package can create
+   a genuine new finding in another. Clone detection compares across
+   directories by construction and keeps the whole scope too.
+2. **None of its rules may be ungrandfatherable.** Such a rule blocks on a
+   pre-existing finding as well, so skipping it would not be declining to
+   recompute a row that cancels; it would be declining to enforce a rule. The
+   native scan owns every suppression rule and the em dash, so the native scan
+   is never narrowed.
+
+Which leaves the metrics scan, `gofmt`, and `goimports`. `goimports` narrows
+only when the change leaves `go.mod` and `go.sum` alone, because it resolves
+identifiers against what the module can reach and an edit there can move its
+answer for a file whose own bytes did not.
+
+The base side never decides this for itself; it is handed the head run's answer.
+Two sides that narrowed independently would be comparing two different questions.
+The move of a file is two directories, the one it left and the one it arrived in,
+and both are read at base.
+
+### Renames (normative)
+
+A file's path is part of a finding's identity, so a change that moves a file must
+not thereby introduce every finding that file already carried. The change set
+keeps the source path git reports for a rename, and the base evidence set is
+realigned into head's coordinates before the two are compared: base findings in a
+moved file are renamed to the head path and the set renumbered, so head's
+fingerprints stay exactly as the report publishes them. A move whose source lies
+outside the module is an addition, which is the truth as far as that module can
+tell. The base scope follows renames too, since a moved package has no import
+path at base to mirror head's onto.
+
 `fast` remains a developer/editor loop aid. It never produces an
 AdmissionDecision: its report and exit text state explicitly that it is not
 an admission gate, and its JSON carries `sufficientForCompletion: false`.
@@ -401,18 +448,56 @@ Every consumer recomputed these by hand before they were emitted.
 
 **`coverage`.** What the verdict rests on, at head only: `packages` in scope with
 their count, `filesJudged`, `generatedExempt` with their count, `testPackages`,
-and `leakInjectionBlocked`, the test packages whose own `TestMain` kept the
-goroutine-leak detector out. The harness already refuses to claim what it did
+`leakInjectionBlocked`, the test packages whose own `TestMain` kept the
+goroutine-leak detector out, and `localScanNarrowed` with `localScanPackages`,
+the directories the file-local scanners examined when they examined fewer than
+all of them. The harness already refuses to claim what it did
 not prove; this is the other half of that discipline, which is stating what it
 did not look at. An ADMITTED whose scope is invisible is not auditable.
 
-**Budgeted rendering.** `--evidence top` (with `--evidence-limit`, default 100)
-truncates `evidence[]` to the highest-consequence findings and sets
-`evidenceTruncated: true` and `evidenceOmitted: N`. Both fields are always
-present, so a consumer never has to guess whether it holds the complete
-enumeration. Claims, summary, coverage, failures and unproducible stay whole;
-the verdict and every count are computed from the full set before truncation
-applies. Every omitted row remains addressable:
+**Two axes on every finding (normative).** `state` says whether the base
+revision already carried the finding: `new`, `preexisting`, `fixed`, or empty
+where no comparison happened. `origin` says where the finding sits relative to
+the diff: `changed` for a file the change added or modified, `untouched` for one
+it did not, and empty where there was no diff to attribute against. They are
+orthogonal and both are needed, because neither implies the other. A finding
+that is `new` and `untouched` is a package the change broke without editing, and
+it blocks like any other new finding. A finding that is `preexisting` and
+`changed` is debt in code the author is looking at, which is worth showing and
+must never block. `origin` is decoration and never enters a fingerprint, exactly
+as consequence does not: a second axis that renamed findings would be worse than
+no axis at all.
+
+Attribution is at file granularity, from the change set, whose paths are already
+module-relative. A finding with no file is placed by its package's directory,
+which is what anchors goroutine leaks and test failures. A finding the run
+cannot place stays unattributed rather than being guessed into a bucket.
+
+**Rendered views (normative).** `--evidence` selects which findings `evidence[]`
+carries, and `evidenceScope` records the answer in the document.
+
+| mode | carries |
+|---|---|
+| `full` | every finding the run produced |
+| `diff` | everything blocking, everything `new` or `fixed`, debt whose origin is `changed`, and anything unattributed |
+| `new` | everything blocking, plus `new` and `fixed` |
+| `top` | `full`, cut to `--evidence-limit` (default 100) in consequence order |
+
+`verify` defaults to `diff`; `audit` and `fast` default to `full`. A gate on one
+change reports on that change; an audit is about the repository, where narrowing
+to a diff would answer a question nobody asked.
+
+**No view ever drops a row whose `blocking` is true.** This is what makes a
+default safe: a filter that could hide the row that decided the verdict would be
+a way to be admitted by not looking. It follows that a view changes how much a
+reader reads and never what they have to fix.
+
+Selection is always declared: `evidenceTruncated: true` and `evidenceOmitted: N`
+count the rows withheld, by a scope or by a limit or by both, and both fields are
+always present so a consumer never has to guess whether it holds the complete
+enumeration. Claims, summary, coverage, failures and unproducible stay whole; the
+verdict and every count are computed from the full set before any view applies.
+Every omitted row remains addressable:
 `goharness explain <fingerprint> --report <file>` prints it.
 
 **Mechanical fixes.** Where the harness can perform a rule's remediation itself,

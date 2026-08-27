@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -773,6 +774,7 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 		root: in.repository.Root, modulePath: in.repository.ModulePath,
 		change: in.change, mode: in.mode,
 		contract: in.contract, config: in.config, repositoryWide: repositoryWide,
+		narrow: baseAvailable,
 	})
 	if err != nil {
 		return runOutput{}, err
@@ -825,12 +827,14 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 	// it has finished; the same discipline the vulnerability snapshot follows.
 	in.result.LeakBlockedPackages = headTarget.leakBlocked
 
-	if !baseAvailable {
-		return out, nil
+	if baseAvailable {
+		if err := e.compareWithBase(ctx, in, headTarget, plan, &out); err != nil {
+			return runOutput{}, err
+		}
 	}
-	if err := e.compareWithBase(ctx, in, headTarget, plan, &out); err != nil {
-		return runOutput{}, err
-	}
+	// Last, because this is the only point where the evidence set is complete on
+	// both paths: the comparison merges its own producers into it.
+	out.Evidence = headTarget.attributeOrigin(in.change, out.Evidence)
 	return out, nil
 }
 
@@ -859,6 +863,8 @@ func (e *Engine) compareWithBase(
 		change: baseChange, mode: in.mode, contract: in.contract,
 		config: in.config, restrict: &scopeRestriction{
 			lint: headTarget.packages, tests: headTarget.testPackages,
+			local: headTarget.localScope, moduleChanged: headTarget.moduleChanged,
+			renamedFrom: renamedGoFiles(in.change),
 		},
 		isBase: true,
 	})
@@ -878,7 +884,10 @@ func (e *Engine) compareWithBase(
 		out.Unproducible = append(out.Unproducible, baseRun.Unproducible...)
 		return nil
 	}
-	baseEvidence := evidence.Finalize(decorate(e.Policy, baseRun.Evidence))
+	// Realigned first: the base tree names a moved file by the path it had there,
+	// and comparing the two coordinate systems reports the move itself as a defect.
+	baseEvidence := evidence.Realign(
+		evidence.Finalize(decorate(e.Policy, baseRun.Evidence)), in.change.Renames())
 	cmp := evidence.Compare(baseEvidence, out.Evidence)
 	merged := slices.Concat(cmp.New, cmp.Preexisting, cmp.Fixed)
 	evidence.SortPresentation(merged)
@@ -1042,6 +1051,19 @@ func (e *Engine) partitionGenerated(root string, files []string) (judged []strin
 type scopeRestriction struct {
 	lint  []string
 	tests []string
+	// local and moduleChanged mirror the head run's directory-local narrowing.
+	// Both sides have to narrow identically, or what the comparison measures is
+	// the narrowing rather than the change.
+	local         []string
+	moduleChanged bool
+	// renamedFrom names the base-side paths of the Go files the change moved.
+	//
+	// The rest of this restriction travels as import paths, and a package the
+	// change renamed has none at base: mirroring head's paths onto the base tree
+	// resolves a moved package to nothing, so the base scope comes out empty and
+	// every finding in the moved code reads as introduced by the move. These paths
+	// are resolved against the base graph, where they still exist.
+	renamedFrom []string
 }
 
 type targetInput struct {
@@ -1054,6 +1076,12 @@ type targetInput struct {
 	repositoryWide bool
 	restrict       *scopeRestriction
 	isBase         bool
+	// narrow permits the directory-local checks to examine only the directories
+	// the change touched. It holds only where a base comparison will happen,
+	// because that is the whole justification: with nothing to compare against,
+	// every finding is the change's to answer for and skipping a directory would
+	// be skipping evidence.
+	narrow bool
 }
 
 func (e *Engine) buildTarget(ctx context.Context, in targetInput) (*target, ExecutionPlan, error) {
@@ -1066,8 +1094,9 @@ func (e *Engine) buildTarget(ctx context.Context, in targetInput) (*target, Exec
 	var lintPkgs, testPkgs []string
 	switch {
 	case in.restrict != nil:
-		lintPkgs = graph.PatternsFor(in.restrict.lint)
-		testPkgs = graph.PatternsFor(in.restrict.tests)
+		moved := graph.SeedPackages(in.restrict.renamedFrom)
+		lintPkgs = withPackages(graph.PatternsFor(in.restrict.lint), moved)
+		testPkgs = withPackages(graph.PatternsFor(in.restrict.tests), moved)
 	case in.mode == ModeAudit || in.change.FullScope:
 		lintPkgs = graph.Packages()
 		testPkgs = graph.Packages()
@@ -1091,8 +1120,76 @@ func (e *Engine) buildTarget(ctx context.Context, in targetInput) (*target, Exec
 		files: files, judged: judged, exemptFiles: exempt,
 		changed: in.change.GoFiles(), contract: in.contract, isBase: in.isBase,
 	}
+	t.localScope, t.moduleChanged = localScopeFor(in)
 	plan := ExecutionPlan{
 		Mode: in.mode, Packages: lintPkgs, Files: judged, Tests: testPkgs,
+		LocalScope: t.localScope,
 	}
 	return t, plan, nil
+}
+
+// withPackages merges two package path lists into one sorted set.
+func withPackages(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	set := make(map[string]bool, len(base)+len(extra))
+	for _, p := range slices.Concat(base, extra) {
+		set[p] = true
+	}
+	return slices.Sorted(maps.Keys(set))
+}
+
+// renamedGoFiles lists the base-side paths of the Go files the change moved.
+func renamedGoFiles(cs change.ChangeSet) []string {
+	var out []string
+	for from := range cs.Renames() {
+		if strings.HasSuffix(from, ".go") {
+			out = append(out, from)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// localScopeFor decides which package directories the directory-local checks
+// examine, and nil when they must examine all of them.
+//
+// A package directory whose judged files are byte-identical at base and head
+// produces identical findings at both from any check reading only that
+// directory. Identical findings carry identical fingerprints, since occurrence
+// indexes are keyed per rule, file and package rather than globally, so they
+// pair in the comparison and can be neither new nor fixed. Skipping such a
+// directory therefore removes pre-existing rows and nothing else, which is only
+// worth having where a pre-existing row does not block: target.localFor holds
+// that half of the condition and names the checks that may not narrow.
+//
+// The base side never decides this for itself. Two sides that narrowed
+// independently would be comparing two different questions.
+func localScopeFor(in targetInput) (dirs []string, moduleChanged bool) {
+	if in.restrict != nil {
+		return in.restrict.local, in.restrict.moduleChanged
+	}
+	if !in.narrow || in.repositoryWide || in.change.FullScope {
+		return nil, false
+	}
+	set := map[string]bool{}
+	for _, entry := range in.change.Entries {
+		if !strings.HasSuffix(entry.Path, ".go") {
+			continue
+		}
+		set[path.Dir(entry.Path)] = true
+		// A move is two directories: the one the file left, which is why the base
+		// tree has to be scanned there, and the one it arrived in. Narrowing to the
+		// destination alone would leave the base side of a moved file unexamined and
+		// hand every finding in it back as new, which is the defect this narrowing
+		// sits next to rather than a second instance of it.
+		if entry.OldPath != "" {
+			set[path.Dir(entry.OldPath)] = true
+		}
+	}
+	// A change with no Go file in it narrows to nothing, which is correct: no
+	// directory-local check can have anything to say about it. The empty
+	// non-nil slice is what carries that, since nil means no narrowing at all.
+	return slices.Sorted(maps.Keys(set)), in.change.TouchesModuleFiles()
 }

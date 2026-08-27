@@ -17,7 +17,6 @@ Commands
                 active, plus vulnerability scanning and repo-wide race detection
   fast          developer loop aid over changed packages and their direct
                 dependents; NOT an admission gate
-  deep          deprecated alias for audit
   setup         provision the pinned tools and the vulnerability database once
   tools update  refresh the vulnerability database and re-provision moved pins
   fix           apply one rule's mechanical remediation (writes files)
@@ -37,16 +36,13 @@ Flags for verify, audit, fast and deep
   --explain-plan      print the obligation set and exit
   --no-cache          recompute the base snapshot instead of reusing evidence
   --baseline          audit only: record blocking findings as acknowledged debt
-  --evidence MODE     full (default), or top: only the highest-consequence
-                      findings, cut declared; --evidence-limit N (default 100)
+  --evidence MODE     full, diff, new or top (verify defaults to diff)
   --quiet             reduce output to the verdict line
   --no-color          never colourise (NO_COLOR is honoured too)
   -v, -vv             INFO, then DEBUG diagnostics on stderr
   --log-json          structured log lines instead of console format
 
-The other commands reject these flags: setup and tools update take --platform
-OS-ARCH, doctor --dir DIR, fix --rule RULE-ID with --dry-run and --dir DIR,
-explain --report FILE, diff --json and --no-color.
+The other commands take their own flags; "goharness help <command>" lists them.
 
 Exit codes (verification commands; "goharness help diff" gives diff's own)
   0   ADMITTED       every applicable claim has sufficient evidence
@@ -68,21 +64,25 @@ Agent protocol
                              with .remedy, the action that would produce it
     evidence[].blocking      true stops admission; false is advisory or
                              pre-existing debt and does not have to be fixed
+    evidence[].origin        with .state: whether the finding is in a file this
+                             change wrote. new plus untouched is a package it
+                             broke without editing, and it blocks all the same
     evidence[]               consequence order: silent-loss, unsafe-behavior,
                              structural, hygiene; work it so, never by count
     evidence[].fix.command   the exact command that closes that finding
-    summary, coverage        counts aggregated once; what the run left out
+    summary, coverage        counts of the whole run; what it left out; a
+                             narrowed evidence[] declares evidenceOmitted
     failures[]               a tool that could not run, each with .hint; a
                              failure is never a statement about the code
 
   "goharness explain RULE-ID", or FINGERPRINT with --report, explains any
   finding; where one carries a goharness fix command, that command applies it.
-  "goharness fast" is never sufficient to finish a task. "goharness setup"
-  provisions tools once; verification never installs anything or uses a network.
+  "goharness fast" is never sufficient. "goharness setup" provisions tools
+  once; verification never installs anything or uses a network.
 
 Examples
   goharness verify --agent
-  goharness verify --agent --evidence top > report.json
+  goharness verify --agent --evidence full > report.json
 
 Run "goharness help <command>" for details on any command.
 `
@@ -112,15 +112,27 @@ func perCommandUsage() map[string]string {
 	return usage
 }
 
-func verificationUsage() map[string]string {
-	return map[string]string{
-		"verify": `usage: goharness verify [--agent] [--json] [--dir DIR] [--base REV]
-                        [--contract FILE] [--timeout D] [--explain-plan]
-                        [--no-cache] [--quiet] [--no-color] [-v|-vv] [--log-json]
+// verifyUsage is its own constant because it is the topic an agent reads
+// first and the longest of them; inlining it made the map that holds every
+// verification topic too large to read.
+const verifyUsage = `usage: goharness verify [--agent] [--json] [--dir DIR] [--base REV]
+                        [--contract FILE] [--evidence MODE] [--timeout D]
+                        [--explain-plan] [--no-cache] [--quiet] [--no-color]
+                        [-v|-vv] [--log-json]
 
 Admission gate. Verifies the diff plus its reverse dependency closure,
 compares evidence against the base revision, and produces the full claim
 table. This is the command an agent must finish with.
+
+The report is about the change. Every finding carries two axes: state, which
+says whether the base revision already had it, and origin, which says whether
+it sits in a file the change wrote. By default the report shows what the
+change is answerable for and says how many rows it withheld; --evidence full
+prints the rest, and --evidence new prints only what the change moved.
+
+Reverse dependencies stay in scope whatever the report shows, because a change
+in one package can break another it never opened. Such a finding is new and
+untouched, and it blocks.
 
 The base revision is a commit that cannot change, so its evidence is cached
 and reused; --no-cache recomputes it and must reach the same verdict.
@@ -131,8 +143,13 @@ A task contract narrows scope or records a permission: see
 Examples
   goharness verify --agent
   goharness verify --base HEAD~3
+  goharness verify --evidence full
   goharness verify --contract task.yaml --json
-`,
+`
+
+func verificationUsage() map[string]string {
+	return map[string]string{
+		"verify": verifyUsage,
 		"audit": `usage: goharness audit [--agent] [--json] [--dir DIR] [--timeout D]
                        [--baseline] [--quiet] [--no-color] [-v|-vv] [--log-json]
 

@@ -24,7 +24,7 @@ import (
 )
 
 // Version is the harness version recorded in every report.
-const Version = "0.6.0"
+const Version = "0.7.0"
 
 // Exit codes. They are the harness's contract with any caller.
 const (
@@ -150,8 +150,27 @@ type verifyFlags struct {
 // Evidence rendering modes for --evidence.
 const (
 	evidenceFull = "full"
+	evidenceDiff = "diff"
+	evidenceNew  = "new"
 	evidenceTop  = "top"
 )
+
+// evidenceModes lists the accepted values in the order the help prints them.
+func evidenceModes() []string {
+	return []string{evidenceFull, evidenceDiff, evidenceNew, evidenceTop}
+}
+
+// defaultEvidence is the view a mode renders when the flag is absent.
+//
+// verify is a gate on one change, so its report is about that change. audit and
+// fast are about the repository, where narrowing to a diff would answer a
+// question nobody asked.
+func defaultEvidence(mode verify.Mode) string {
+	if mode == verify.ModeVerify {
+		return evidenceDiff
+	}
+	return evidenceFull
+}
 
 // DefaultEvidenceLimit is how many findings "--evidence top" keeps. A report of
 // a well-kept brownfield repository runs past a megabyte of JSON, which is a
@@ -165,15 +184,19 @@ const DefaultEvidenceLimit = 100
 func (f *verifyFlags) reportOptions() (report.Options, error) {
 	switch f.evidence {
 	case evidenceFull:
-		return report.Options{}, nil
+		return report.Options{Scope: report.ScopeFull}, nil
+	case evidenceDiff:
+		return report.Options{Scope: report.ScopeDiff}, nil
+	case evidenceNew:
+		return report.Options{Scope: report.ScopeNew}, nil
 	case evidenceTop:
 		if f.limit <= 0 {
 			return report.Options{}, fmt.Errorf("--evidence-limit must be positive, got %d", f.limit)
 		}
-		return report.Options{EvidenceLimit: f.limit}, nil
+		return report.Options{Scope: report.ScopeFull, EvidenceLimit: f.limit}, nil
 	default:
-		return report.Options{}, fmt.Errorf("unknown --evidence mode %q; use %s or %s",
-			f.evidence, evidenceFull, evidenceTop)
+		return report.Options{}, fmt.Errorf("unknown --evidence mode %q; use one of %s",
+			f.evidence, strings.Join(evidenceModes(), ", "))
 	}
 }
 
@@ -189,8 +212,8 @@ func bindVerifyFlags(fs *flag.FlagSet, mode verify.Mode) *verifyFlags {
 	fs.StringVar(&f.dir, "dir", ".", "directory inside the module to verify")
 	fs.StringVar(&f.base, "base", "", "explicit base revision for comparison (verify only)")
 	fs.StringVar(&f.contract, "contract", "", "task contract file")
-	fs.StringVar(&f.evidence, "evidence", evidenceFull,
-		"how much of evidence[] the JSON document carries: full, or top")
+	fs.StringVar(&f.evidence, "evidence", defaultEvidence(mode),
+		"which findings the report carries: "+strings.Join(evidenceModes(), ", "))
 	fs.IntVar(&f.limit, "evidence-limit", DefaultEvidenceLimit,
 		"how many findings `--evidence top` keeps, in consequence order")
 	fs.BoolFunc("v", "enable INFO diagnostics", func(string) error { f.verbosity = max(f.verbosity, 1); return nil })
@@ -294,7 +317,7 @@ func renderResult(in renderInput) int {
 			in.errOut.line("goharness %s: %v", in.command, err)
 			return ExitInconclusive
 		}
-		if err := writeText(in.textOut, in.result, in.flags); err != nil {
+		if err := writeText(in.textOut, in.result, in.flags, opts.Scope); err != nil {
 			in.errOut.line("goharness %s: %v", in.command, err)
 			return ExitInconclusive
 		}
@@ -307,17 +330,18 @@ func renderResult(in renderInput) int {
 		}
 		return in.result.Decision.Verdict.ExitCode()
 	}
-	if err := writeText(in.reportOut, in.result, in.flags); err != nil {
+	if err := writeText(in.reportOut, in.result, in.flags, opts.Scope); err != nil {
 		in.errOut.line("goharness %s: %v", in.command, err)
 		return ExitInconclusive
 	}
 	return in.result.Decision.Verdict.ExitCode()
 }
 
-func writeText(w io.Writer, result verify.Result, flags *verifyFlags) error {
+func writeText(w io.Writer, result verify.Result, flags *verifyFlags, scope report.Scope) error {
 	return report.WriteTextWithOptions(w, Version, result, report.TextOptions{
 		Palette: paletteFor(w, flags.noColor),
 		Quiet:   flags.quiet,
+		Scope:   scope,
 	})
 }
 
@@ -464,10 +488,16 @@ func findingInReport(path, fingerprint string) (report.Finding, error) {
 			return f, nil
 		}
 	}
+	if doc.EvidenceOmitted == 0 {
+		return report.Finding{}, fmt.Errorf(
+			"no finding with fingerprint %s in %s, and that report withheld nothing, "+
+				"so the fingerprint is not from this run", fingerprint, path)
+	}
 	return report.Finding{}, fmt.Errorf(
-		"no finding with fingerprint %s in %s; a truncated report lists what it omitted "+
-			"as evidenceOmitted, and the full document always has every row",
-		fingerprint, path)
+		"no finding with fingerprint %s in %s; that report was written with "+
+			"--evidence %s and withheld %d row(s), which it records as evidenceOmitted; "+
+			"`--evidence full` always writes every row",
+		fingerprint, path, orNone(doc.EvidenceScope), doc.EvidenceOmitted)
 }
 
 func explainRule(rule policy.Rule, out *printer) int {

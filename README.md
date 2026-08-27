@@ -14,7 +14,7 @@ most code is written by AI coding agents and "done" stopped meaning anything.
 ```console
 $ goharness verify
 REJECTED  failing claims: test-effectiveness
-goharness 0.6.0  mode=verify  module github.com/acme/billing (go 1.26)
+goharness 0.7.0  mode=verify  module github.com/acme/billing (go 1.26)
 tools: go go1.26.6, golangci-lint 2.12.2 (pin 2.12.2), x/vuln v1.7.0
 scope: 7 changed files against 4f2ab1c9d3e5 (merge-base with default branch), 12 packages, 9 test packages
 risk domains: concurrency, tests
@@ -35,7 +35,7 @@ test-effectiveness:
   run: goharness explain GH-TEST-001
 
 simplicity:
-  advise GO-FIX-rangeint billing/ledger.go:24:2 [new]
+  advise GO-FIX-rangeint billing/ledger.go:24:2 [new, changed]
       for loop can be modernized using range over int
       fix: go fix -rangeint ./billing
 
@@ -97,6 +97,36 @@ That is why the strict policy is adoptable on a legacy repository on day one.
 The exception is suppression directives, which are forbidden outright and never
 grandfathered. Exceptions live in one reviewed file with a rule ID, scope,
 reason, owner and expiry date.
+
+## A report about your branch, not about your repository
+
+`verify` scopes evidence to the diff and its reverse dependencies, so on a large
+repository one edited file used to drag most of the codebase into the report as
+non-blocking debt. Every finding now carries two axes, and they answer different
+questions:
+
+- `state`: did the base revision already have this? `new`, `preexisting`, `fixed`
+- `origin`: is it in a file you wrote? `changed`, `untouched`
+
+Read together they are what a merge request review actually needs. `new` +
+`untouched` is a package your change broke without editing, and it blocks. `preexisting`
++ `changed` is debt in a file you are already in, worth seeing and never blocking.
+`preexisting` + `untouched` is the noise, and `verify` no longer prints it.
+
+```console
+$ goharness verify
+REJECTED  failing claims: reliability
+...
+evidence: 2 new, 431 pre-existing, 0 fixed, 27 advisory; 0 tool failure(s); 51s
+--evidence diff: 452 of 460 finding(s) not shown; rerun with --evidence full to read them
+```
+
+`--evidence full` prints everything, `--evidence new` prints only what you moved.
+**No view ever drops a finding that blocks**, so a narrower report can change how
+much you read and never what you have to fix, and `summary` keeps counting the
+whole run either way. Moving a file no longer introduces the findings it already
+carried: git's rename is followed, and the base snapshot is read in your branch's
+coordinates before the two are compared.
 
 ## What it actually runs
 
@@ -162,6 +192,11 @@ declaring exactly how many it omitted; `goharness explain <fingerprint>
 `goharness fix --rule <ID>` performs it, so a thousand of them are one command
 rather than an argument about the rule.
 
+In `--agent` mode `verify` renders the diff view by default and declares in
+`evidenceScope` and `evidenceOmitted` exactly what it withheld, which keeps the
+document inside a context window without the agent having to trust that a short
+list means a clean run.
+
 `goharness diff before.json after.json` compares two reports on fingerprint
 identity and states what was fixed, what was introduced and what remains. It is
 progress accounting a supervisor can check without trusting the agent's account
@@ -222,8 +257,10 @@ head against base so old debt does not block you, and refuses to call a change
 safe when a check could not run.
 
 **Will it bury my legacy repository in findings?**
-No. Only findings your change introduces can block. Everything else is
-reported as debt.
+No. Only findings your change introduces can block, and `verify` reports only
+what your change is answerable for: what it introduced, what it fixed, what it
+broke elsewhere, and the debt in the files it touched. `--evidence full` has the
+rest whenever you want it.
 
 **Does it send my code anywhere?**
 No. Verification never touches the network and never writes in your worktree.
@@ -253,5 +290,6 @@ a performance regression and several complexity violations in its own code.
 - [docs/adopting-alongside-golangci.md](docs/adopting-alongside-golangci.md): adopting the gate in a repository that already runs golangci-lint
 - [docs/agent-contract.md](docs/agent-contract.md): a copy-pasteable CLAUDE.md/AGENTS.md fragment for repositories that adopt goharness
 - [docs/threat-model.md](docs/threat-model.md): the routes to an unearned ADMITTED, the mechanism closing each, and the test that pins it
+- [docs/releases/0.7.md](docs/releases/0.7.md): what 0.7 changed
 - [docs/releases/0.6.md](docs/releases/0.6.md): what 0.6 changed
 

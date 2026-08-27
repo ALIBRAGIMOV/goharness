@@ -61,6 +61,9 @@ func (p Palette) claimState(s admission.ClaimState) string {
 type TextOptions struct {
 	Palette Palette
 	Quiet   bool
+	// Scope selects which findings are printed. The counts above them are always
+	// of the whole run, so a narrowed view still states the true totals.
+	Scope Scope
 }
 
 // WriteText renders the human report: verdict first, then the claim table, the
@@ -82,11 +85,11 @@ func WriteTextWithOptions(w io.Writer, version string, r verify.Result, opts Tex
 
 	writeHeader(&b, p, version, r)
 	writeClaims(&b, p, r)
-	writeCounts(&b, r)
+	writeCounts(&b, p, r, opts.Scope)
 	writeBaseline(&b, p, r)
 	writePolicyShadow(&b, p, r)
 	writeFailures(&b, p, r)
-	writeFindings(&b, p, r)
+	writeFindings(&b, p, r, opts.Scope)
 	writeNextSteps(&b, p, r)
 	return flush(w, b.String())
 }
@@ -188,10 +191,36 @@ func writeClaims(b *strings.Builder, p Palette, r verify.Result) {
 	}
 }
 
-func writeCounts(b *strings.Builder, r verify.Result) {
+func writeCounts(b *strings.Builder, p Palette, r verify.Result, scope Scope) {
 	newFindings, preexisting, fixed, advisory := EvidenceCounts(r.Evidence)
 	fmt.Fprintf(b, "\nevidence: %d new, %d pre-existing, %d fixed, %d advisory; %d tool failure(s); %s\n",
 		newFindings, preexisting, fixed, advisory, len(r.Failures), r.Duration.Round(1e6))
+	writeScopeNote(b, p, r, scope)
+}
+
+// writeScopeNote says how much of the run the printed list leaves out.
+//
+// The counts above this line are of the whole run and the list below it may not
+// be, so a reader given no note has to work out which of the two they are
+// looking at. It says nothing when nothing was withheld, because then the list
+// is the run and a line claiming otherwise would be the lie this exists to
+// prevent.
+func writeScopeNote(b *strings.Builder, p Palette, r verify.Result, scope Scope) {
+	if scope.orFull() == ScopeFull {
+		return
+	}
+	omitted := 0
+	for _, e := range r.Evidence {
+		if !scope.Keeps(e) {
+			omitted++
+		}
+	}
+	if omitted == 0 {
+		return
+	}
+	fmt.Fprintf(b, "%s\n", p.dim(fmt.Sprintf(
+		"--evidence %s: %d of %d finding(s) not shown; "+
+			"rerun with --evidence full to read them", scope, omitted, len(r.Evidence))))
 }
 
 // writeBaseline prints the ledger burn-down in one line, which is the whole
@@ -257,12 +286,15 @@ func writeFailures(b *strings.Builder, p Palette, r verify.Result) {
 	}
 }
 
-func writeFindings(b *strings.Builder, p Palette, r verify.Result) {
+func writeFindings(b *strings.Builder, p Palette, r verify.Result, scope Scope) {
 	if len(r.Evidence) == 0 {
 		return
 	}
 	grouped := map[admission.Dimension][]evidence.Evidence{}
 	for _, e := range r.Evidence {
+		if !scope.Keeps(e) {
+			continue
+		}
 		dim, ok := admission.DimensionOf(e.RuleID)
 		if !ok {
 			dim = admission.DimPolicyIntegrity
@@ -326,11 +358,20 @@ func location(e evidence.Evidence) string {
 	}
 }
 
+// stateSuffix names both axes a finding carries: whether it existed at base,
+// and whether it sits in a file the change wrote. A reader deciding what to do
+// with a row wants the second as much as the first.
 func stateSuffix(e evidence.Evidence) string {
-	if e.State == "" {
+	switch {
+	case e.State == "" && e.Origin == evidence.OriginUnscoped:
 		return ""
+	case e.State == "":
+		return " [" + string(e.Origin) + "]"
+	case e.Origin == evidence.OriginUnscoped:
+		return " [" + string(e.State) + "]"
+	default:
+		return " [" + string(e.State) + ", " + string(e.Origin) + "]"
 	}
-	return " [" + string(e.State) + "]"
 }
 
 func writeNextSteps(b *strings.Builder, p Palette, r verify.Result) {

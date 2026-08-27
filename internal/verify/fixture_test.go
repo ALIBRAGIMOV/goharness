@@ -211,6 +211,32 @@ func (f *fixture) mustGo(args ...string) {
 	}
 }
 
+// anchor commits once more so that the commit before it becomes a resolvable
+// base revision. Everything written before anchor is what the base holds, which
+// is how a case puts pre-existing debt behind the change it is testing.
+func (f *fixture) anchor() {
+	f.t.Helper()
+	f.write("NOTES.md", "a second commit, so that the first is a base revision\n")
+	f.commit("second commit so a parent revision exists")
+}
+
+// move renames a module-relative path with git, so the change set carries the
+// rename git reports rather than an unrelated deletion and addition.
+func (f *fixture) move(from, to string) {
+	f.t.Helper()
+	f.git("mv", f.repoPath(from), f.repoPath(to))
+}
+
+// repoPath translates a module-relative path into the repository-relative one
+// git answers in, which is the same translation the change set performs and the
+// only reason a case reads the same in every layout.
+func (f *fixture) repoPath(rel string) string {
+	if f.layout.prefix == "" {
+		return rel
+	}
+	return f.layout.prefix + "/" + rel
+}
+
 func (f *fixture) commit(message string) {
 	f.t.Helper()
 	f.git("add", "-A")
@@ -532,6 +558,8 @@ func TestFixtureSourcesAreCanonical(t *testing.T) {
 		"flakyLibraryTest":          flakyLibraryTest,
 		"generatedHeaderLibrary":    generatedHeaderLibrary,
 		"ineffectiveLibraryTest":    ineffectiveLibraryTest,
+		"incompatibleAnswerLibrary": incompatibleAnswerLibrary,
+		"suppressedConsumer":        suppressedConsumer,
 	}
 	for name, src := range sources {
 		formatted, err := format.Source([]byte(src))

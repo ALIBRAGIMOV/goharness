@@ -68,6 +68,13 @@ consumer boundaries and are introduced only where a test seam requires one
   extends to direct reverse dependents; `verify` uses the full reverse
   dependency closure. Changed-line filtering alone is explicitly rejected;
   scoping is package-aware and dependency-aware.
+- A rename keeps its source path. Git reports one, a file's path is part of a
+  finding's identity, and discarding the source made a change that moved a file
+  introduce every finding that file already carried.
+- What is judged and what is reported are separate decisions. Scope decides
+  what the run looks at; `origin` on each finding records whether it sits in a
+  file the change wrote, and `--evidence` selects which of them the report
+  carries. No selection ever drops a finding that blocks.
 
 ## Base/head comparison
 
@@ -87,7 +94,17 @@ evidence sets by stable fingerprint:
   diff modes;
 - suppression directives and agent-hygiene violations are exempt from debt
   grandfathering: they block whenever they are in scope, because inline
-  suppression is forbidden outright.
+  suppression is forbidden outright;
+- the base evidence set is realigned into head's coordinates first, so a moved
+  file's findings pair with themselves rather than splitting into a new one and
+  a fixed one;
+- a check that reads one package directory and owns no ungrandfatherable rule
+  examines only the directories the change touched, on both sides. A directory
+  identical at base and head produces identical findings at both, which pair on
+  fingerprint and can be neither new nor fixed, so this removes pre-existing
+  rows and nothing else. Compilation, vet, `go fix`, golangci-lint, the tests,
+  the vulnerability scan and clone detection are not narrowed, and neither is
+  the native scan, which owns the rules that block while pre-existing.
 
 The temporary base worktree is always removed; `deep` skips base comparison
 and evaluates the whole repository at head.

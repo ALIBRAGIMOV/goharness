@@ -60,6 +60,13 @@ type target struct {
 	// module is the digest of the module requirements, which decide which imports
 	// resolve and therefore what goimports concludes.
 	module string
+	// localScope names the package directories the directory-local checks
+	// examine. It is nil where they examine every directory in scope, which is
+	// every mode but a verify that has a base to compare against.
+	localScope []string
+	// moduleChanged records that the change edits go.mod or go.sum, which can
+	// move goimports's answer for a file whose own bytes did not.
+	moduleChanged bool
 
 	// vulnDB records the snapshot the scan actually used, so the report can
 	// state which database produced the security evidence.
@@ -133,6 +140,19 @@ func nativeRemediation(ruleID string) (evidence.Remediation, bool) {
 		Command: "goharness fix --rule " + fixer.RuleID,
 		Summary: fixer.Summary,
 	}, true
+}
+
+// dirSet turns a directory list into a membership test, keeping nil as "every
+// directory" rather than as the empty set.
+func dirSet(dirs []string) map[string]bool {
+	if dirs == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(dirs))
+	for _, dir := range dirs {
+		out[dir] = true
+	}
+	return out
 }
 
 func (t *target) rel(p string) string {
@@ -222,7 +242,10 @@ type formatCheck struct {
 	tool    string
 	message string
 	fix     string
-	judge   func(context.Context, packageScope) ([]formatFinding, error)
+	// dependsOnModule marks a check whose answer can move when go.mod does, which
+	// decides whether it may skip the directories the change did not touch.
+	dependsOnModule bool
+	judge           func(context.Context, packageScope) ([]formatFinding, error)
 }
 
 func (t *target) runGofmt(ctx context.Context) (checkResult, error) {
@@ -238,12 +261,13 @@ func (t *target) runGofmt(ctx context.Context) (checkResult, error) {
 
 func (t *target) runGoimports(ctx context.Context) (checkResult, error) {
 	return t.runFormatCheck(ctx, formatCheck{
-		kind:    goimportsEvidenceKind,
-		ruleID:  policy.RuleFormatGoimports,
-		tool:    "goimports",
-		message: "import block is not goimports-normalized",
-		fix:     "goimports -w ",
-		judge:   t.goimportsPackage,
+		kind:            goimportsEvidenceKind,
+		ruleID:          policy.RuleFormatGoimports,
+		tool:            "goimports",
+		message:         "import block is not goimports-normalized",
+		fix:             "goimports -w ",
+		dependsOnModule: true,
+		judge:           t.goimportsPackage,
 	})
 }
 
@@ -268,10 +292,14 @@ func (t *target) runFormatCheck(ctx context.Context, check formatCheck) (checkRe
 			"a formatting check was scheduled before the scope was grouped by package")}
 	}
 	cacheable := t.headCacheable()
+	local := dirSet(t.localFor(check.dependsOnModule))
 	var out []evidence.Evidence
 	for _, pkg := range t.packageScopes {
 		if err := ctx.Err(); err != nil {
 			return checkResult{}, err
+		}
+		if local != nil && !local[pkg.dir] {
+			continue
 		}
 		var findings []formatFinding
 		key, hit := "", false
@@ -385,6 +413,29 @@ func (t *target) syntax() (*analyze.ParsedScope, error) {
 	return t.parsed, nil
 }
 
+// localFor returns the package directories one directory-local check examines,
+// and nil when it has to see every directory in scope.
+//
+// Two conditions, both necessary. The check's answer must depend on one
+// directory's bytes alone, so that a directory identical at base and head yields
+// findings that pair on fingerprint. And none of its rules may be
+// ungrandfatherable, since such a rule blocks on a pre-existing finding too:
+// skipping it would not decline to recompute a row that cancels, it would
+// decline to enforce a rule. The native scan fails the second test and is never
+// narrowed; it owns every suppression rule and the em dash.
+//
+// dependsOnModule separates goimports from gofmt: goimports resolves identifiers
+// against what the module can reach, so an edit to go.mod can move its answer
+// for a file whose own bytes did not.
+func (t *target) localFor(dependsOnModule bool) []string {
+	if dependsOnModule && t.moduleChanged {
+		return nil
+	}
+	return t.localScope
+}
+
+// runNative reads the whole scope on purpose. See localFor: this check produces
+// the rules that block whether or not the base revision already carried them.
 func (t *target) runNative(ctx context.Context) (checkResult, error) {
 	scope, err := t.syntax()
 	if err != nil {
@@ -402,7 +453,7 @@ func (t *target) runMetrics(ctx context.Context) (checkResult, error) {
 	if err != nil {
 		return checkResult{}, err
 	}
-	metrics, err := scope.Metrics(ctx)
+	metrics, err := scope.Restrict(t.localFor(false)).Metrics(ctx)
 	if err != nil {
 		return checkResult{}, err
 	}

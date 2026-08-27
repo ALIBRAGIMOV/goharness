@@ -184,3 +184,66 @@ func TestIdentityIgnoresWhitespaceAndMeasurements(t *testing.T) {
 		t.Fatal("findings about different functions share an identity")
 	}
 }
+
+// TestRealignKeepsAMovedFilesFindings is the unit behind the rename closure. A
+// file is part of a finding's identity, so without realignment moving one makes
+// every finding it carried new at head and fixed at base at the same time.
+func TestRealignKeepsAMovedFilesFindings(t *testing.T) {
+	t.Parallel()
+	base := evidence.Finalize([]evidence.Evidence{
+		{RuleID: "GH-X", File: "lib/lib.go", Message: "unchecked error"},
+		{RuleID: "GH-X", File: "lib/lib.go", Message: "unchecked error"},
+		{RuleID: "GH-Y", File: "other/other.go", Message: "untouched"},
+	})
+	head := evidence.Finalize([]evidence.Evidence{
+		{RuleID: "GH-X", File: "pkg/lib.go", Message: "unchecked error"},
+		{RuleID: "GH-X", File: "pkg/lib.go", Message: "unchecked error"},
+		{RuleID: "GH-Y", File: "other/other.go", Message: "untouched"},
+	})
+	realigned := evidence.Realign(base, map[string]string{"lib/lib.go": "pkg/lib.go"})
+	cmp := evidence.Compare(realigned, head)
+	if len(cmp.New) != 0 || len(cmp.Fixed) != 0 {
+		t.Fatalf("a move produced %d new and %d fixed findings, want none of either",
+			len(cmp.New), len(cmp.Fixed))
+	}
+	if len(cmp.Preexisting) != 3 {
+		t.Fatalf("pre-existing = %d, want 3", len(cmp.Preexisting))
+	}
+}
+
+// TestRealignLeavesUnmovedFindingsNamedExactlyAsTheyWere is the guard: renaming
+// one group must not renumber any other, or a rename anywhere renames
+// everything.
+func TestRealignLeavesUnmovedFindingsNamedExactlyAsTheyWere(t *testing.T) {
+	t.Parallel()
+	items := evidence.Finalize([]evidence.Evidence{
+		{RuleID: "GH-X", File: "lib/lib.go", Message: "moved"},
+		{RuleID: "GH-Y", File: "other/other.go", Message: "stays"},
+	})
+	before := map[string]string{}
+	for _, e := range items {
+		before[e.File] = e.Fingerprint
+	}
+	realigned := evidence.Realign(items, map[string]string{"lib/lib.go": "pkg/lib.go"})
+	for _, e := range realigned {
+		if e.File != "other/other.go" {
+			continue
+		}
+		if e.Fingerprint != before["other/other.go"] {
+			t.Fatalf("realigning one file renamed an unrelated finding: %q vs %q",
+				e.Fingerprint, before["other/other.go"])
+		}
+	}
+}
+
+// TestRealignWithoutRenamesIsTheIdentity keeps the common path free.
+func TestRealignWithoutRenamesIsTheIdentity(t *testing.T) {
+	t.Parallel()
+	items := evidence.Finalize([]evidence.Evidence{{RuleID: "GH-X", File: "a.go", Message: "boom"}})
+	if got := evidence.Realign(items, nil); len(got) != 1 || got[0].Fingerprint != items[0].Fingerprint {
+		t.Fatal("realigning against no renames changed the set")
+	}
+	if got := evidence.Realign(items, map[string]string{"b.go": "c.go"}); got[0].Fingerprint != items[0].Fingerprint {
+		t.Fatal("a rename of an unrelated file changed the set")
+	}
+}

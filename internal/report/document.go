@@ -60,10 +60,60 @@ type Document struct {
 	// always declared: a consumer must never have to guess whether it holds the
 	// complete enumeration, because the enumeration being complete is the whole
 	// reason to trust it.
-	EvidenceTruncated bool                  `json:"evidenceTruncated"`
-	EvidenceOmitted   int                   `json:"evidenceOmitted"`
-	Failures          []verify.CheckFailure `json:"failures"`
-	Timing            Timing                `json:"timing"`
+	EvidenceTruncated bool `json:"evidenceTruncated"`
+	EvidenceOmitted   int  `json:"evidenceOmitted"`
+	// EvidenceScope names the view evidence[] is a selection under, so a consumer
+	// reading a short list knows whether it is short because the run was clean or
+	// because the rendering asked a narrower question.
+	EvidenceScope string                `json:"evidenceScope"`
+	Failures      []verify.CheckFailure `json:"failures"`
+	Timing        Timing                `json:"timing"`
+}
+
+// Scope selects which findings a rendering carries.
+//
+// Like EvidenceLimit it is rendering only: the verdict, the claims, and every
+// count in Summary are computed over the whole evidence set before any of this
+// applies. What it changes is how much a reader has to read, never what they
+// have to fix.
+type Scope string
+
+// Evidence scopes. The zero value renders everything, so a caller that does not
+// care gets the complete document.
+const (
+	ScopeFull Scope = "full"
+	ScopeDiff Scope = "diff"
+	ScopeNew  Scope = "new"
+)
+
+// orFull resolves the zero value, which is the complete set.
+func (s Scope) orFull() Scope {
+	if s == "" {
+		return ScopeFull
+	}
+	return s
+}
+
+// Keeps reports whether one finding survives this scope.
+//
+// A blocking finding survives every scope without exception: a view that could
+// hide the row that decided the verdict would be a way to be admitted by not
+// looking, and no rendering flag may ever be that. A finding the run could not
+// place against the diff survives too, because unplaced is not the same as
+// irrelevant and the honest treatment of what the harness does not know is to
+// show it.
+func (s Scope) Keeps(e evidence.Evidence) bool {
+	if verify.Blocking(e) || e.State == evidence.StateNew || e.State == evidence.StateFixed {
+		return true
+	}
+	switch s.orFull() {
+	case ScopeNew:
+		return false
+	case ScopeDiff:
+		return e.Origin != evidence.OriginUntouched
+	default:
+		return true
+	}
 }
 
 // Summary is the aggregation every consumer of this document rebuilds by hand.
@@ -106,6 +156,15 @@ type Coverage struct {
 	// goroutine-leak detector out. It was reachable only as prose inside an
 	// unproducible reason, which is not somewhere a consumer can act on.
 	LeakInjectionBlocked []string `json:"leakInjectionBlocked"`
+	// LocalScanNarrowed says the file-local scanners examined only the package
+	// directories the change touched, and LocalScanPackages names them. They may,
+	// because a directory identical at base and head produces identical findings
+	// at both and so can contribute neither a new nor a fixed one; what the
+	// narrowing removes is pre-existing rows. Compilation, vet, golangci-lint,
+	// the tests and the vulnerability scan always see the whole scope, because a
+	// change in one package can create a genuine new finding in another.
+	LocalScanNarrowed bool     `json:"localScanNarrowed"`
+	LocalScanPackages []string `json:"localScanPackages"`
 }
 
 // Baseline is the burn-down of an acknowledged-debt ledger.
@@ -268,6 +327,9 @@ type Options struct {
 	// EvidenceLimit truncates evidence[] to the highest-consequence findings.
 	// Zero or negative means the complete set, which stays the default.
 	EvidenceLimit int
+	// Scope selects which findings evidence[] carries. The zero value is the
+	// complete set.
+	Scope Scope
 }
 
 // Build converts a verification result into the complete JSON document.
@@ -279,7 +341,31 @@ func Build(version string, r verify.Result) Document {
 // applying any rendering limits after the document is complete.
 func BuildWithOptions(version string, r verify.Result, opts Options) Document {
 	doc := buildFull(version, r)
+	doc = applyScope(doc, opts.Scope)
 	return truncateEvidence(doc, opts.EvidenceLimit)
+}
+
+// applyScope narrows evidence[] to one view and records both the view and what
+// it withheld. Omission is always declared: a consumer must never have to guess
+// whether it holds the complete enumeration, because the enumeration being
+// complete is the whole reason to trust it.
+func applyScope(doc Document, scope Scope) Document {
+	doc.EvidenceScope = string(scope.orFull())
+	if scope.orFull() == ScopeFull {
+		return doc
+	}
+	kept := make([]Finding, 0, len(doc.Evidence))
+	for _, f := range doc.Evidence {
+		if scope.Keeps(f.Evidence) {
+			kept = append(kept, f)
+		}
+	}
+	if omitted := len(doc.Evidence) - len(kept); omitted > 0 {
+		doc.EvidenceOmitted += omitted
+		doc.EvidenceTruncated = true
+	}
+	doc.Evidence = kept
+	return doc
 }
 
 // truncateEvidence keeps the highest-consequence findings and says how many it
@@ -289,7 +375,7 @@ func truncateEvidence(doc Document, limit int) Document {
 	if limit <= 0 || len(doc.Evidence) <= limit {
 		return doc
 	}
-	doc.EvidenceOmitted = len(doc.Evidence) - limit
+	doc.EvidenceOmitted += len(doc.Evidence) - limit
 	doc.EvidenceTruncated = true
 	doc.Evidence = doc.Evidence[:limit]
 	return doc
@@ -440,6 +526,8 @@ func buildCoverage(r verify.Result) Coverage {
 		TestPackageCount:     len(r.Execution.Tests),
 		TestPackages:         nonNil(r.Execution.Tests),
 		LeakInjectionBlocked: nonNil(r.LeakBlockedPackages),
+		LocalScanNarrowed:    r.Execution.LocalScope != nil,
+		LocalScanPackages:    nonNil(r.Execution.LocalScope),
 	}
 }
 

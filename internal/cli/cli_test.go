@@ -733,6 +733,8 @@ func flagValue(t *testing.T, placeholder, dir string) string {
 		return filepath.Join(dir, "task.yaml")
 	case "D", "DURATION":
 		return "1s"
+	case "MODE":
+		return "full"
 	default:
 		t.Fatalf("no test value for the usage placeholder %q", placeholder)
 		return ""
@@ -804,5 +806,62 @@ func TestInconclusiveAuditRecordsNothing(t *testing.T) {
 	}
 	if !strings.Contains(out, "nothing was recorded") {
 		t.Fatalf("the refusal was not explained: %q", out)
+	}
+}
+
+// TestEvidenceModesAreAccepted covers the flag surface, including the mode that
+// does not exist, which has to be an argument error rather than a silently
+// different rendering.
+func TestEvidenceModesAreAccepted(t *testing.T) {
+	dir := newFixtureRepo(t)
+	for _, mode := range []string{"full", "diff", "new", "top"} {
+		code, out, errOut := invoke(t, "verify", "--json", "--evidence", mode, "--dir", dir)
+		if code == cli.ExitInconclusive && strings.Contains(errOut, "unknown --evidence") {
+			t.Fatalf("--evidence %s was rejected: %s", mode, errOut)
+		}
+		var doc struct {
+			EvidenceScope string `json:"evidenceScope"`
+		}
+		if err := json.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatalf("--evidence %s produced no document (%v):\n%s\n%s", mode, err, out, errOut)
+		}
+		want := mode
+		if mode == "top" {
+			want = "full"
+		}
+		if doc.EvidenceScope != want {
+			t.Fatalf("--evidence %s recorded evidenceScope %q, want %q", mode, doc.EvidenceScope, want)
+		}
+	}
+	code, _, errOut := invoke(t, "verify", "--json", "--evidence", "everything", "--dir", dir)
+	if code != cli.ExitInconclusive || !strings.Contains(errOut, "unknown --evidence") {
+		t.Fatalf("an unknown --evidence mode was accepted: exit %d\n%s", code, errOut)
+	}
+	if !strings.Contains(errOut, "diff") {
+		t.Fatalf("the error does not list the modes that do exist:\n%s", errOut)
+	}
+}
+
+// TestVerifyDefaultsToTheDiffViewAndAuditDoesNot pins the one default this
+// change moves. verify is a gate on one change, so its report is about that
+// change; audit is about the repository, where narrowing to a diff would answer
+// a question nobody asked.
+func TestVerifyDefaultsToTheDiffViewAndAuditDoesNot(t *testing.T) {
+	dir := newFixtureRepo(t)
+	for _, c := range []struct{ command, want string }{
+		{"verify", "diff"},
+		{"audit", "full"},
+		{"fast", "full"},
+	} {
+		_, out, errOut := invoke(t, c.command, "--json", "--dir", dir)
+		var doc struct {
+			EvidenceScope string `json:"evidenceScope"`
+		}
+		if err := json.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatalf("%s produced no document (%v):\n%s\n%s", c.command, err, out, errOut)
+		}
+		if doc.EvidenceScope != c.want {
+			t.Fatalf("%s defaults to evidenceScope %q, want %q", c.command, doc.EvidenceScope, c.want)
+		}
 	}
 }
