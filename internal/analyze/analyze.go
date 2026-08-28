@@ -30,6 +30,13 @@ type Finding struct {
 	Message  string
 	Severity evidence.Severity
 	Advisory bool
+	// Package locates a finding that belongs to a package rather than to a place
+	// in a file. Putting an import path or a directory in File instead leaves a
+	// row nobody can open and nothing can place against a diff.
+	Package string
+	// Identity names the finding where its message does not: see
+	// evidence.Evidence.Identity. Empty for every scanner whose message is stable.
+	Identity string
 }
 
 // Options selects which risk-specific scanner families run. The zero value
@@ -268,6 +275,9 @@ func sortFindings(f []Finding) {
 			return c
 		}
 		if c := strings.Compare(a.File, b.File); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.Package, b.Package); c != 0 {
 			return c
 		}
 		if a.Line != b.Line {

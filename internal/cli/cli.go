@@ -24,7 +24,7 @@ import (
 )
 
 // Version is the harness version recorded in every report.
-const Version = "0.7.0"
+const Version = "0.8.0"
 
 // Exit codes. They are the harness's contract with any caller.
 const (
@@ -143,6 +143,7 @@ type verifyFlags struct {
 	base        string
 	contract    string
 	evidence    string
+	reportPath  string
 	limit       int
 	timeout     time.Duration
 }
@@ -212,6 +213,8 @@ func bindVerifyFlags(fs *flag.FlagSet, mode verify.Mode) *verifyFlags {
 	fs.StringVar(&f.dir, "dir", ".", "directory inside the module to verify")
 	fs.StringVar(&f.base, "base", "", "explicit base revision for comparison (verify only)")
 	fs.StringVar(&f.contract, "contract", "", "task contract file")
+	fs.StringVar(&f.reportPath, "report", "",
+		"write the JSON document to `FILE` instead of stdout")
 	fs.StringVar(&f.evidence, "evidence", defaultEvidence(mode),
 		"which findings the report carries: "+strings.Join(evidenceModes(), ", "))
 	fs.IntVar(&f.limit, "evidence-limit", DefaultEvidenceLimit,
@@ -312,25 +315,61 @@ func renderResult(in renderInput) int {
 		in.errOut.line("goharness %s: %v", in.command, err)
 		return ExitInconclusive
 	}
-	if in.flags.agent {
-		if err := report.WriteJSONWithOptions(in.reportOut, Version, in.result, opts); err != nil {
+	// --report moves the document off stdout. A run over a large repository takes
+	// minutes, and the bridges an agent reaches the harness through give up well
+	// inside that; redirecting a shell was the only way to keep the JSON, which
+	// is not available to a caller that is not a shell.
+	jsonOut, closeJSON, err := in.jsonSink()
+	if err != nil {
+		in.errOut.line("goharness %s: %v", in.command, err)
+		return ExitInconclusive
+	}
+	code := in.render(jsonOut, opts)
+	if closeErr := closeJSON(); closeErr != nil {
+		in.errOut.line("goharness %s: %v", in.command, closeErr)
+		return ExitInconclusive
+	}
+	return code
+}
+
+// jsonSink is where the JSON document goes, and how to finish writing it.
+func (in renderInput) jsonSink() (io.Writer, func() error, error) {
+	if in.flags.reportPath == "" {
+		return in.reportOut, func() error { return nil }, nil
+	}
+	file, err := os.Create(in.flags.reportPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating the report file: %w", err)
+	}
+	return file, func() error {
+		if closeErr := file.Close(); closeErr != nil {
+			return fmt.Errorf("writing the report file: %w", closeErr)
+		}
+		return nil
+	}, nil
+}
+
+// render writes whatever this invocation asked for and returns the exit code.
+//
+// A --report file is written whatever the mode: a caller that named a file wants
+// the document there, and leaving it empty because the run was not --json would
+// be answering a different question than the one asked.
+func (in renderInput) render(jsonOut io.Writer, opts report.Options) int {
+	wantJSON := in.flags.agent || in.flags.asJSON || in.flags.reportPath != ""
+	if wantJSON {
+		if err := report.WriteJSONWithOptions(jsonOut, Version, in.result, opts); err != nil {
 			in.errOut.line("goharness %s: %v", in.command, err)
 			return ExitInconclusive
 		}
-		if err := writeText(in.textOut, in.result, in.flags, opts.Scope); err != nil {
-			in.errOut.line("goharness %s: %v", in.command, err)
-			return ExitInconclusive
-		}
+	}
+	textOut := in.reportOut
+	switch {
+	case in.flags.agent:
+		textOut = in.textOut
+	case in.flags.asJSON && in.flags.reportPath == "":
 		return in.result.Decision.Verdict.ExitCode()
 	}
-	if in.flags.asJSON {
-		if err := report.WriteJSONWithOptions(in.reportOut, Version, in.result, opts); err != nil {
-			in.errOut.line("goharness %s: %v", in.command, err)
-			return ExitInconclusive
-		}
-		return in.result.Decision.Verdict.ExitCode()
-	}
-	if err := writeText(in.reportOut, in.result, in.flags, opts.Scope); err != nil {
+	if err := writeText(textOut, in.result, in.flags, opts.Scope); err != nil {
 		in.errOut.line("goharness %s: %v", in.command, err)
 		return ExitInconclusive
 	}

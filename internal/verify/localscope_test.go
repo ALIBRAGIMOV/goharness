@@ -85,12 +85,16 @@ func TestNarrowingKeepsFindingsInTheDirectoriesTheChangeTouched(t *testing.T) {
 	}
 }
 
-// TestNarrowingNeverSkipsARuleThatBlocksWhilePreexisting is the guard that
+// TestNarrowingNeverSkipsTheRulesThatCanBlockWhilePreexisting is the guard that
 // decides whether the narrowing is an optimisation or a way to switch a rule
-// off. A suppression blocks wherever in scope it is, base revision or not, so
-// the check that finds one reads every directory however little the change
-// touched.
-func TestNarrowingNeverSkipsARuleThatBlocksWhilePreexisting(t *testing.T) {
+// off.
+//
+// Whether an old suppression outside the change blocks is a policy question,
+// answered in Blocking. Whether the harness sees it at all is this one, and the
+// answer has to be yes: a rule that can block on a pre-existing finding must be
+// evaluated everywhere in scope, so that moving the change one file over cannot
+// change what the repository is known to contain.
+func TestNarrowingNeverSkipsTheRulesThatCanBlockWhilePreexisting(t *testing.T) {
 	f := newFixture(t)
 	f.write("lib/lib.go", cleanLibrary)
 	f.write("lib/lib_test.go", cleanLibraryTest)
@@ -101,11 +105,10 @@ func TestNarrowingNeverSkipsARuleThatBlocksWhilePreexisting(t *testing.T) {
 	f.write("lib/lib.go", renamedAnswerLibrary)
 
 	result := run(t, f, verify.ModeVerify)
-	requireVerdict(t, result, admission.VerdictRejected)
-	if !slices.Contains(blockingRules(result.Evidence), policy.RuleSuppressNolint) {
-		t.Fatalf("blocking rules = %v, want %s; the narrowing skipped a rule "+
-			"that blocks even when the base revision already carried it",
-			blockingRules(result.Evidence), policy.RuleSuppressNolint)
+	if !slices.Contains(rulesUnder(result.Evidence, "consumer"), policy.RuleSuppressNolint) {
+		t.Fatalf("rules under consumer = %v, want %s; the narrowing skipped a directory "+
+			"whose rule can block on a pre-existing finding",
+			rulesUnder(result.Evidence, "consumer"), policy.RuleSuppressNolint)
 	}
 }
 

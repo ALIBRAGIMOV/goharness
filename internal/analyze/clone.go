@@ -32,13 +32,18 @@ type cloneSite struct {
 //
 // Duplication is a property of the scope rather than of one package, so the
 // shapes are collected across every unit before any of them is judged.
-func (s *ParsedScope) Clones(ctx context.Context) ([]Finding, error) {
+//
+// generated names the files whose contents a tool wrote. They are passed over:
+// a generator producing the same shape twice is not a design decision anybody
+// will revisit, and the names it chose move when it runs again, so the same
+// duplication reads as introduced and repaired in a single report.
+func (s *ParsedScope) Clones(ctx context.Context, generated map[string]bool) ([]Finding, error) {
 	byShape := map[string][]cloneSite{}
 	for _, u := range s.units {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		u.collectShapes(byShape)
+		u.collectShapes(byShape, generated)
 	}
 	return groupClones(byShape), nil
 }
@@ -50,7 +55,7 @@ func CloneFindings(ctx context.Context, root string, relFiles []string) ([]Findi
 	if err != nil {
 		return nil, err
 	}
-	return scope.Clones(ctx)
+	return scope.Clones(ctx, nil)
 }
 
 // groupClones turns the collected shapes into findings, reporting every site
@@ -89,9 +94,9 @@ func groupClones(byShape map[string][]cloneSite) []Finding {
 // repeats its shape across cases, so a clone report there is noise rather than
 // a design signal. This scanner is the only duplication check the harness runs,
 // so the exemption has to live here rather than in a linter configuration.
-func (u *unit) collectShapes(byShape map[string][]cloneSite) {
+func (u *unit) collectShapes(byShape map[string][]cloneSite, generated map[string]bool) {
 	for i, file := range u.files {
-		if strings.HasSuffix(u.relPaths[i], "_test.go") {
+		if strings.HasSuffix(u.relPaths[i], "_test.go") || generated[u.relPaths[i]] {
 			continue
 		}
 		for _, decl := range file.Decls {

@@ -559,6 +559,9 @@ func TestFixtureSourcesAreCanonical(t *testing.T) {
 		"generatedHeaderLibrary":    generatedHeaderLibrary,
 		"ineffectiveLibraryTest":    ineffectiveLibraryTest,
 		"incompatibleAnswerLibrary": incompatibleAnswerLibrary,
+		"discardingLibrary":         discardingLibrary,
+		"discardingSibling":         discardingSibling,
+		"discardingConsumer":        discardingConsumer,
 		"suppressedConsumer":        suppressedConsumer,
 	}
 	for name, src := range sources {
@@ -575,6 +578,17 @@ func TestFixtureSourcesAreCanonical(t *testing.T) {
 
 // Fixture sources for the admission-model acceptance cases.
 const (
+	// incompatibleAnswerLibrary changes an exported signature so that the package
+	// importing it stops compiling. The defect it produces is located in a file
+	// the change never opened, which is the case no distance filter may lose.
+	incompatibleAnswerLibrary = `package lib
+
+// Answer returns a constant the fixture tests can observe.
+func Answer(scale int) int {
+	return 42 * scale
+}
+`
+
 	weakTestLibrary = `package lib
 
 // Classify reports whether a score is a pass, and the branch a weak test never

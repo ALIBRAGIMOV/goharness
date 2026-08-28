@@ -20,6 +20,8 @@ func runDiff(args []string, streams Streams) int {
 	fs.SetOutput(streams.Err)
 	asJSON := fs.Bool("json", false, "emit the goharness.diff/v1 JSON document")
 	noColor := fs.Bool("no-color", false, "never colourise output")
+	allowMismatch := fs.Bool("allow-scope-mismatch", false,
+		"compare reports written under different --evidence scopes anyway")
 	if err := fs.Parse(args); err != nil {
 		errOut.printf("\n%s", commandUsage("diff"))
 		return report.DiffExitError
@@ -45,6 +47,19 @@ func runDiff(args []string, streams Streams) int {
 	d := report.CompareDocuments(oldDoc, newDoc)
 	if err := writeDiff(streams.Out, d, *asJSON, *noColor, oldPath, newPath); err != nil {
 		errOut.line("goharness diff: %v", err)
+		return report.DiffExitError
+	}
+	// A comparison of two different views of the evidence is arithmetic, not a
+	// burn-down: rows the narrower report never carried come out as repairs, and
+	// on one production pair that was 4795 of a reported 5535 "fixed". Warning
+	// and returning a clean exit code hands a number nobody should act on to
+	// whatever automated the comparison.
+	if d.Old.Scope != d.New.Scope && !*allowMismatch {
+		errOut.line("goharness diff: %s was written with --evidence %s and %s with %s, "+
+			"so what one carries the other never did", oldPath, orNone(d.Old.Scope),
+			newPath, orNone(d.New.Scope))
+		errOut.line("rerun both with the same --evidence, or pass --allow-scope-mismatch " +
+			"to read the counts as the mechanical comparison they are")
 		return report.DiffExitError
 	}
 	return d.ExitCode

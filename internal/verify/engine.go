@@ -214,6 +214,47 @@ func (f harnessError) Error() string { return f.err.Error() }
 
 func (f harnessError) Unwrap() error { return f.err }
 
+// maxNamedPaths keeps a hygiene fault readable when a producer got every path
+// wrong, which is how this fault actually presents itself.
+const maxNamedPaths = 3
+
+// pathHygiene refuses to fingerprint evidence whose file is not a
+// module-relative path inside the tree that produced it.
+//
+// A path that escaped its tree, an absolute one above all, spells a fingerprint
+// the other revision can never equal. Every finding the producer made then reads
+// as introduced by the change, and the change is rejected for debt it did not
+// write: a production monorepo lost go vet and go fix to exactly this, 81 rows
+// blamed on lines that predated the branch. It is a fault in goharness and not a
+// fact about the repository, so it leaves through the channel that says so and
+// the obligations this check was carrying go unproducible rather than passing on
+// evidence nobody should trust.
+func pathHygiene(checkID string, items []evidence.Evidence) error {
+	var named []string
+	count := 0
+	for _, e := range items {
+		if e.File == "" || !escapesTree(e.File) {
+			continue
+		}
+		count++
+		if len(named) < maxNamedPaths {
+			named = append(named, e.RuleID+" at "+e.File)
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	return harnessError{err: fmt.Errorf(
+		"%s reported %d finding(s) by a path outside the tree it examined, so they "+
+			"cannot be compared against the other revision: %s",
+		checkID, count, strings.Join(named, "; "))}
+}
+
+// escapesTree reports a file path that is not module-relative.
+func escapesTree(file string) bool {
+	return filepath.IsAbs(file) || file == ".." || strings.HasPrefix(file, "../")
+}
+
 // runOne executes one check under a recover guard: a panicking check becomes a
 // CheckFailure, and therefore an INCONCLUSIVE claim, never a harness crash.
 func (e *Engine) runOne(ctx context.Context, check Check, total int) (outcome checkOutcome) {
@@ -235,6 +276,9 @@ func (e *Engine) runOne(ctx context.Context, check Check, total int) (outcome ch
 
 	e.Logger.Info("check started", zap.String("check", check.ID))
 	result, err := check.run(ctx)
+	if err == nil {
+		err = pathHygiene(check.ID, result.evidence)
+	}
 	outcome.evidence = result.evidence
 	outcome.unproducible = result.unproducible
 	outcome.failure = err
@@ -335,6 +379,20 @@ func hintFor(checkID string) string {
 }
 
 // Blocking reports whether one piece of evidence can fail its claim.
+//
+// The ungrandfatherable core needs the second condition. Those rules block on a
+// pre-existing finding too, because a suppression that rides in on history is
+// still a suppression, but enforcing that across a reverse-dependency closure
+// means a legacy repository can never admit anything: on one production monorepo
+// 429 historical rows failed policy-integrity for every merge request, a
+// repository-hygiene goal enforced by a change gate that no author clears inside
+// a branch.
+//
+// So such a finding blocks unless the run placed it away from the change.
+// Nothing about the anti-laundering property moves: one the change adds is new
+// and blocks wherever it is, one it leaves in a file it edits blocks, and the
+// repository is cleaned by the traffic through it. An audit places nothing, so
+// an audit blocks on all of them and no ledger may acknowledge them.
 func Blocking(e evidence.Evidence) bool {
 	if e.Classification != evidence.ClassificationRequired {
 		return false
@@ -343,7 +401,7 @@ func Blocking(e evidence.Evidence) bool {
 	case evidence.StateFixed:
 		return false
 	case evidence.StatePreexisting:
-		return policy.IsUngrandfatherable(e.RuleID)
+		return policy.IsUngrandfatherable(e.RuleID) && !e.Origin.OutsideChange()
 	default:
 		return true
 	}
@@ -534,6 +592,9 @@ func prepare(ctx context.Context, version string, opts Options) (runSetup, error
 	}
 	cs, err := change.Build(ctx, git, r, base, origin)
 	if err != nil {
+		return runSetup{}, err
+	}
+	if cs.Added, err = change.Hunks(ctx, git, r, base); err != nil {
 		return runSetup{}, err
 	}
 	contract, err := resolveContract(ctx, git, r, base, opts.ContractPath)
@@ -834,7 +895,15 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 	}
 	// Last, because this is the only point where the evidence set is complete on
 	// both paths: the comparison merges its own producers into it.
-	out.Evidence = headTarget.attributeOrigin(in.change, out.Evidence)
+	//
+	// A repository-wide run places nothing. An audit answers for the repository
+	// rather than for the commit it happens to sit on, and attributing its
+	// findings to that commit's diff would let a rule that blocks while
+	// pre-existing stop blocking everywhere the last commit did not reach, which
+	// is precisely what the un-baselineable core exists to prevent.
+	if !repositoryWide {
+		out.Evidence = headTarget.attributeOrigin(in.change, out.Evidence)
+	}
 	return out, nil
 }
 
@@ -1019,31 +1088,48 @@ func decorate(p policy.ResolvedPolicy, items []evidence.Evidence) []evidence.Evi
 // words of comment into a suppression for a whole file. The decision reads the
 // head diff in both trees, so a regenerated file is examined at base and at
 // head alike and its unchanged findings stay pre-existing debt.
-func (e *Engine) partitionGenerated(root string, files []string) (judged []string, exempt map[string]bool, err error) {
+func (e *Engine) partitionGenerated(root string, files []string) (p generatedPartition, err error) {
 	changed := make(map[string]bool, len(e.ChangedEntries))
 	for _, entry := range e.ChangedEntries {
 		if entry.Status != change.StatusDeleted {
 			changed[entry.Path] = true
 		}
 	}
-	judged = make([]string, 0, len(files))
-	exempt = map[string]bool{}
+	p = generatedPartition{
+		judged:    make([]string, 0, len(files)),
+		exempt:    map[string]bool{},
+		generated: map[string]bool{},
+	}
 	for _, rel := range files {
-		if changed[rel] {
-			judged = append(judged, rel)
-			continue
-		}
 		generated, genErr := analyze.IsGenerated(filepath.Join(root, filepath.FromSlash(rel)))
 		if genErr != nil {
-			return nil, nil, genErr
+			return generatedPartition{}, genErr
 		}
 		if generated {
-			exempt[rel] = true
+			p.generated[rel] = true
+		}
+		if generated && !changed[rel] {
+			p.exempt[rel] = true
 			continue
 		}
-		judged = append(judged, rel)
+		p.judged = append(p.judged, rel)
 	}
-	return judged, exempt, nil
+	return p, nil
+}
+
+// generatedPartition is how one tree's in-scope files divide.
+//
+// exempt and generated are deliberately different sets. exempt is what this run
+// does not judge at all; generated is every file whose contents a tool wrote,
+// including the ones the change regenerated and which are therefore judged in
+// full. The second set exists because a comparison between two revisions of
+// generated code cannot key functions by name: regenerating after a type is
+// deleted renumbers every function after it, so the same name at base and head
+// is two different functions and the delta between them measures the numbering.
+type generatedPartition struct {
+	judged    []string
+	exempt    map[string]bool
+	generated map[string]bool
 }
 
 // scopeRestriction mirrors the head scope onto the base worktree so both sides
@@ -1109,7 +1195,7 @@ func (e *Engine) buildTarget(ctx context.Context, in targetInput) (*target, Exec
 	if err != nil {
 		return nil, ExecutionPlan{}, err
 	}
-	judged, exempt, err := e.partitionGenerated(in.root, files)
+	partition, err := e.partitionGenerated(in.root, files)
 	if err != nil {
 		return nil, ExecutionPlan{}, err
 	}
@@ -1117,12 +1203,13 @@ func (e *Engine) buildTarget(ctx context.Context, in targetInput) (*target, Exec
 	t := &target{
 		engine: e, root: in.root, modulePath: in.modulePath, graph: graph,
 		packages: lintPkgs, testPackages: testPkgs,
-		files: files, judged: judged, exemptFiles: exempt,
-		changed: in.change.GoFiles(), contract: in.contract, isBase: in.isBase,
+		files: files, judged: partition.judged, exemptFiles: partition.exempt,
+		generatedFiles: partition.generated,
+		changed:        in.change.GoFiles(), contract: in.contract, isBase: in.isBase,
 	}
 	t.localScope, t.moduleChanged = localScopeFor(in)
 	plan := ExecutionPlan{
-		Mode: in.mode, Packages: lintPkgs, Files: judged, Tests: testPkgs,
+		Mode: in.mode, Packages: lintPkgs, Files: partition.judged, Tests: testPkgs,
 		LocalScope: t.localScope,
 	}
 	return t, plan, nil

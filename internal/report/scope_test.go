@@ -20,7 +20,7 @@ func scopedResult() verify.Result {
 			RuleID: policy.GolangciRuleID("errcheck"), File: "changed.go",
 			Message: "new defect in a file the change wrote", Severity: evidence.SeverityError,
 			Classification: evidence.ClassificationRequired,
-			State:          evidence.StateNew, Origin: evidence.OriginChanged,
+			State:          evidence.StateNew, Origin: evidence.OriginAddedLine,
 		},
 		{
 			RuleID: policy.RuleCompile, File: "untouched.go",
@@ -32,13 +32,19 @@ func scopedResult() verify.Result {
 			RuleID: policy.GolangciRuleID("errcheck"), File: "changed.go",
 			Message: "debt in a file the change wrote", Severity: evidence.SeverityError,
 			Classification: evidence.ClassificationRequired,
-			State:          evidence.StatePreexisting, Origin: evidence.OriginChanged,
+			State:          evidence.StatePreexisting, Origin: evidence.OriginChangedFile,
 		},
 		{
 			RuleID: policy.GolangciRuleID("errcheck"), File: "untouched.go",
 			Message: "debt in a file nobody touched", Severity: evidence.SeverityError,
 			Classification: evidence.ClassificationRequired,
 			State:          evidence.StatePreexisting, Origin: evidence.OriginUntouched,
+		},
+		{
+			RuleID: policy.GolangciRuleID("errcheck"), File: "sibling.go",
+			Message: "debt beside a file the change wrote", Severity: evidence.SeverityError,
+			Classification: evidence.ClassificationRequired,
+			State:          evidence.StatePreexisting, Origin: evidence.OriginChangedPackage,
 		},
 		{
 			RuleID: policy.RuleCommentRestates, File: "untouched.go",
@@ -50,7 +56,7 @@ func scopedResult() verify.Result {
 			RuleID: policy.GolangciRuleID("errcheck"), File: "changed.go",
 			Message: "defect this change removed", Severity: evidence.SeverityError,
 			Classification: evidence.ClassificationRequired,
-			State:          evidence.StateFixed, Origin: evidence.OriginChanged,
+			State:          evidence.StateFixed, Origin: evidence.OriginAddedLine,
 		},
 		{
 			RuleID:  policy.RuleBenchTimeDelta,
@@ -115,6 +121,9 @@ func TestDiffScopeKeepsWhatTheChangeIsAnswerableFor(t *testing.T) {
 	for _, unwanted := range []string{
 		"debt in a file nobody touched",
 		"advisory note in a file nobody touched",
+		// A sibling of a file the change wrote is the bucket that produced 846
+		// rows of noise on one merge request; the author never opened it.
+		"debt beside a file the change wrote",
 	} {
 		if slices.Contains(kept, unwanted) {
 			t.Fatalf("--evidence diff kept %q, which the change did not write and did not cause", unwanted)

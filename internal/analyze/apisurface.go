@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/types"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -15,13 +16,25 @@ import (
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
 )
 
+// Exported is one exported symbol: its rendered type, and where it is declared.
+//
+// The position is what makes a removal addressable. A row that names only the
+// import path cannot be opened, cannot be reached by a scoped exception, and
+// cannot be placed against the diff, which is how ten deliberate API removals
+// arrived in a report with nowhere to click.
+type Exported struct {
+	Type string
+	File string
+	Line int
+}
+
 // ExportSurface maps every exported symbol of the given packages to its
-// rendered type. Type information is loaded only for the packages whose API
-// actually changed, so the cost stays proportional to the diff rather than to
-// the module.
-func ExportSurface(ctx context.Context, root string, patterns []string) (map[string]string, error) {
+// rendered type and declaration site. Type information is loaded only for the
+// packages whose API actually changed, so the cost stays proportional to the
+// diff rather than to the module.
+func ExportSurface(ctx context.Context, root string, patterns []string) (map[string]Exported, error) {
 	if len(patterns) == 0 {
-		return map[string]string{}, nil
+		return map[string]Exported{}, nil
 	}
 	cfg := &packages.Config{
 		Context: ctx,
@@ -38,17 +51,32 @@ func ExportSurface(ctx context.Context, root string, patterns []string) (map[str
 	if err != nil {
 		return nil, fmt.Errorf("loading packages for export-surface comparison: %w", err)
 	}
-	surface := map[string]string{}
+	surface := map[string]Exported{}
 	for _, pkg := range loaded {
 		if pkg.Types == nil || pkg.Types.Scope() == nil {
 			continue
 		}
-		collectExports(pkg, surface)
+		collectExports(root, pkg, surface)
 	}
 	return surface, nil
 }
 
-func collectExports(pkg *packages.Package, surface map[string]string) {
+// declaredAt renders a symbol's position relative to the tree it was loaded
+// from. A position the loader did not record, and one outside the tree, both
+// yield no location rather than a path a reader cannot use.
+func declaredAt(root string, pkg *packages.Package, obj types.Object) (file string, line int) {
+	if !obj.Pos().IsValid() || pkg.Fset == nil {
+		return "", 0
+	}
+	pos := pkg.Fset.Position(obj.Pos())
+	rel, err := filepath.Rel(root, pos.Filename)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", 0
+	}
+	return filepath.ToSlash(rel), pos.Line
+}
+
+func collectExports(root string, pkg *packages.Package, surface map[string]Exported) {
 	scope := pkg.Types.Scope()
 	qualifier := func(other *types.Package) string {
 		if other == pkg.Types {
@@ -61,45 +89,63 @@ func collectExports(pkg *packages.Package, surface map[string]string) {
 		if obj == nil || !obj.Exported() {
 			continue
 		}
-		surface[pkg.PkgPath+"."+name] = types.TypeString(obj.Type(), qualifier)
+		file, line := declaredAt(root, pkg, obj)
+		surface[pkg.PkgPath+"."+name] = Exported{
+			Type: types.TypeString(obj.Type(), qualifier), File: file, Line: line,
+		}
 		if named, ok := obj.Type().(*types.Named); ok {
-			collectMethods(pkg.PkgPath, name, named, qualifier, surface)
+			collectMethods(root, pkg, name, named, qualifier, surface)
 		}
 	}
 }
 
-func collectMethods(pkgPath, typeName string, named *types.Named, qualifier types.Qualifier, surface map[string]string) {
+func collectMethods(
+	root string, pkg *packages.Package, typeName string,
+	named *types.Named, qualifier types.Qualifier, surface map[string]Exported,
+) {
 	for method := range named.Methods() {
 		if !method.Exported() {
 			continue
 		}
-		key := pkgPath + "." + typeName + "." + method.Name()
-		surface[key] = types.TypeString(method.Type(), qualifier)
+		file, line := declaredAt(root, pkg, method)
+		surface[pkg.PkgPath+"."+typeName+"."+method.Name()] = Exported{
+			Type: types.TypeString(method.Type(), qualifier), File: file, Line: line,
+		}
 	}
 }
 
 // APIBreakFindings reports exported symbols the change removed or re-signed.
 // Additions are compatible and are not reported.
-func APIBreakFindings(base, head map[string]string) []Finding {
+//
+// A removal is located where the symbol used to be declared, which is a position
+// in the base tree; a re-signature is located where it is declared now. Both are
+// real files a reader can open, and both let the row be placed against the diff
+// like every other one. The identity is the symbol rather than the location, so
+// a declaration that merely moves keeps the finding it had.
+func APIBreakFindings(base, head map[string]Exported) []Finding {
 	var out []Finding
 	for _, key := range slices.Sorted(maps.Keys(base)) {
-		headType, present := head[key]
+		headSymbol, present := head[key]
+		baseSymbol := base[key]
 		pkgPath, symbol := splitSymbol(key)
 		switch {
 		case !present:
 			out = append(out, Finding{
 				RuleID: policy.RuleAPIBreak,
-				File:   pkgPath,
+				File:   baseSymbol.File, Line: baseSymbol.Line,
+				Identity: policy.RuleAPIBreak + " removed " + key,
 				Message: "exported symbol " + symbol + " was removed from " + pkgPath +
 					"; keeping it as a shim marked " + fixInlineDirective +
 					" would let every caller migrate with go fix instead of by hand",
 				Severity: evidence.SeverityError,
 			})
-		case headType != base[key]:
+		case headSymbol.Type != baseSymbol.Type:
 			out = append(out, Finding{
-				RuleID:   policy.RuleAPIBreak,
-				File:     pkgPath,
-				Message:  "exported symbol " + symbol + " in " + pkgPath + " changed type from " + base[key] + " to " + headType,
+				RuleID: policy.RuleAPIBreak,
+				File:   headSymbol.File, Line: headSymbol.Line,
+				Identity: policy.RuleAPIBreak + " resigned " + key,
+				Message: "exported symbol " + symbol + " in " + pkgPath +
+					" changed type from " + baseSymbol.Type + " to " + headSymbol.Type,
 				Severity: evidence.SeverityError,
 			})
 		}

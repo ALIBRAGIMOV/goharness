@@ -2,6 +2,7 @@ package analyze_test
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -292,11 +293,11 @@ func TestMaintainabilityDeltaNeedsBothSnapshots(t *testing.T) {
 	grown.WriteString("\treturn a\n}\n")
 	head := metricsFor(t, "p.go", grown.String())
 
-	ids := ruleIDs(analyze.MaintainabilityFindings(base, head))
+	ids := ruleIDs(analyze.MaintainabilityFindings(base, head, nil))
 	if !slices.Contains(ids, policy.RuleComplexityDelta) {
 		t.Fatalf("a large complexity rise was not reported: %v", ids)
 	}
-	if got := analyze.MaintainabilityFindings(base, base); len(got) != 0 {
+	if got := analyze.MaintainabilityFindings(base, base, nil); len(got) != 0 {
 		t.Fatalf("an unchanged snapshot produced findings: %+v", got)
 	}
 }
@@ -367,6 +368,52 @@ func TestMutantsRespectTheBudget(t *testing.T) {
 	}
 	if len(mutants) != 16 {
 		t.Fatalf("mutants = %d, want the budget of 16", len(mutants))
+	}
+}
+
+// TestMutantBudgetIsSpreadAcrossTheChangedFiles is the field report's lesson:
+// sixteen mutants taken in path order all landed in one package, so the
+// evidence described that package and nothing else the branch touched.
+func TestMutantBudgetIsSpreadAcrossTheChangedFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var targets []analyze.FunctionTarget
+	for i := range 20 {
+		name := fmt.Sprintf("pkg%02d/p.go", i)
+		writeSource(t, dir, name, `package p
+
+// F branches three times.
+func F(a int) int {
+	if a > 1 {
+		return 1
+	}
+	if a > 2 {
+		return 2
+	}
+	if a > 3 {
+		return 3
+	}
+	return 0
+}
+`)
+		targets = append(targets, analyze.FunctionTarget{
+			Package: fmt.Sprintf("pkg%02d", i), File: name, Name: "F",
+		})
+	}
+
+	mutants, err := analyze.GenerateMutants(context.Background(), dir, targets, 16)
+	if err != nil {
+		t.Fatalf("GenerateMutants: %v", err)
+	}
+	if len(mutants) != 16 {
+		t.Fatalf("mutants = %d, want the budget of 16", len(mutants))
+	}
+	files := map[string]int{}
+	for _, m := range mutants {
+		files[m.File]++
+	}
+	if len(files) != 16 {
+		t.Fatalf("the budget covered %d files, want 16: %v", len(files), files)
 	}
 }
 
@@ -680,5 +727,45 @@ func Start(ctx context.Context, n int, table map[string]int) {
 				t.Fatalf("an unbounded spawn loop was not reported: %v", ids)
 			}
 		})
+	}
+}
+
+// TestGeneratedCodeProducesNoMaintainabilityDelta holds the lesson a production
+// monorepo taught.
+//
+// easyjson numbers the functions it writes. Deleting one marshalled type
+// renumbers every function after it, so DecodeX23 at base and DecodeX23 at head
+// are two different decoders, and the complexity "rise" between them describes
+// the numbering rather than the code. A delta between two functions that are not
+// the same function is not a measurement.
+func TestGeneratedCodeProducesNoMaintainabilityDelta(t *testing.T) {
+	t.Parallel()
+	base := analyze.Metrics{
+		Functions: map[string]analyze.FunctionMetric{
+			"pkg:DecodeRecord23": {
+				Key: "pkg:DecodeRecord23", File: "pkg/easyjson.go",
+				Name: "DecodeRecord23", Complexity: 9,
+			},
+		},
+		Packages: map[string]analyze.PackageMetric{},
+	}
+	head := analyze.Metrics{
+		Functions: map[string]analyze.FunctionMetric{
+			"pkg:DecodeRecord23": {
+				Key: "pkg:DecodeRecord23", File: "pkg/easyjson.go",
+				Name: "DecodeRecord23", Complexity: 31,
+			},
+		},
+		Packages: map[string]analyze.PackageMetric{},
+	}
+	generated := map[string]bool{"pkg/easyjson.go": true}
+	if got := analyze.MaintainabilityFindings(base, head, generated); len(got) != 0 {
+		t.Fatalf("a renumbered generated function produced %d delta finding(s): %v",
+			len(got), ruleIDs(got))
+	}
+	// The false-positive guard: the same rise in code a person wrote is still a
+	// finding, or this would be a way to switch the rule off with a header.
+	if got := analyze.MaintainabilityFindings(base, head, nil); len(got) == 0 {
+		t.Fatal("a real complexity rise stopped being reported")
 	}
 }

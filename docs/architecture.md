@@ -72,14 +72,19 @@ consumer boundaries and are introduced only where a test seam requires one
   finding's identity, and discarding the source made a change that moved a file
   introduce every finding that file already carried.
 - What is judged and what is reported are separate decisions. Scope decides
-  what the run looks at; `origin` on each finding records whether it sits in a
-  file the change wrote, and `--evidence` selects which of them the report
-  carries. No selection ever drops a finding that blocks.
+  what the run looks at; `origin` on each finding records how close it sits to
+  the code the change wrote (`added-line`, `changed-file`, `changed-package`,
+  `untouched`), and `--evidence` selects which of them the report carries. No
+  selection ever drops a finding that blocks.
+- Line attribution comes from one `git diff -U0` against the base with no
+  second revision, so the line numbers are the verified tree's.
 
 ## Base/head comparison
 
 `verify` materializes the base snapshot with `git worktree add --detach` in a
-temporary directory, runs the same normalized checks there, and compares
+symlink-resolved temporary directory (an unresolved one puts every path a tool
+reports outside the tree, and a path outside its tree is an identity the other
+revision can never match), runs the same normalized checks there, and compares
 evidence sets by stable fingerprint:
 
 - fingerprints exclude line numbers, and exclude the numbers a message carries
@@ -93,8 +98,8 @@ evidence sets by stable fingerprint:
 - evidence present in both is pre-existing debt: reported, never blocking in
   diff modes;
 - suppression directives and agent-hygiene violations are exempt from debt
-  grandfathering: they block whenever they are in scope, because inline
-  suppression is forbidden outright;
+  grandfathering: a pre-existing one still blocks, in a change gate wherever the
+  change wrote or edited the code it sits in, and in an audit everywhere;
 - the base evidence set is realigned into head's coordinates first, so a moved
   file's findings pair with themselves rather than splitting into a new one and
   a fixed one;

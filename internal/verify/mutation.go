@@ -118,6 +118,11 @@ type candidate struct {
 	mutant analyze.Mutant
 }
 
+// runNearPass offers each mutant to the tests of the package it damaged, and
+// stops at the first kill. One kill is the whole of what this claim asks for, so
+// every further near run would spend another pass of a package's tests to
+// establish something already established. On a healthy change that is the
+// difference between one run of one package and sixteen.
 func (c *comparison) runNearPass(
 	ctx context.Context, dir string, mutants []analyze.Mutant,
 ) (mutationOutcome, []candidate, error) {
@@ -141,6 +146,7 @@ func (c *comparison) runNearPass(
 		case attempt.killed:
 			outcome.ran++
 			outcome.killed++
+			return outcome, nil, nil
 		case attempt.ran:
 			outcome.ran++
 			outcome.survived = append(outcome.survived, mutant)

@@ -29,13 +29,13 @@ Commands
 Flags for verify, audit, fast and deep
   --json              emit the goharness.report/v2 document
   --agent             machine protocol: JSON on stdout, human text on stderr
+  --report FILE       write the JSON document to FILE, not to stdout
   --dir DIR           directory inside the module to verify (default ".")
   --base REV          explicit base revision (verify only)
   --contract FILE     task contract (default: goharness.task.yaml, else implicit)
   --timeout DURATION  wall-clock budget (default 10m; audit is unlimited)
   --explain-plan      print the obligation set and exit
   --no-cache          recompute the base snapshot instead of reusing evidence
-  --baseline          audit only: record blocking findings as acknowledged debt
   --evidence MODE     full, diff, new or top (verify defaults to diff)
   --quiet             reduce output to the verdict line
   --no-color          never colourise (NO_COLOR is honoured too)
@@ -64,9 +64,9 @@ Agent protocol
                              with .remedy, the action that would produce it
     evidence[].blocking      true stops admission; false is advisory or
                              pre-existing debt and does not have to be fixed
-    evidence[].origin        with .state: whether the finding is in a file this
-                             change wrote. new plus untouched is a package it
-                             broke without editing, and it blocks all the same
+    evidence[].origin        added-line, changed-file, changed-package or
+                             untouched: how close it is to what this change
+                             wrote. new plus untouched blocks like anything new
     evidence[]               consequence order: silent-loss, unsafe-behavior,
                              structural, hygiene; work it so, never by count
     evidence[].fix.command   the exact command that closes that finding
@@ -115,24 +115,44 @@ func perCommandUsage() map[string]string {
 // verifyUsage is its own constant because it is the topic an agent reads
 // first and the longest of them; inlining it made the map that holds every
 // verification topic too large to read.
-const verifyUsage = `usage: goharness verify [--agent] [--json] [--dir DIR] [--base REV]
-                        [--contract FILE] [--evidence MODE] [--timeout D]
-                        [--explain-plan] [--no-cache] [--quiet] [--no-color]
-                        [-v|-vv] [--log-json]
+const verifyUsage = `usage: goharness verify [--agent] [--json] [--report FILE]
+                        [--dir DIR] [--base REV] [--contract FILE]
+                        [--evidence MODE] [--timeout D] [--explain-plan]
+                        [--no-cache] [--quiet] [--no-color] [-v|-vv] [--log-json]
 
 Admission gate. Verifies the diff plus its reverse dependency closure,
 compares evidence against the base revision, and produces the full claim
 table. This is the command an agent must finish with.
 
-The report is about the change. Every finding carries two axes: state, which
-says whether the base revision already had it, and origin, which says whether
-it sits in a file the change wrote. By default the report shows what the
-change is answerable for and says how many rows it withheld; --evidence full
-prints the rest, and --evidence new prints only what the change moved.
+The report is about the change. Every finding carries two axes. state says
+whether the base revision already had it: new, preexisting, fixed. origin says
+how close it sits to the code this change wrote:
+
+  added-line       on a line this change wrote
+  changed-file     in a file it edited, on a line that predates it
+  changed-package  in a package holding a file it edited, in another file
+  untouched        anywhere else in the reverse dependency closure
+
+--evidence selects which of them the report carries. verify defaults to diff:
+everything blocking, everything new or fixed, and the debt in the code this
+change is in. full prints the rest, new prints only what the change moved, and
+top prints full cut to --evidence-limit. Every mode keeps every blocking row,
+so a narrower report changes how much there is to read and never what has to
+be fixed; evidenceScope names the view and evidenceOmitted counts what it
+withheld.
+
+--report FILE writes the JSON document to a file and leaves the stream for the
+human report, which is what an editor or agent bridge with a short timeout
+needs.
 
 Reverse dependencies stay in scope whatever the report shows, because a change
 in one package can break another it never opened. Such a finding is new and
 untouched, and it blocks.
+
+Rules that block even on a finding the base revision already had, inline
+suppressions above all, do so where this change wrote or edited the code. One
+left in a file you are editing rejects the change; one in a package you never
+opened is reported as debt and rejects an audit instead.
 
 The base revision is a commit that cannot change, so its evidence is cached
 and reused; --no-cache recomputes it and must reach the same verdict.
@@ -144,6 +164,7 @@ Examples
   goharness verify --agent
   goharness verify --base HEAD~3
   goharness verify --evidence full
+  goharness verify --agent --report report.json
   goharness verify --contract task.yaml --json
 `
 
@@ -255,7 +276,8 @@ Examples
   goharness explain GCL-errcheck
   goharness explain 3f2a91c4d0b7e615 --report report.json
 `,
-		"diff": `usage: goharness diff [--json] [--no-color] OLD.json NEW.json
+		"diff": `usage: goharness diff [--json] [--no-color] [--allow-scope-mismatch]
+                      OLD.json NEW.json
 
 Compares two goharness.report/v2 documents on fingerprint identity and reports
 what was fixed, what was introduced, and what remains, split blocking from
@@ -273,8 +295,14 @@ Exit codes, which are NOT the verification exit codes
 
 Two reports of different modules or modes are still compared, with a warning
 line and subjectMismatch: true, because refusing would hide the mismatch
-rather than state it. A report written with --evidence top says so, and the
-comparison then covers the rows it carries rather than the whole run.
+rather than state it.
+
+Two reports written under different --evidence scopes are refused with exit 2,
+because that comparison is arithmetic rather than a burn-down: rows the
+narrower one never carried come out as repairs nobody made.
+--allow-scope-mismatch reads the counts as the mechanical comparison they are.
+A truncated report says so too, and the comparison then covers the rows it
+carries rather than the whole run.
 
 Examples
   goharness verify --agent --json > before.json

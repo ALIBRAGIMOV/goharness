@@ -43,12 +43,16 @@ type target struct {
 	// exemptFiles are the generated files this change does not touch. Their
 	// linter issues are dropped rather than reported against the change.
 	exemptFiles map[string]bool
-	changed     []string
-	raceTests   bool
-	leakCheck   bool
-	isBase      bool
-	contract    admission.TaskContract
-	analyzeOpts analyze.Options
+	// generatedFiles is every in-scope file a tool wrote, the regenerated ones
+	// included. Base/head deltas are not computed across it: see
+	// generatedPartition.
+	generatedFiles map[string]bool
+	changed        []string
+	raceTests      bool
+	leakCheck      bool
+	isBase         bool
+	contract       admission.TaskContract
+	analyzeOpts    analyze.Options
 	// parsed is the one parse of judged that every syntax-driven check reads.
 	// The coordinator builds it before scheduling and never writes to it again,
 	// which is what lets three checks share it without sharing mutable state.
@@ -155,19 +159,60 @@ func dirSet(dirs []string) map[string]bool {
 	return out
 }
 
+// rel maps a path a tool reported into this tree's module-relative coordinates.
+//
+// Two trees are what make the repair necessary. The base revision is verified in
+// a temporary worktree, and a tool that reports a file there by an absolute path
+// hands back a string the head side can never equal, so the same finding at both
+// revisions gets two fingerprints and a whole producer's output reads as
+// introduced by the change. This is exactly what happened to go vet and go fix
+// on a production monorepo, while golangci-lint escaped only because it happened
+// to report relative paths.
+//
+// The in-scope file list is the authority of last resort: a reported path that
+// ends with one of its entries names that file whatever prefix it arrived with.
+// A path that cannot be placed at all is returned as it came, and the coordinator
+// refuses to fingerprint it.
 func (t *target) rel(p string) string {
 	if p == "" {
 		return ""
 	}
+	if placed, ok := t.relUnderRoot(p); ok {
+		return placed
+	}
+	return t.matchInScope(p)
+}
+
+// relUnderRoot places a path below this tree's root, reporting whether it lies
+// there at all.
+func (t *target) relUnderRoot(p string) (string, bool) {
 	abs := p
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(t.root, p)
 	}
 	rel, err := filepath.Rel(t.root, abs)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return filepath.ToSlash(p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
 	}
-	return filepath.ToSlash(rel)
+	return filepath.ToSlash(rel), true
+}
+
+// matchInScope repairs a path by its longest suffix that names an in-scope file.
+func (t *target) matchInScope(p string) string {
+	slashed := filepath.ToSlash(p)
+	best := ""
+	for _, candidate := range t.files {
+		if len(candidate) <= len(best) {
+			continue
+		}
+		if slashed == candidate || strings.HasSuffix(slashed, "/"+candidate) {
+			best = candidate
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return slashed
 }
 
 // fromFindings converts native scanner findings into decorated evidence. The
@@ -177,9 +222,13 @@ func (t *target) rel(p string) string {
 func (t *target) fromFindings(findings []analyze.Finding, producer string) []evidence.Evidence {
 	out := make([]evidence.Evidence, 0, len(findings))
 	for _, f := range findings {
-		pkg, _ := t.graph.PackageForFile(f.File)
+		pkg := f.Package
+		if pkg == "" {
+			pkg, _ = t.graph.PackageForFile(f.File)
+		}
 		e := t.newEvidence(f.RuleID, producer, t.engine.Version,
 			f.Severity, f.File, f.Line, f.Column, pkg, f.Message)
+		e.Identity = f.Identity
 		e = t.engine.Policy.Decorate(e)
 		if f.Advisory {
 			e.Classification = evidence.ClassificationAdvisory
@@ -465,7 +514,7 @@ func (t *target) runClone(ctx context.Context) (checkResult, error) {
 	if err != nil {
 		return checkResult{}, err
 	}
-	findings, err := scope.Clones(ctx)
+	findings, err := scope.Clones(ctx, t.generatedFiles)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -521,7 +570,8 @@ func (t *target) runPolicyGuard(ctx context.Context) (checkResult, error) {
 			out = append(out, t.engine.Policy.Decorate(t.newEvidence(
 				policy.RuleGeneratedEdit, "goharness", t.engine.Version,
 				evidence.SeverityWarning, entry.Path, 0, 0, "",
-				"file carries a Code generated header but was modified directly; re-run the generator so the next run does not erase this edit")))
+				"changed file carries a Code generated header; confirm it was regenerated rather than "+
+					"hand-edited, because the next generator run erases a hand edit")))
 		}
 	}
 	return checkResult{evidence: out}, nil
@@ -731,7 +781,7 @@ func (t *target) runGolangci(ctx context.Context) (checkResult, error) {
 	}
 	out := make([]evidence.Evidence, 0, len(issues))
 	for _, issue := range issues {
-		file := t.normalizeLintPath(issue.Pos.Filename)
+		file := t.rel(issue.Pos.Filename)
 		if t.exemptFiles[file] {
 			continue
 		}
@@ -741,32 +791,6 @@ func (t *target) runGolangci(ctx context.Context) (checkResult, error) {
 			pkg, issue.Text))
 	}
 	return checkResult{evidence: out}, nil
-}
-
-// normalizeLintPath maps a reported path back into this worktree. golangci-lint
-// caches analysis results by content, so when the same file exists in two trees
-// (head and the temporary base worktree) it can report the path recorded the
-// first time. Matching by longest path suffix against the in-scope file list
-// restores a module-relative path, which the fingerprint depends on.
-func (t *target) normalizeLintPath(reported string) string {
-	rel := t.rel(reported)
-	if !strings.HasPrefix(rel, "../") {
-		return rel
-	}
-	slashed := filepath.ToSlash(reported)
-	best := ""
-	for _, candidate := range t.files {
-		if len(candidate) <= len(best) {
-			continue
-		}
-		if slashed == candidate || strings.HasSuffix(slashed, "/"+candidate) {
-			best = candidate
-		}
-	}
-	if best != "" {
-		return best
-	}
-	return rel
 }
 
 func severityFor(s string) evidence.Severity {
@@ -808,11 +832,16 @@ func (t *target) runLeakRaceTests(ctx context.Context) (_ checkResult, err error
 
 	var res checkResult
 	t.leakBlocked = blocked
-	if len(blocked) > 0 {
+	// Only a package the change touched leaves an obligation this change can
+	// discharge. A TestMain anywhere else in the reverse-dependency closure is a
+	// gap in the repository's coverage, and telling the author of a merge request
+	// to go and edit three packages they never opened is an instruction nobody
+	// will follow: it is reported in coverage instead.
+	if inChange := t.changedAmong(blocked); len(inChange) > 0 {
 		res.unproducible = append(res.unproducible, admission.Unproducible{
 			Kind: admission.KindLeakClean,
-			Reason: "a TestMain already exists in " + strings.Join(blocked, ", ") +
-				", so goroutine-leak verification cannot be injected there",
+			Reason: "a TestMain already exists in " + strings.Join(inChange, ", ") +
+				", which this change touches, so goroutine-leak verification cannot be injected there",
 			Remedy: "call goleak.VerifyTestMain from those TestMain functions, or remove them",
 		})
 	}
@@ -861,25 +890,15 @@ func (t *target) runLeakRaceTests(ctx context.Context) (_ checkResult, err error
 func (t *target) interpretLeakRun(ctx context.Context, failures []tool.TestFailure) (checkResult, error) {
 	var res checkResult
 	var failed []tool.TestFailure
+	leaks := map[string]*leakSite{}
 	for _, f := range failures {
 		if !leakcheck.IsLeakFailure(f.Output) {
 			failed = append(failed, f)
 			continue
 		}
-		msg, ok := leakcheck.LeakMessage(f.Output)
-		if !ok {
-			msg = "tests leave goroutines running after completion"
-		}
-		// A leak belongs to a package rather than to a line, but "nowhere" is not
-		// a location: with an empty file a reader has nothing to open and a scoped
-		// exception can never match. The package directory is the most precise
-		// anchor that is true, and goleak's own stack head names the origin when
-		// it falls inside this tree.
-		file, line := t.leakAnchor(f)
-		res.evidence = append(res.evidence, t.newEvidence(policy.RuleGoroutineLeak,
-			"goleak "+leakcheck.Version, tool.GoVersion(),
-			evidence.SeverityError, file, line, 0, f.Package, msg))
+		t.recordLeak(leaks, f)
 	}
+	res.evidence = append(res.evidence, t.leakEvidence(leaks)...)
 	confirmed, flaky, err := t.confirmFailures(ctx, failed, []string{"-race"})
 	if err != nil {
 		return checkResult{}, err
@@ -896,6 +915,81 @@ func (t *target) interpretLeakRun(ctx context.Context, failures []tool.TestFailu
 		})
 	}
 	return res, nil
+}
+
+// leakSite is one place goroutines were left running, and everything the run
+// observed about it.
+//
+// The site is the unit because it is the unit of repair. One leaking helper
+// reached from thirty test packages is one defect and thirty rows: a production
+// run produced forty rows for four sites and told its reader to "fix every
+// GH-LEAK-001 finding above" forty times.
+type leakSite struct {
+	file     string
+	line     int
+	pkg      string
+	funcs    map[string]bool
+	packages map[string]bool
+}
+
+// recordLeak folds one leaking test package into the site it leaked at.
+//
+// A leak belongs to a place rather than to a line, but "nowhere" is not a
+// location: with an empty file a reader has nothing to open and a scoped
+// exception can never match. The package directory is the most precise anchor
+// that is true, and goleak's own stack head names the origin when it falls
+// inside this tree.
+func (t *target) recordLeak(sites map[string]*leakSite, f tool.TestFailure) {
+	file, line := t.leakAnchor(f)
+	key := file
+	if key == "" {
+		key = f.Package
+	}
+	site, known := sites[key]
+	if !known {
+		site = &leakSite{
+			file: file, line: line, pkg: f.Package,
+			funcs: map[string]bool{}, packages: map[string]bool{},
+		}
+		sites[key] = site
+	}
+	site.packages[f.Package] = true
+	for _, fn := range leakcheck.LeakFunctions(f.Output) {
+		site.funcs[fn] = true
+	}
+}
+
+// leakEvidence renders one finding per leaking site.
+//
+// The identity is the site and nothing else. goleak lists the goroutines it
+// found in whatever order the runtime produced them, and the list's membership
+// varies between runs of the same code, so a finding named by that list is a new
+// finding every run: eleven leaks were reported as introduced between two runs
+// of one commit. The list is what the message is for.
+func (t *target) leakEvidence(sites map[string]*leakSite) []evidence.Evidence {
+	out := make([]evidence.Evidence, 0, len(sites))
+	for _, key := range slices.Sorted(maps.Keys(sites)) {
+		site := sites[key]
+		e := t.newEvidence(policy.RuleGoroutineLeak,
+			"goleak "+leakcheck.Version, tool.GoVersion(),
+			evidence.SeverityError, site.file, site.line, 0, site.pkg, site.message())
+		e.Identity = policy.RuleGoroutineLeak + " at " + key
+		out = append(out, e)
+	}
+	return out
+}
+
+// message describes a site: what leaked there, and how widely it was observed.
+func (s *leakSite) message() string {
+	funcs := slices.Sorted(maps.Keys(s.funcs))
+	if len(funcs) == 0 {
+		funcs = []string{"an unnamed goroutine"}
+	}
+	msg := "tests leave goroutines running after completion: " + strings.Join(funcs, ", ")
+	if len(s.packages) > 1 {
+		msg += fmt.Sprintf(" (observed in %d test packages)", len(s.packages))
+	}
+	return msg
 }
 
 // classifyLeakPackages splits the test scope into injectable package patterns,
@@ -926,6 +1020,21 @@ func (t *target) classifyLeakPackages() (injectable []string, pkgs []leakcheck.P
 	}
 	slices.Sort(blocked)
 	return injectable, pkgs, blocked, nil
+}
+
+// changedAmong keeps the packages the change touched, in the order given.
+func (t *target) changedAmong(pkgPaths []string) []string {
+	dirs := make(map[string]bool, len(t.changed))
+	for _, rel := range t.changed {
+		dirs[path.Dir(rel)] = true
+	}
+	out := make([]string, 0, len(pkgPaths))
+	for _, pkgPath := range pkgPaths {
+		if dirs[t.packageDir(pkgPath)] {
+			out = append(out, pkgPath)
+		}
+	}
+	return out
 }
 
 func exceptPatterns(all, remove []string) []string {
@@ -1054,14 +1163,24 @@ func appendUnique(items []string, value string) []string {
 	return append(items, value)
 }
 
+// testFailureEvidence names a failing test by the test, and describes it with
+// whatever the run printed.
+//
+// The two have to be separate. A suite that logs a timestamp, a generated key,
+// or any other line that moves puts that line in the description, and a finding
+// named by its description is a different finding every run: ten failures were
+// reported as introduced between two runs of one commit, and one flaky race
+// arrived as new, fixed and pre-existing inside a single report.
 func (t *target) testFailureEvidence(f tool.TestFailure) evidence.Evidence {
 	name := f.Test
 	if name == "" {
 		name = "package"
 	}
-	return t.newEvidence(policy.RuleTestFailure, "go test", tool.GoVersion(),
+	e := t.newEvidence(policy.RuleTestFailure, "go test", tool.GoVersion(),
 		evidence.SeverityError, "", 0, 0, f.Package,
 		"test "+name+" failed: "+firstMeaningfulLine(f.Output))
+	e.Identity = policy.RuleTestFailure + " " + f.Package + " " + topLevelTest(f)
+	return e
 }
 
 func firstMeaningfulLine(output string) string {

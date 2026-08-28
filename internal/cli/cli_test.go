@@ -865,3 +865,59 @@ func TestVerifyDefaultsToTheDiffViewAndAuditDoesNot(t *testing.T) {
 		}
 	}
 }
+
+// TestReportFileTakesTheDocumentOffTheStream covers the flag that makes the
+// agent protocol reachable through a bridge with a short timeout. A run over a
+// large repository takes minutes, and redirecting a shell is not available to a
+// caller that is not a shell.
+func TestReportFileTakesTheDocumentOffTheStream(t *testing.T) {
+	dir := newFixtureRepo(t)
+	path := filepath.Join(t.TempDir(), "report.json")
+	code, out, errOut := invoke(t, "verify", "--dir", dir, "--report", path)
+	if code != cli.ExitAdmitted {
+		t.Fatalf("exit = %d\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the report file: %v", err)
+	}
+	var doc struct {
+		Schema  string `json:"schema"`
+		Verdict string `json:"verdict"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("the report file is not one JSON document (%v):\n%s", err, data)
+	}
+	if doc.Schema != report.SchemaID || doc.Verdict != "ADMITTED" {
+		t.Fatalf("the report file carries %+v", doc)
+	}
+	if json.Valid([]byte(out)) {
+		t.Fatalf("the document was written to stdout as well:\n%s", out)
+	}
+	if !strings.Contains(out, "ADMITTED") {
+		t.Fatalf("stdout lost the human report entirely:\n%s", out)
+	}
+}
+
+// TestDiffRefusesTwoDifferentViewsOfTheEvidence keeps a burn-down from being
+// arithmetic. Rows the narrower report never carried come out as repairs nobody
+// made: on one production pair that was 4795 of a reported 5535 "fixed".
+func TestDiffRefusesTwoDifferentViewsOfTheEvidence(t *testing.T) {
+	dir := newFixtureRepo(t)
+	tmp := t.TempDir()
+	full := filepath.Join(tmp, "full.json")
+	narrow := filepath.Join(tmp, "diff.json")
+	invoke(t, "verify", "--dir", dir, "--evidence", "full", "--report", full)
+	invoke(t, "verify", "--dir", dir, "--evidence", "new", "--report", narrow)
+
+	code, _, errOut := invoke(t, "diff", full, narrow)
+	if code != report.DiffExitError {
+		t.Fatalf("a scope mismatch exited %d, want %d\n%s", code, report.DiffExitError, errOut)
+	}
+	if !strings.Contains(errOut, "--allow-scope-mismatch") {
+		t.Fatalf("the refusal does not say how to override it:\n%s", errOut)
+	}
+	if code, _, _ := invoke(t, "diff", "--allow-scope-mismatch", full, narrow); code == report.DiffExitError {
+		t.Fatal("--allow-scope-mismatch did not permit the comparison")
+	}
+}

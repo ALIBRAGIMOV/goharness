@@ -12,6 +12,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
@@ -190,11 +191,19 @@ func LeakOrigin(output string) (string, bool) {
 	return "", false
 }
 
-// LeakMessage extracts a deterministic description from goleak output, keeping
-// the leaked functions and dropping goroutine IDs and addresses.
-func LeakMessage(output string) (string, bool) {
-	var funcs []string
+// LeakFunctions extracts the functions goleak found on top of the leaked
+// goroutines' stacks, sorted and without repeats.
+//
+// Sorted, because goleak reports the goroutines in whatever order the runtime
+// hands them over and the set itself varies between runs of the same code. A
+// description built in that order is a different string every time, and a
+// finding named by its description is then a different finding every time: on a
+// production run the same leak arrived as new, fixed and pre-existing inside one
+// report. Order and membership belong in the message; neither may reach an
+// identity.
+func LeakFunctions(output string) []string {
 	seen := map[string]bool{}
+	var funcs []string
 	for line := range strings.SplitSeq(output, "\n") {
 		_, rest, found := strings.Cut(line, "with ")
 		if !found {
@@ -207,6 +216,14 @@ func LeakMessage(output string) (string, bool) {
 		seen[fn] = true
 		funcs = append(funcs, fn)
 	}
+	slices.Sort(funcs)
+	return funcs
+}
+
+// LeakMessage extracts a deterministic description from goleak output, keeping
+// the leaked functions and dropping goroutine IDs and addresses.
+func LeakMessage(output string) (string, bool) {
+	funcs := LeakFunctions(output)
 	if len(funcs) == 0 {
 		return "", false
 	}

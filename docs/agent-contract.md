@@ -20,6 +20,10 @@ Every task ends the same way:
 
     go build ./... && goharness verify --agent
 
+If the bridge you run commands through times out before a large repository
+finishes, add `--report report.json`: the document goes to the file and the
+stream stays free for the human report.
+
 The task is complete only when the verdict is ADMITTED. Resolve every FAIL and
 every INCONCLUSIVE claim in the JSON document. `goharness fast` is a loop aid
 during the work; it is never sufficient to finish, and always reports
@@ -41,14 +45,15 @@ order:
    structural, hygiene. Work it in that order, never by count. `blocking: false`
    is advisory or pre-existing debt and does not have to be fixed.
 5. `evidence[].state` and `evidence[].origin` - two different questions. `state`
-   is whether the base revision already had the finding; `origin` is whether it
-   sits in a file this change wrote. `new` plus `untouched` is a package the
-   change broke without editing, and it blocks like anything else that is new.
+   is whether the base revision already had the finding; `origin` is how close it
+   sits to what this change wrote: `added-line`, `changed-file`,
+   `changed-package`, `untouched`. `new` plus `untouched` is a package the change
+   broke without editing, and it blocks like anything else that is new.
 6. `evidence[].fix.command` - the exact command that closes that finding.
 7. `failures[]` - a tool that could not run; never a statement about the code.
 
 `verify` renders the diff view by default: everything blocking, everything new or
-fixed, and debt in the files the change touched. `evidenceScope` names the view
+fixed, and debt in the code the change is in. `evidenceScope` names the view
 and `evidenceOmitted` counts the rows it withheld, so a short list is never
 mistaken for a clean run. No view ever withholds a finding whose `blocking` is
 true, so this changes how much there is to read and never what has to be fixed;

@@ -44,11 +44,21 @@ func BenchmarkSchedule(b *testing.B) {
 	}
 }
 
-// TestTimeRegressionIgnoresOverlappingSamples is the false-positive guard the
-// corpus asked for: a nanosecond-scale benchmark measured on a busy machine
-// swings by tens of percent, and a change is only slower when every sample says
-// so.
-func TestTimeRegressionIgnoresOverlappingSamples(t *testing.T) {
+// TestTimeRegressionNeedsEvidenceBeyondTheMeasurementSpread is the
+// false-positive guard, and this harness needed it twice.
+//
+// Comparing medians turned a machine's drift into a regression report for every
+// benchmark at once, and interleaving fixed that. Separated sample ranges became
+// the evidence, and then this harness rejected its own change on two benchmarks
+// measuring under one percent apart on an idle machine: head's samples had been
+// stretched by the base tree's suite running beside them, which separates two
+// ranges describing identical code.
+//
+// So the budget is applied to the most conservative pairing the samples permit,
+// head's fastest against base's slowest. A real regression of about the size of
+// the budget goes unreported when the samples are spread, which is the right way
+// round: a gate that cries wolf is switched off.
+func TestTimeRegressionNeedsEvidenceBeyondTheMeasurementSpread(t *testing.T) {
 	t.Parallel()
 	noisy := func(values ...float64) tool.BenchResult {
 		samples := make([]tool.BenchSample, 0, len(values))
@@ -63,8 +73,17 @@ func TestTimeRegressionIgnoresOverlappingSamples(t *testing.T) {
 		regressed  bool
 	}{
 		{"overlapping ranges are noise", noisy(70, 72, 90), noisy(80, 85, 88), false},
-		{"separated ranges are a regression", noisy(70, 72, 74), noisy(85, 88, 90), true},
+		{"unambiguously slower", noisy(70, 72, 74), noisy(100, 102, 104), true},
 		{"inside the budget", noisy(100, 100, 100), noisy(105, 105, 105), false},
+		// The case this harness rejected itself on: the medians are 45% apart and
+		// the ranges do not overlap, but head's own samples span three quarters of
+		// their own value, which is a machine under load rather than a measurement.
+		{"a stretched head sample is not a measurement",
+			noisy(414665, 420000, 424766), noisy(437071, 600000, 761580), false},
+		// And the near miss the conservative pairing accepts: separated ranges
+		// whose worst-case reading is still inside the budget.
+		{"separated but inside the budget once spread is counted",
+			noisy(70, 72, 74), noisy(85, 88, 90), false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

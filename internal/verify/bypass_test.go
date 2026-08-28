@@ -405,3 +405,64 @@ func TestMovingAFileIntroducesNothingByItself(t *testing.T) {
 		}
 	})
 }
+
+// TestBypassAnOldSuppressionInAnEditedFileStillRejects is the blocking half of
+// the rule that scopes the ungrandfatherable core to the change.
+//
+// Those rules stopped blocking across the whole reverse-dependency closure,
+// because 429 historical directives failing every merge request is a repository
+// goal enforced by a change gate and no author clears it inside a branch. The
+// route that buys, and the one this closes, is leaving one in a file you are
+// already editing: the change is in there, so the change answers for it.
+func TestBypassAnOldSuppressionInAnEditedFileStillRejects(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", suppressedLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.commit("a repository that arrives with a suppression")
+		f.anchor()
+		f.write("lib/lib.go", suppressedLibrary+cleanAddition)
+
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictRejected)
+		if !slices.Contains(blockingRules(result.Evidence), policy.RuleSuppressNolint) {
+			t.Fatalf("blocking rules = %v, want %s; a suppression survived in a file "+
+				"this change edited", blockingRules(result.Evidence), policy.RuleSuppressNolint)
+		}
+	})
+}
+
+// TestAnOldSuppressionTheChangeNeverOpenedDoesNotReject is the false-positive
+// guard on the closure above, and the defect that made it necessary.
+//
+// The package holding it is in the reverse-dependency closure, so the run does
+// look at it: the suppression is still found, still reported, and still blocks an
+// audit. What it no longer does is reject a merge request that never went near
+// it.
+func TestAnOldSuppressionTheChangeNeverOpenedDoesNotReject(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", cleanLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.write("consumer/consumer.go", suppressedConsumer)
+		f.write("consumer/consumer_test.go", consumerTest)
+		f.commit("a repository that arrives with a suppression somewhere else")
+		f.anchor()
+		f.write("lib/lib.go", renamedAnswerLibrary)
+
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictAdmitted)
+		if !slices.Contains(ruleIDs(result.Evidence), policy.RuleSuppressNolint) {
+			t.Fatalf("the suppression stopped being reported at all: %v", ruleIDs(result.Evidence))
+		}
+	})
+}
+
+// cleanAddition is what a branch types beside old debt: nothing a rule has
+// anything to say about.
+const cleanAddition = `
+// Tripled returns three times the answer.
+func Tripled() int {
+	return 126
+}
+`

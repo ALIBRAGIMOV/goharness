@@ -201,6 +201,12 @@ func partitionByFingerprint(oldItems, newItems []Finding) (fixed, introduced, re
 			remaining = append(remaining, f)
 			continue
 		}
+		// A row the newer report marks fixed describes that run's base revision,
+		// not its head: the finding is gone from the code. Counting it as
+		// introduced tells a reader the change added the very thing it removed.
+		if f.State == evidence.StateFixed {
+			continue
+		}
 		introduced = append(introduced, f)
 	}
 	return fixed, introduced, remaining

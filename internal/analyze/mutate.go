@@ -112,12 +112,19 @@ func functionBodies(ctx context.Context, root string, relFiles []string) (map[st
 // GenerateMutants produces deterministic mutants for the given targets, ordered
 // by file then byte offset and capped at limit. Each mutant is a complete file
 // with exactly one edit.
+//
+// The cap is spread across the changed files rather than spent on the first of
+// them. Taking the first limit mutants in path order samples the change only
+// when the change is one file: a nineteen-file branch produced sixteen mutants
+// that all came from its alphabetically first package, so the evidence spoke
+// about that package and said nothing at all about the other eighteen.
 func GenerateMutants(ctx context.Context, root string, targets []FunctionTarget, limit int) ([]Mutant, error) {
 	byFile := map[string][]FunctionTarget{}
 	for _, t := range targets {
 		byFile[t.File] = append(byFile[t.File], t)
 	}
-	var mutants []Mutant
+	var perFile [][]Mutant
+	total := 0
 	for _, rel := range slices.Sorted(maps.Keys(byFile)) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -126,12 +133,49 @@ func GenerateMutants(ctx context.Context, root string, targets []FunctionTarget,
 		if err != nil {
 			return nil, err
 		}
-		mutants = append(mutants, fileMutants...)
+		if len(fileMutants) > 0 {
+			perFile = append(perFile, fileMutants)
+			total += len(fileMutants)
+		}
 	}
-	if limit > 0 && len(mutants) > limit {
-		mutants = mutants[:limit]
+	return spreadMutants(perFile, total, limit), nil
+}
+
+// spreadMutants takes one mutant from each file in turn until the budget is
+// spent, then restores the file-and-offset order the caller is promised. The
+// per-file slices arrive in path order and each is already in offset order, so
+// a stable sort on file and line reproduces it exactly.
+func spreadMutants(perFile [][]Mutant, total, limit int) []Mutant {
+	if limit <= 0 || total < limit {
+		limit = total
 	}
-	return mutants, nil
+	if limit == 0 {
+		return nil
+	}
+	out := make([]Mutant, 0, limit)
+	for round := 0; len(out) < limit; round++ {
+		taken := 0
+		for _, file := range perFile {
+			if round >= len(file) {
+				continue
+			}
+			out = append(out, file[round])
+			taken++
+			if len(out) == limit {
+				break
+			}
+		}
+		if taken == 0 {
+			break
+		}
+	}
+	slices.SortStableFunc(out, func(a, b Mutant) int {
+		if a.File != b.File {
+			return strings.Compare(a.File, b.File)
+		}
+		return a.Line - b.Line
+	})
+	return out
 }
 
 // parseSource reports whether the source parsed.

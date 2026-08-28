@@ -82,11 +82,20 @@ type BaseWorktree struct {
 }
 
 // AddBaseWorktree materializes revision in a temporary detached worktree.
+//
+// The temporary directory is symlink-resolved before anything is built on it,
+// for the same reason Discover resolves the git root. On macOS os.MkdirTemp
+// answers /var/folders/... while every tool the harness drives reports the same
+// file as /private/var/folders/...; a base tree rooted at the unresolved form
+// makes every path a tool reports escape it, and a path that escapes its tree
+// becomes an absolute string in a fingerprint that the head side can never
+// match. A whole producer's output then reads as introduced by the change.
 func AddBaseWorktree(ctx context.Context, git Git, repoDir, revision string) (*BaseWorktree, error) {
 	tmp, err := os.MkdirTemp("", "goharness-base-")
 	if err != nil {
 		return nil, fmt.Errorf("creating base worktree directory: %w", err)
 	}
+	tmp = resolveSymlinks(tmp)
 	dir := filepath.Join(tmp, "tree")
 	if _, addErr := git.Run(ctx, repoDir, "worktree", "add", "--detach", dir, revision); addErr != nil {
 		return nil, errors.Join(

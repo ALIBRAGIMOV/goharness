@@ -281,13 +281,21 @@ func SimplicityFindings(m Metrics) []Finding {
 
 // MaintainabilityFindings compares two snapshots. A function that gets sharply
 // more complex, a package that documents less of its exported surface, and a
-// package that grows its fan-out are all degradations the diff introduced.
-func MaintainabilityFindings(base, head Metrics) []Finding {
+// package that grows its fan-out are all degradations the change introduced.
+//
+// generated names the files whose contents a tool wrote, and no delta is
+// computed across them. A function in generated code is identified by a name the
+// generator chose, and regenerating after a type is deleted renumbers every name
+// after it: a production run was told that easyjson...Record23 rose from
+// complexity 9 to 31, when what actually happened is that the name now belongs to
+// a different decoder. A delta between two functions that are not the same
+// function is not a measurement, and declining to make it is not leniency.
+func MaintainabilityFindings(base, head Metrics, generated map[string]bool) []Finding {
 	var out []Finding
 	for _, key := range slices.Sorted(maps.Keys(head.Functions)) {
 		headFn := head.Functions[key]
 		baseFn, existed := base.Functions[key]
-		if !existed {
+		if !existed || generated[headFn.File] {
 			continue
 		}
 		rise := headFn.Complexity - baseFn.Complexity
@@ -308,7 +316,7 @@ func MaintainabilityFindings(base, head Metrics) []Finding {
 		}
 		if headPkg.DocCoverage() < basePkg.DocCoverage() {
 			out = append(out, Finding{
-				RuleID: policy.RuleDocCoverageDelta, File: dir, Line: 0,
+				RuleID: policy.RuleDocCoverageDelta, Package: dir,
 				Message: fmt.Sprintf("exported documentation coverage fell from %.0f%% to %.0f%%",
 					basePkg.DocCoverage()*100, headPkg.DocCoverage()*100),
 				Severity: evidence.SeverityWarning, Advisory: true,
@@ -316,7 +324,7 @@ func MaintainabilityFindings(base, head Metrics) []Finding {
 		}
 		if headPkg.FanOut > basePkg.FanOut {
 			out = append(out, Finding{
-				RuleID: policy.RuleFanOutDelta, File: dir, Line: 0,
+				RuleID: policy.RuleFanOutDelta, Package: dir,
 				Message: fmt.Sprintf("package fan-out rose from %d to %d imports",
 					basePkg.FanOut, headPkg.FanOut),
 				Severity: evidence.SeverityInfo, Advisory: true,

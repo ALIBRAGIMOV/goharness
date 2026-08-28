@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -308,18 +309,50 @@ func writeFindings(b *strings.Builder, p Palette, r verify.Result, scope Scope) 
 		}
 		fmt.Fprintf(b, "\n%s:\n", dim)
 		rules := map[string]bool{}
+		repeats := countRepeats(items)
+		printed := map[string]bool{}
 		for _, e := range items {
-			fmt.Fprintf(b, "  %s %s %s%s\n      %s\n",
-				marker(p, e), p.dim(e.RuleID), p.accent(location(e)), stateSuffix(e), e.Message)
+			rules[e.RuleID] = true
+			key := repeatKey(e)
+			if printed[key] {
+				continue
+			}
+			printed[key] = true
+			fmt.Fprintf(b, "  %s %s %s%s%s\n      %s\n",
+				marker(p, e), p.dim(e.RuleID), p.accent(location(e)), stateSuffix(e),
+				repeatSuffix(p, repeats[key]), e.Message)
 			if e.Fix != nil {
 				fmt.Fprintf(b, "      %s\n", p.dim("fix: "+e.Fix.Command))
 			}
-			rules[e.RuleID] = true
 		}
 		for _, ruleID := range slices.Sorted(mapKeys(rules)) {
 			fmt.Fprintf(b, "  %s\n", p.dim("run: goharness explain "+ruleID))
 		}
 	}
+}
+
+// repeatKey identifies rows that say exactly the same thing in exactly the same
+// place, which occurrence indexes keep apart in the document and a reader has no
+// use for one at a time.
+func repeatKey(e evidence.Evidence) string {
+	return strings.Join([]string{
+		e.RuleID, e.File, strconv.Itoa(e.Line), string(e.State), string(e.Origin), e.Message,
+	}, "\x00")
+}
+
+func countRepeats(items []evidence.Evidence) map[string]int {
+	out := make(map[string]int, len(items))
+	for _, e := range items {
+		out[repeatKey(e)]++
+	}
+	return out
+}
+
+func repeatSuffix(p Palette, count int) string {
+	if count < 2 {
+		return ""
+	}
+	return p.dim(fmt.Sprintf(" (x%d)", count))
 }
 
 func mapKeys(m map[string]bool) func(func(string) bool) {

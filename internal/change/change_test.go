@@ -258,40 +258,119 @@ func TestRenamesAreCarriedThroughTheChangeSet(t *testing.T) {
 // package directory moved.
 func gitRepoWithAMove(t *testing.T) string {
 	t.Helper()
+	root := newGitFixture(t, map[string]string{
+		"go.mod":     "module " + graphModule + "\n\ngo 1.26\n",
+		"lib/lib.go": "package lib\n\n// Value is a constant.\nconst Value = 1\n",
+	})
+	gitIn(t, root, "mv", "lib", "pkg")
+	return root
+}
+
+// newGitFixture builds a repository holding the given files, committed, plus a
+// second commit so that the first is a resolvable base revision.
+func newGitFixture(t *testing.T, files map[string]string) string {
+	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("resolving temp dir: %v", err)
 	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.CommandContext(t.Context(), "git", args...)
-		cmd.Dir = root
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=goharness fixture", "GIT_AUTHOR_EMAIL=harness@example.invalid",
-			"GIT_COMMITTER_NAME=goharness fixture", "GIT_COMMITTER_EMAIL=harness@example.invalid",
-			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-		if out, runErr := cmd.CombinedOutput(); runErr != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), runErr, out)
+	gitIn(t, root, "init", "--quiet", "--initial-branch=main")
+	for rel, content := range files {
+		writeIn(t, root, rel, content)
+	}
+	gitIn(t, root, "add", "-A")
+	gitIn(t, root, "commit", "--no-gpg-sign", "--quiet", "-m", "first")
+	writeIn(t, root, "NOTES.md", "second commit so a parent revision exists\n")
+	gitIn(t, root, "add", "-A")
+	gitIn(t, root, "commit", "--no-gpg-sign", "--quiet", "-m", "second")
+	return root
+}
+
+func writeIn(t *testing.T, root, rel, content string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(full), err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", rel, err)
+	}
+}
+
+func appendTo(t *testing.T, root, rel, content string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	existing, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatalf("reading %s: %v", rel, err)
+	}
+	writeIn(t, root, rel, string(existing)+content)
+}
+
+func gitIn(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=goharness fixture", "GIT_AUTHOR_EMAIL=harness@example.invalid",
+		"GIT_COMMITTER_NAME=goharness fixture", "GIT_COMMITTER_EMAIL=harness@example.invalid",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// TestHunksReadTheLinesTheChangeWrote pins the parser behind added-line
+// attribution. Only the head side of a zero-context diff matters: it names the
+// lines that exist in the tree the checks examine.
+func TestHunksReadTheLinesTheChangeWrote(t *testing.T) {
+	root := gitRepoWithAnEdit(t)
+	git := repo.ExecGit{Runner: tool.ExecRunner{}}
+	r, err := repo.Discover(t.Context(), git, root)
+	if err != nil {
+		t.Fatalf("discovering the fixture module: %v", err)
+	}
+	base, _, err := change.ResolveBase(t.Context(), git, r, "")
+	if err != nil {
+		t.Fatalf("resolving the base revision: %v", err)
+	}
+	spans, err := change.Hunks(t.Context(), git, r, base)
+	if err != nil {
+		t.Fatalf("reading hunks: %v", err)
+	}
+	added := spans["lib/lib.go"]
+	if len(added) == 0 {
+		t.Fatalf("no span for the edited file: %v", spans)
+	}
+	inside, outside := false, false
+	for _, span := range added {
+		if span.Contains(6) {
+			inside = true
+		}
+		if span.Contains(1) {
+			outside = true
 		}
 	}
-	write := func(rel, content string) {
-		t.Helper()
-		full := filepath.Join(root, filepath.FromSlash(rel))
-		if mkErr := os.MkdirAll(filepath.Dir(full), 0o750); mkErr != nil {
-			t.Fatalf("creating %s: %v", filepath.Dir(full), mkErr)
-		}
-		if wErr := os.WriteFile(full, []byte(content), 0o600); wErr != nil {
-			t.Fatalf("writing %s: %v", rel, wErr)
-		}
+	if !inside {
+		t.Fatalf("the appended line is outside every span: %v", added)
 	}
-	run("init", "--quiet", "--initial-branch=main")
-	write("go.mod", "module "+graphModule+"\n\ngo 1.26\n")
-	write("lib/lib.go", "package lib\n\n// Value is a constant.\nconst Value = 1\n")
-	run("add", "-A")
-	run("commit", "--no-gpg-sign", "--quiet", "-m", "first")
-	write("NOTES.md", "second commit so a parent revision exists\n")
-	run("add", "-A")
-	run("commit", "--no-gpg-sign", "--quiet", "-m", "second")
-	run("mv", "lib", "pkg")
+	if outside {
+		t.Fatalf("the package clause was reported as written by this change: %v", added)
+	}
+	if _, ok := spans["lib/untouched.go"]; ok {
+		t.Fatalf("a file the change never opened carries spans: %v", spans)
+	}
+}
+
+// gitRepoWithAnEdit builds a two-commit repository whose working tree appends
+// one function to one of two files.
+func gitRepoWithAnEdit(t *testing.T) string {
+	t.Helper()
+	root := newGitFixture(t, map[string]string{
+		"go.mod":           "module " + graphModule + "\n\ngo 1.26\n",
+		"lib/lib.go":       "package lib\n\n// Value is a constant.\nconst Value = 1\n",
+		"lib/untouched.go": "package lib\n\n// Other is a constant.\nconst Other = 2\n",
+	})
+	appendTo(t, root, "lib/lib.go", "\n// Extra is a constant.\nconst Extra = 3\n")
 	return root
 }

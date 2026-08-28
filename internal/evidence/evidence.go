@@ -43,16 +43,45 @@ const (
 // change wrote? A report of a branch needs both, and neither implies the other:
 // a change can break a package it never edited, and a file it did edit can carry
 // debt older than the change.
+//
+// The values are ordered from the change outward, and the distance matters. A
+// two-valued axis proved too coarse in the field: it put a whole package's debt
+// in the same bucket as the lines the author typed, which is 846 rows of noise on
+// one merge request, and it gave a reviewer no way to ask the question they
+// actually have, which is what this change wrote.
 type Origin string
 
-// Finding origins relative to the change under verification.
+// Finding origins relative to the change under verification, nearest first.
 const (
-	OriginChanged   Origin = "changed"
+	// OriginAddedLine is a finding on a line the change wrote.
+	OriginAddedLine Origin = "added-line"
+	// OriginChangedFile is a finding in a file the change edited, on a line that
+	// predates it.
+	OriginChangedFile Origin = "changed-file"
+	// OriginChangedPackage is a finding in a package that holds a changed file,
+	// in a file the change did not touch.
+	OriginChangedPackage Origin = "changed-package"
+	// OriginUntouched is anything else the run had in scope.
 	OriginUntouched Origin = "untouched"
 	// OriginUnscoped is the zero value: there was no diff to attribute against,
 	// which is every audit and every run without a base revision.
 	OriginUnscoped Origin = ""
 )
+
+// InChange reports a finding located in code the change wrote or edited.
+func (o Origin) InChange() bool {
+	return o == OriginAddedLine || o == OriginChangedFile
+}
+
+// OutsideChange reports a finding the run placed, and placed away from the code
+// the change wrote or edited.
+//
+// A finding the run could not place is not outside anything, and is treated as
+// the change's throughout: the honest handling of what the harness does not know
+// is never to use it as grounds for leniency.
+func (o Origin) OutsideChange() bool {
+	return o == OriginChangedPackage || o == OriginUntouched
+}
 
 // Classification decides whether a finding can block admission.
 type Classification string
@@ -92,7 +121,14 @@ type Evidence struct {
 	Column       int      `json:"column,omitempty"`
 	Package      string   `json:"package,omitempty"`
 	Message      string   `json:"message"`
-	State        State    `json:"state,omitempty"`
+	// Identity is what makes two findings the same finding, for the producers
+	// that know their own answer. Where it is empty the message decides, which is
+	// the right inference for a scanner whose message is the finding; where a
+	// message carries a timestamp, a goroutine dump, or anything else that moves
+	// between runs, inferring identity from it renames the finding every run and a
+	// flaky test starts reading as a regression.
+	Identity string `json:"identity,omitempty"`
+	State    State  `json:"state,omitempty"`
 	// Origin is decoration, never identity: it says where the finding sits
 	// relative to the diff and never reaches the fingerprint, exactly as
 	// Consequence does not.
@@ -159,6 +195,15 @@ func fingerprintOf(ruleID, file, pkg, identity string, occurrence int) string {
 		strconv.Itoa(occurrence),
 	}, "\x00")))
 	return hex.EncodeToString(sum[:])[:FingerprintLength]
+}
+
+// identityOf is what a finding is named by: the identity its producer stated,
+// or the part of its message that says which finding it is.
+func identityOf(e Evidence) string {
+	if e.Identity != "" {
+		return e.Identity
+	}
+	return identityMessage(e.Message)
 }
 
 // identityMessage reduces a message to the part that says which finding it is:
@@ -314,7 +359,7 @@ func lessPresentation(a, b Evidence) bool {
 func Finalize(items []Evidence) []Evidence {
 	indexed := make([]identified, len(items))
 	for i, item := range items {
-		indexed[i] = identified{item: item, identity: identityMessage(item.Message)}
+		indexed[i] = identified{item: item, identity: identityOf(item)}
 	}
 	sortIdentity(indexed)
 	assignFingerprints(indexed)

@@ -195,16 +195,22 @@ operators, negate branch conditions, swap boolean literals, replace
 mutants per run, 60s per mutant, 5 minute total; tests run only in the
 mutated package and its direct importers, `-count=1`.
 
+The budget is spread across the changed files, one mutant from each in turn,
+and only the reported order is (file, offset). Spending it in path order makes
+the sample a sample of the change only when the change is one file: a
+nineteen-file branch produced sixteen mutants that all came from its
+alphabetically first package.
+
 Mutants are offered to the tests nearest them first: the mutated package's own
 suite, or its importers when the package has no tests of its own. One kill
-answers the obligation, so the wider search over the importing packages runs
-only when nothing near the mutant noticed it. The order matters more than it
-looks: on a repository whose integration tests take minutes, searching wide per
-mutant spends the whole budget on compilation and reports INCONCLUSIVE for a
-suite that was in fact watching. A mutant whose wider search runs out of time is
-dropped rather than reported as a survivor, because accusing a suite of weakness
-on the strength of a search that did not finish is an accusation the run cannot
-support.
+answers the obligation, so the near pass stops at the first kill and the wider
+search over the importing packages runs only when nothing near any mutant
+noticed it. The order matters more than it looks: on a repository whose
+integration tests take minutes, searching wide per mutant spends the whole
+budget on compilation and reports INCONCLUSIVE for a suite that was in fact
+watching. A mutant whose wider search runs out of time is dropped rather than
+reported as a survivor, because accusing a suite of weakness on the strength of
+a search that did not finish is an accusation the run cannot support.
 
 Outcomes: any mutant killed by a test is signal that tests observe the change;
 mutants surviving both passes fail test-effectiveness (weak-test evidence);
@@ -229,6 +235,26 @@ than a rejection of an innocent change. Output carrying a race detector report i
 exempt from this: a race seen once is a race whether or not the second run
 happens to schedule it the same way.
 
+## Generated code (normative)
+
+A generated file the change leaves alone is exempt from every scanner. A
+generated file the change rewrote is judged in full, because the marker is a
+claim the author controls.
+
+What is never computed across generated code is a **delta**. A function there is
+identified by a name the generator chose, and regenerating after a type is
+deleted renumbers every name after it: a production run was told
+`easyjson…Record23` rose from complexity 9 to 31, when the name had come to
+belong to a different decoder. Maintainability deltas and duplication both pass
+over files carrying a `Code generated … DO NOT EDIT.` header. A delta between two
+functions that are not the same function is not a measurement, and declining to
+make one is not leniency.
+
+`GH-POLICY-002` says what was observed and no more. The harness cannot tell a
+regeneration from a hand edit without running the generator, which verification
+may not do, so the finding reads "changed file carries a Code generated header;
+confirm it was regenerated rather than hand-edited" and stays advisory.
+
 ## Anti-weakening evidence
 
 Base/head diff over changed test files: assertions or error checks removed
@@ -243,7 +269,14 @@ would make every honest test refactor a rejection.
 
 ## Benchmark evidence
 
-Benchmarks in affected packages run at base and head with `-benchmem` and a
+Benchmarks run in the packages the change edited, not across the
+reverse-dependency closure. The closure made this the most expensive check in
+the harness while measuring almost nothing: on a production monorepo 272 seconds
+of a 395 second run went to a package whose benchmarked functions call nothing
+the change touched. The obligation is activated by a benchmark in a changed
+directory in the first place, so it is answered over exactly those directories.
+
+Benchmarks in those packages run at base and head with `-benchmem` and a
 fixed `-benchtime` of 100ms, three samples each. The budget is time rather than
 an iteration count: a fixed count starves a nanosecond-scale benchmark of the
 repetitions it needs to mean anything, and hands a second-scale one a bill of
@@ -256,11 +289,16 @@ every benchmark at once, which is exactly what the corpus run produced before
 this was fixed.
 
 Time is only a regression when the medians differ by more than the contract
-budget (default 15%) *and* the two sample ranges do not overlap: the fastest run
-at head must still be slower than the slowest run at base. Timing a
-nanosecond-scale benchmark on a machine doing anything else swings by tens of
-percent, and a gate that rejected a change over one of those would teach its
-users to ignore it. Allocation counts are deterministic, so the budget alone
+budget (default 15%) *and* the budget is still exceeded under the most
+conservative pairing the samples permit: head's fastest run against base's
+slowest. Separated ranges alone are not enough. This harness rejected its own
+change on two benchmarks whose difference measured under one percent on an idle
+machine, because head's samples had been stretched by the base tree's test suite
+running beside them, and a spread of three quarters of a value is a machine under
+load rather than a measurement. The cost is a real regression of roughly the size
+of the budget going unreported when the samples are spread, which is the right
+way round: a gate that cries wolf is switched off, and a regression that matters
+is bigger than the noise. Allocation counts are deterministic, so the budget alone
 decides there (default 10%). Inside noise is PASS with the delta recorded;
 unmeasurable is INCONCLUSIVE.
 
@@ -449,7 +487,8 @@ Every consumer recomputed these by hand before they were emitted.
 **`coverage`.** What the verdict rests on, at head only: `packages` in scope with
 their count, `filesJudged`, `generatedExempt` with their count, `testPackages`,
 `leakInjectionBlocked`, the test packages whose own `TestMain` kept the
-goroutine-leak detector out, and `localScanNarrowed` with `localScanPackages`,
+goroutine-leak detector out and which are a gap in the repository rather than
+work for this change unless the change touched them, and `localScanNarrowed` with `localScanPackages`,
 the directories the file-local scanners examined when they examined fewer than
 all of them. The harness already refuses to claim what it did
 not prove; this is the other half of that discipline, which is stating what it
@@ -457,21 +496,41 @@ did not look at. An ADMITTED whose scope is invisible is not auditable.
 
 **Two axes on every finding (normative).** `state` says whether the base
 revision already carried the finding: `new`, `preexisting`, `fixed`, or empty
-where no comparison happened. `origin` says where the finding sits relative to
-the diff: `changed` for a file the change added or modified, `untouched` for one
-it did not, and empty where there was no diff to attribute against. They are
-orthogonal and both are needed, because neither implies the other. A finding
-that is `new` and `untouched` is a package the change broke without editing, and
-it blocks like any other new finding. A finding that is `preexisting` and
-`changed` is debt in code the author is looking at, which is worth showing and
-must never block. `origin` is decoration and never enters a fingerprint, exactly
-as consequence does not: a second axis that renamed findings would be worse than
-no axis at all.
+where no comparison happened. `origin` says how close the finding sits to the
+code the change wrote, and the distance matters:
 
-Attribution is at file granularity, from the change set, whose paths are already
-module-relative. A finding with no file is placed by its package's directory,
-which is what anchors goroutine leaks and test failures. A finding the run
-cannot place stays unattributed rather than being guessed into a bucket.
+| origin | meaning |
+|---|---|
+| `added-line` | the line falls inside a `+` hunk of base against the tree under verification |
+| `changed-file` | the file is in the diff, the line predates the change |
+| `changed-package` | the package holds a changed file, this file is not one |
+| `untouched` | anywhere else in the reverse-dependency closure |
+| empty | there was no diff to attribute against |
+
+The two axes are orthogonal and both are needed, because neither implies the
+other. `new` plus `untouched` is a package the change broke without editing, and
+it blocks like any other new finding. `preexisting` plus `changed-file` is debt
+in code the author is looking at, which is worth showing. `preexisting` plus
+`changed-package` is a sibling file they never opened, which on a real merge
+request was 846 rows.
+
+`origin` is decoration and never enters a fingerprint, exactly as consequence
+does not: a second axis that renamed findings would be worse than no axis at all.
+
+Line ranges come from one `git diff -U0` against the base with no second
+revision, so git compares the base against the tree the checks examined and the
+line numbers are that tree's. Every path is translated through the same
+module-relative helper the change set uses; a second coordinate system is what
+produced `backend/backend`. A finding with no file is placed by its package's
+directory, which is what anchors goroutine leaks and test failures. A finding the
+run cannot place stays unattributed, and everything downstream treats unattributed
+as the change's: leniency is never granted on the strength of something the
+harness does not know.
+
+**A repository-wide run places nothing (normative).** An audit sits on a commit
+like any other run, so a diff exists, and attributing against it would let every
+rule that blocks while pre-existing stop blocking wherever that commit did not
+reach. An audit answers for the repository; its origins are empty.
 
 **Rendered views (normative).** `--evidence` selects which findings `evidence[]`
 carries, and `evidenceScope` records the answer in the document.
@@ -479,7 +538,7 @@ carries, and `evidenceScope` records the answer in the document.
 | mode | carries |
 |---|---|
 | `full` | every finding the run produced |
-| `diff` | everything blocking, everything `new` or `fixed`, debt whose origin is `changed`, and anything unattributed |
+| `diff` | everything blocking, everything `new` or `fixed`, debt whose origin is `added-line` or `changed-file`, and anything unattributed |
 | `new` | everything blocking, plus `new` and `fixed` |
 | `top` | `full`, cut to `--evidence-limit` (default 100) in consequence order |
 
@@ -491,6 +550,49 @@ to a diff would answer a question nobody asked.
 default safe: a filter that could hide the row that decided the verdict would be
 a way to be admitted by not looking. It follows that a view changes how much a
 reader reads and never what they have to fix.
+
+## What blocks (normative)
+
+A required finding blocks unless the base revision already carried it. The
+ungrandfatherable core is the exception, and it now carries an exception of its
+own:
+
+    blocking = required && (state != preexisting
+                            || (ungrandfatherable && origin is not
+                                changed-package and not untouched))
+
+Those rules block on a pre-existing finding because a suppression that rides in
+on history is still a suppression. Enforcing that across a reverse-dependency
+closure, however, means a legacy repository can never admit any change at all: on
+one production monorepo 429 historical directives failed `policy-integrity` for
+every merge request, which is a repository-hygiene goal enforced by a change gate
+and which nobody clears inside a branch.
+
+So a pre-existing finding of an ungrandfatherable rule blocks unless the run
+placed it away from the change. Nothing about the anti-laundering property
+moves: a suppression the change adds is `new` and blocks wherever it is, one it
+leaves behind in a file it edits blocks, and the repository is cleaned by the
+traffic through it. An audit places nothing, so an audit blocks on every one of
+them and the debt ledger still cannot acknowledge them.
+
+## Identity a producer states (normative)
+
+A finding is named by its message, reduced to the part that says which finding it
+is. That inference is right for a scanner whose message *is* the finding, and
+wrong for a producer whose message carries a timestamp, a generated key, or a
+goroutine dump: identity then moves every run, and a flaky test reads as a
+regression. Two runs of one commit reported ten test failures and eleven leaks as
+introduced.
+
+`evidence[].identity` is what a producer states when it knows its own answer, and
+the fingerprint uses it in place of the message. A test failure is identified by
+its package and its top-level test name; a goroutine leak by the site it leaked
+at; an API break by the symbol. The volatile text stays in `message`, where a
+reader wants it.
+
+A goroutine leak is reported once per site, not once per test package that
+reached it: goleak repeats itself, and on a production run one leaking helper
+produced thirty-six identical rows.
 
 Selection is always declared: `evidenceTruncated: true` and `evidenceOmitted: N`
 count the rows withheld, by a scope or by a limit or by both, and both fields are

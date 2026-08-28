@@ -102,6 +102,11 @@ func (s Scope) orFull() Scope {
 // place against the diff survives too, because unplaced is not the same as
 // irrelevant and the honest treatment of what the harness does not know is to
 // show it.
+//
+// What diff drops is debt the run placed away from the change: a package the
+// author never opened, or a sibling file of one they did. Those are the rows a
+// reverse-dependency closure produces in the thousands, and they are the reason
+// this scope exists.
 func (s Scope) Keeps(e evidence.Evidence) bool {
 	if verify.Blocking(e) || e.State == evidence.StateNew || e.State == evidence.StateFixed {
 		return true
@@ -110,7 +115,7 @@ func (s Scope) Keeps(e evidence.Evidence) bool {
 	case ScopeNew:
 		return false
 	case ScopeDiff:
-		return e.Origin != evidence.OriginUntouched
+		return !e.Origin.OutsideChange()
 	default:
 		return true
 	}

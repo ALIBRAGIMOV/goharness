@@ -247,3 +247,57 @@ func TestRealignWithoutRenamesIsTheIdentity(t *testing.T) {
 		t.Fatal("a rename of an unrelated file changed the set")
 	}
 }
+
+// TestAStatedIdentitySurvivesAVolatileMessage is the mechanism behind the
+// producers whose text moves between runs.
+//
+// A failing test prints a timestamp; goleak prints the goroutines it happened to
+// find, in the order the runtime handed them over. Naming a finding by its
+// description then renames it every run: ten test failures and eleven leaks were
+// reported as introduced between two runs of one commit, and one flaky race
+// arrived as new, fixed and pre-existing inside a single report.
+func TestAStatedIdentitySurvivesAVolatileMessage(t *testing.T) {
+	t.Parallel()
+	first := evidence.Finalize([]evidence.Evidence{{
+		RuleID: "GH-TEST-FAIL", Package: "example.com/x/lib",
+		Identity: "GH-TEST-FAIL example.com/x/lib TestThing",
+		Message:  "test TestThing failed: 2026/08/27 14:37:27 fetching profile key abc",
+	}})
+	second := evidence.Finalize([]evidence.Evidence{{
+		RuleID: "GH-TEST-FAIL", Package: "example.com/x/lib",
+		Identity: "GH-TEST-FAIL example.com/x/lib TestThing",
+		Message:  "test TestThing failed: 2026/08/27 15:02:11 fetching profile key zzz",
+	}})
+	if first[0].Fingerprint != second[0].Fingerprint {
+		t.Fatalf("the same failure was named twice: %q vs %q",
+			first[0].Fingerprint, second[0].Fingerprint)
+	}
+}
+
+// TestAStatedIdentityStillTellsFindingsApart is the false-positive guard: an
+// identity that collapsed two different findings would hide one of them.
+func TestAStatedIdentityStillTellsFindingsApart(t *testing.T) {
+	t.Parallel()
+	items := evidence.Finalize([]evidence.Evidence{
+		{RuleID: "GH-TEST-FAIL", Package: "p", Identity: "GH-TEST-FAIL p TestOne", Message: "one"},
+		{RuleID: "GH-TEST-FAIL", Package: "p", Identity: "GH-TEST-FAIL p TestTwo", Message: "two"},
+	})
+	if items[0].Fingerprint == items[1].Fingerprint {
+		t.Fatal("two different tests were given one identity")
+	}
+}
+
+// TestAnAbsentIdentityStillFallsBackToTheMessage keeps every scanner that has no
+// identity of its own working exactly as it did.
+func TestAnAbsentIdentityStillFallsBackToTheMessage(t *testing.T) {
+	t.Parallel()
+	stated := evidence.Finalize([]evidence.Evidence{
+		{RuleID: "GH-X", File: "a.go", Message: "budget exceeded at 30"},
+	})
+	moved := evidence.Finalize([]evidence.Evidence{
+		{RuleID: "GH-X", File: "a.go", Message: "budget exceeded at 27"},
+	})
+	if stated[0].Fingerprint != moved[0].Fingerprint {
+		t.Fatal("a measurement inside a message changed the identity it is masked out of")
+	}
+}

@@ -70,6 +70,23 @@ type ChangeSet struct {
 	// module does not. They are neither evidence nor a gap in coverage, but a
 	// reader of a monorepo report needs to see that they were seen and set aside.
 	OutsideModule []string
+	// Added maps a changed file to the line spans this change wrote in it, in the
+	// coordinates of the tree under verification. A file the change added has no
+	// entry and every line of it counts as written; a file with no entry and no
+	// addition status had nothing added, only removed.
+	Added map[string][]LineRange
+}
+
+// LineRange is an inclusive span of line numbers in the tree under
+// verification.
+type LineRange struct {
+	Start int
+	End   int
+}
+
+// Contains reports whether a line falls inside the span.
+func (r LineRange) Contains(line int) bool {
+	return line >= r.Start && line <= r.End
 }
 
 // HasBase reports whether a base revision was resolved and base/head comparison
@@ -319,6 +336,114 @@ func (c ChangeSet) Renames() map[string]string {
 		out[e.OldPath] = e.Path
 	}
 	return out
+}
+
+// Hunks reads the lines this change wrote, per module-relative file.
+//
+// One query against the base, with no second revision, so git compares the base
+// against the working tree. That is the tree every check actually examined, and
+// asking instead for base..HEAD would answer in HEAD's line numbers while the
+// findings are numbered in the worktree's. Untracked files are absent from a
+// diff and need no entry: they are additions, and every line of an addition was
+// written by the change.
+//
+// A git that will not print a diff ends the run, exactly as it does for the file
+// list: both queries answer the same question about the same tree, and a run
+// that trusted one while ignoring the other's failure would be reporting on a
+// change it only half read.
+func Hunks(ctx context.Context, git repo.Git, r repo.Repository, base string) (map[string][]LineRange, error) {
+	if base == "" || !r.HasGit {
+		return map[string][]LineRange{}, nil
+	}
+	queryDir := r.Root
+	if r.GitRoot != "" {
+		queryDir = r.GitRoot
+	}
+	out, err := git.Run(ctx, queryDir, "diff", "-U0", "--no-color", base, "--")
+	if err != nil {
+		return nil, fmt.Errorf("reading the line ranges of the change (git diff -U0 %s): %w", base, err)
+	}
+	return parseUnifiedHunks(out, r.ModulePrefix), nil
+}
+
+// parseUnifiedHunks reads the added-line spans out of a zero-context unified
+// diff, translating each path into the module's coordinates as it goes.
+func parseUnifiedHunks(diff, modulePrefix string) map[string][]LineRange {
+	spans := map[string][]LineRange{}
+	current := ""
+	for line := range strings.SplitSeq(diff, "\n") {
+		if path, ok := strings.CutPrefix(line, "+++ "); ok {
+			current = headPath(path, modulePrefix)
+			continue
+		}
+		if current == "" || !strings.HasPrefix(line, "@@") {
+			continue
+		}
+		if span, ok := parseHunkHeader(line); ok {
+			spans[current] = append(spans[current], span)
+		}
+	}
+	return spans
+}
+
+// headPath turns the "+++ b/path" side of a diff header into a module-relative
+// path, and returns the empty string for a file the head tree does not have.
+func headPath(field, modulePrefix string) string {
+	field = strings.TrimSpace(field)
+	// A tab separates the path from the timestamp some diff producers append.
+	field, _, _ = strings.Cut(field, "\t")
+	if field == "/dev/null" {
+		return ""
+	}
+	repoPath, ok := strings.CutPrefix(field, "b/")
+	if !ok {
+		return ""
+	}
+	rel, inModule := moduleRelative(repoPath, modulePrefix)
+	if !inModule {
+		return ""
+	}
+	return rel
+}
+
+// parseHunkHeader reads the head-side span out of "@@ -a,b +c,d @@". A count of
+// zero is a pure deletion, which wrote no line.
+func parseHunkHeader(line string) (LineRange, bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 3 || !strings.HasPrefix(fields[2], "+") {
+		return LineRange{}, false
+	}
+	startText, countText, hasCount := strings.Cut(fields[2][1:], ",")
+	start, ok := positiveInt(startText)
+	if !ok {
+		return LineRange{}, false
+	}
+	count := 1
+	if hasCount {
+		parsed, valid := positiveInt(countText)
+		if !valid {
+			return LineRange{}, false
+		}
+		count = parsed
+	}
+	if count == 0 {
+		return LineRange{}, false
+	}
+	return LineRange{Start: start, End: start + count - 1}, true
+}
+
+func positiveInt(text string) (int, bool) {
+	if text == "" {
+		return 0, false
+	}
+	n := 0
+	for _, r := range text {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, true
 }
 
 // GoFiles returns the change set entries that are Go source files.

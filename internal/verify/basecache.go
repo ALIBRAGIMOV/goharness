@@ -24,7 +24,7 @@ const baseEvidenceKind = "base-evidence"
 // evidenceDecoration identifies the set of fields the harness stamps onto a
 // finding. Adding one means every stored snapshot is now incomplete, so this
 // moves whenever the decoration does and the stale entries simply miss.
-const evidenceDecoration = "consequence+remedy+fix"
+const evidenceDecoration = "consequence+remedy+fix+identity+origin"
 
 // baseSnapshot is what running the checks over the base revision produced.
 //
