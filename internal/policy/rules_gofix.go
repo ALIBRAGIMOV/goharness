@@ -27,7 +27,9 @@ type fixAnalyzerSpec struct {
 // goFixAnalyzerSpecs lists every analyzer registered by the pinned toolchain's
 // fix tool, enabled or not. A toolchain upgrade that adds an analyzer leaves it
 // absent here, which the analyzer validation reports rather than silently
-// running it.
+// running it; one that drops or renames an analyzer (Go 1.27 dropped
+// fmtappendf and renamed waitgroup to waitgroupgo) has to follow here, or
+// every run reports the analyzer missing.
 func goFixAnalyzerSpecs() []fixAnalyzerSpec {
 	return append(goFixSimplicitySpecs(), append(goFixMigrationSpecs(), goFixExcludedSpecs()...)...)
 }
@@ -38,8 +40,12 @@ func goFixSimplicitySpecs() []fixAnalyzerSpec {
 	return []fixAnalyzerSpec{
 		{name: "any", consequence: ConsequenceHygiene, title: "interface{} where any says the same thing",
 			rationale: "any has been the spelling since Go 1.18; interface{} is the older form of an identical type."},
-		{name: "fmtappendf", consequence: ConsequenceHygiene, title: "[]byte(fmt.Sprintf(...)) instead of fmt.Appendf",
-			rationale: "The conversion allocates a string only to copy it into a byte slice."},
+		{name: "atomictypes", consequence: ConsequenceHygiene, title: "sync/atomic function on a plain integer",
+			rationale: "atomic.Int32 and its siblings cannot be read or written non-atomically by accident, which the function form permits on the same variable one line away."},
+		{name: "embedlit", consequence: ConsequenceHygiene, title: "Nested literal for a field promoted from an embedded struct",
+			rationale: "Go 1.27 initialises promoted fields directly; the nested literal repeats a type name the compiler already knows."},
+		{name: "errorsastype", consequence: ConsequenceHygiene, title: "errors.As with a declared target instead of errors.AsType",
+			rationale: "errors.AsType[T] returns the typed value and cannot be handed a target of the wrong type, which errors.As only reports at run time."},
 		{name: "forvar", consequence: ConsequenceHygiene, title: "Redundant re-declaration of a loop variable",
 			rationale: "x := x inside a loop body has been unnecessary since Go 1.22 gave each iteration its own variable."},
 		{name: "mapsloop", consequence: ConsequenceHygiene, title: "Explicit loop over a map that the maps package expresses",
@@ -52,6 +58,8 @@ func goFixSimplicitySpecs() []fixAnalyzerSpec {
 			rationale: "for i := range n states the bound once instead of three times."},
 		{name: "reflecttypefor", consequence: ConsequenceHygiene, title: "reflect.TypeOf on a zero value instead of TypeFor",
 			rationale: "reflect.TypeFor[T]() names the type directly and cannot be handed the wrong value."},
+		{name: "slicesbackward", consequence: ConsequenceHygiene, title: "Hand-written backward loop over a slice",
+			rationale: "slices.Backward states the direction once; the three-clause form has an off-by-one waiting in the bound."},
 		{name: "slicescontains", consequence: ConsequenceHygiene, title: "Loop that searches a slice for a value",
 			rationale: "slices.Contains and slices.ContainsFunc replace a loop whose only result is a boolean."},
 		{name: "slicessort", consequence: ConsequenceHygiene, title: "sort.Slice on a slice of basic types",
@@ -68,7 +76,9 @@ func goFixSimplicitySpecs() []fixAnalyzerSpec {
 			rationale: "SplitSeq and FieldsSeq iterate without allocating the intermediate slice."},
 		{name: "testingcontext", consequence: ConsequenceHygiene, title: "context.WithCancel in a test instead of t.Context",
 			rationale: "t.Context is cancelled when the test ends, so the test cannot leak the goroutines it started."},
-		{name: "waitgroup", consequence: ConsequenceHygiene, title: "wg.Add(1) / go / defer wg.Done() around a goroutine",
+		{name: "unsafefuncs", consequence: ConsequenceHygiene, title: "Pointer arithmetic through uintptr instead of unsafe.Add",
+			rationale: "unsafe.Add keeps the pointer a pointer for the whole expression, so the garbage collector never sees it as an integer."},
+		{name: "waitgroupgo", consequence: ConsequenceHygiene, title: "wg.Add(1) / go / defer wg.Done() around a goroutine",
 			rationale: "wg.Go pairs the counter with the goroutine, which is the pairing this trio gets wrong when it is edited."},
 	}
 }

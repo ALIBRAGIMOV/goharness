@@ -16,7 +16,7 @@ import (
 
 // GolangciLintPin is the exact golangci-lint version the harness trusts. Any
 // other version yields INCONCLUSIVE rather than a silently different verdict.
-const GolangciLintPin = "2.12.2"
+const GolangciLintPin = "2.13.2"
 
 // GolangciLintEnvVar overrides binary discovery.
 const GolangciLintEnvVar = "GOHARNESS_GOLANGCI_LINT"

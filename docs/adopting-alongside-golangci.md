@@ -12,7 +12,7 @@ below cost that adoption real time.
 
 ## The shape of the problem
 
-goharness runs its own pinned golangci-lint (2.12.2 exactly) with its own
+goharness runs its own pinned golangci-lint (2.13.2 exactly) with its own
 embedded strict configuration. It never reads your `.golangci.yml` and never
 writes it. Your configuration keeps deciding what your CI gate reports; the
 strict pack decides what goharness reports. Where the two differ, the difference

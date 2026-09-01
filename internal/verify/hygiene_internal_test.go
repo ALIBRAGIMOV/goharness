@@ -22,12 +22,12 @@ func TestPathHygieneRefusesEvidenceOutsideTheTree(t *testing.T) {
 		if err == nil {
 			t.Fatalf("a finding at %q was accepted", file)
 		}
-		var fault harnessError
-		if !errors.As(err, &fault) {
+		fault, ok := errors.AsType[harnessError](err)
+		if !ok {
 			t.Fatalf("the fault at %q is not attributed to goharness: %v", file, err)
 		}
-		if !strings.Contains(err.Error(), "gofix") {
-			t.Fatalf("the fault does not name the check that produced it: %v", err)
+		if !strings.Contains(fault.Error(), "gofix") {
+			t.Fatalf("the fault does not name the check that produced it: %v", fault)
 		}
 	}
 }

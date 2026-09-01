@@ -61,7 +61,7 @@ Every integration test in `internal/verify` builds a git repository and runs the
 
 ## Hard pins (never change casually)
 
-- golangci-lint: exactly `2.12.2`, external executable, discovered via `GOHARNESS_GOLANGCI_LINT`, then `.tools/`, then the content-addressed cache, then PATH. Every candidate is verified against a pinned per-platform binary sha256; a locally built one (`go install`) reports the right version, hashes to something else, and is refused. Provision with `goharness setup`. Never import its packages (GPL).
+- golangci-lint: exactly `2.13.2`, external executable, discovered via `GOHARNESS_GOLANGCI_LINT`, then `.tools/`, then the content-addressed cache, then PATH. Every candidate is verified against a pinned per-platform binary sha256; a locally built one (`go install`) reports the right version, hashes to something else, and is refused. Provision with `goharness setup`. Never import its packages (GPL).
 - `golang.org/x/vuln`: exactly `v1.7.0` in go.mod, used in-process. No govulncheck binary, no PATH probe.
 - `go.uber.org/goleak`: exactly `v1.3.0`, vendored verbatim under `internal/leakcheck/goleaksrc` and injected into race runs via a build overlay. Never add a TestMain to this repository's packages: it would block the injection and turn the leak obligation INCONCLUSIVE.
 - Uber Go Style Guide: commit `1d60a91aa5e87d443002e23c21903c49489dbde5`, never fetched at runtime.

@@ -145,7 +145,7 @@ func TestChecksumMismatchAbortsAndLeavesTheCacheUntouched(t *testing.T) {
 	defer server.Close()
 
 	cache := newCache(t)
-	spec, err := toolcache.GolangciSpec("2.12.2", "linux-amd64", server.URL)
+	spec, err := toolcache.GolangciSpec("2.13.2", "linux-amd64", server.URL)
 	if err != nil {
 		t.Fatalf("GolangciSpec: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestChecksumMismatchAbortsAndLeavesTheCacheUntouched(t *testing.T) {
 			t.Fatalf("a rejected download left %v in the cache", entries)
 		}
 	}
-	if _, err := cache.ReadToolManifest(toolcache.ToolGolangci, "2.12.2"); !errors.Is(err, toolcache.ErrNotProvisioned) {
+	if _, err := cache.ReadToolManifest(toolcache.ToolGolangci, "2.13.2"); !errors.Is(err, toolcache.ErrNotProvisioned) {
 		t.Fatalf("a manifest was written for a rejected download: %v", err)
 	}
 }
@@ -267,21 +267,21 @@ func TestCancelledDownloadWritesNothing(t *testing.T) {
 	defer cancel()
 
 	cache := newCache(t)
-	spec, err := toolcache.GolangciSpec("2.12.2", "linux-amd64", server.URL)
+	spec, err := toolcache.GolangciSpec("2.13.2", "linux-amd64", server.URL)
 	if err != nil {
 		t.Fatalf("GolangciSpec: %v", err)
 	}
 	if _, err := toolcache.ProvisionTool(ctx, cache, toolcache.NewHTTPFetcher(server.Client()), spec); err == nil {
 		t.Fatal("a cancelled download reported success")
 	}
-	if _, err := cache.ReadToolManifest(toolcache.ToolGolangci, "2.12.2"); !errors.Is(err, toolcache.ErrNotProvisioned) {
+	if _, err := cache.ReadToolManifest(toolcache.ToolGolangci, "2.13.2"); !errors.Is(err, toolcache.ErrNotProvisioned) {
 		t.Fatalf("a cancelled download left a manifest: %v", err)
 	}
 }
 
 func TestUnpinnedPlatformIsRefused(t *testing.T) {
 	t.Parallel()
-	if _, err := toolcache.GolangciSpec("2.12.2", "plan9-386", "https://example.invalid"); err == nil {
+	if _, err := toolcache.GolangciSpec("2.13.2", "plan9-386", "https://example.invalid"); err == nil {
 		t.Fatal("a platform with no pinned checksum was accepted")
 	}
 }
@@ -294,14 +294,14 @@ func TestPinnedChecksumsCoverEveryDocumentedPlatform(t *testing.T) {
 		t.Fatalf("platforms = %v, want %v", got, want)
 	}
 	for _, platform := range got {
-		spec, err := toolcache.GolangciSpec("2.12.2", platform, toolcache.DefaultGolangciBaseURL)
+		spec, err := toolcache.GolangciSpec("2.13.2", platform, toolcache.DefaultGolangciBaseURL)
 		if err != nil {
 			t.Fatalf("GolangciSpec(%s): %v", platform, err)
 		}
 		if len(spec.SHA256) != 64 {
 			t.Fatalf("%s checksum is not a sha256: %q", platform, spec.SHA256)
 		}
-		if !strings.HasPrefix(spec.URL, toolcache.DefaultGolangciBaseURL+"/v2.12.2/") {
+		if !strings.HasPrefix(spec.URL, toolcache.DefaultGolangciBaseURL+"/v2.13.2/") {
 			t.Fatalf("%s url = %q", platform, spec.URL)
 		}
 	}

@@ -26,7 +26,7 @@ Where documents conflict, the newest wins.
 |---|---|
 | golang.org/x/vuln (embedded scanner, module dependency) | `v1.7.0` exact in go.mod |
 | go.uber.org/goleak (embedded goroutine-leak detector) | `v1.3.0`, sources vendored verbatim under `internal/leakcheck/goleaksrc` (MIT, license included); injected into race runs through a `go test -overlay` virtual package, never installed and never on the network |
-| golangci-lint v2.12.2 release archive sha256 | pinned per platform, from the official `golangci-lint-2.12.2-checksums.txt` |
+| golangci-lint v2.13.2 release archive sha256 | pinned per platform, from the official `golangci-lint-2.13.2-checksums.txt` |
 
 Pinned archive checksums (source: official release checksums file). The archive
 sums authorise a download; the binary sums below authorise an execution:
@@ -61,7 +61,7 @@ passed over with the reason recorded on the result, and doctor prints it.
 
 The reason is the threat model. `.tools/` lives inside the repository the change
 under verification can write to, `GOHARNESS_GOLANGCI_LINT` is one line of shell
-away, and a program that prints `golangci-lint has version 2.12.2` and an empty
+away, and a program that prints `golangci-lint has version 2.13.2` and an empty
 JSON report takes three lines to write. A version self-report proves nothing;
 the bytes do. When nothing trustworthy is found, the linter's obligations are
 unproducible and the run is INCONCLUSIVE with `goharness setup` as the remedy;

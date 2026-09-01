@@ -109,8 +109,7 @@ func (ExecRunner) Run(ctx context.Context, cmd Command) (Result, error) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return res, fmt.Errorf("%s: %w", cmd.Name, ctxErr)
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 		res.ExitCode = exitErr.ExitCode()
 		return res, nil
 	}

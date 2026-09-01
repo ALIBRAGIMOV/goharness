@@ -238,7 +238,7 @@ func TestGolangciLintRunsInFastAndVerify(t *testing.T) {
 			t.Fatalf("%s checks = %v, want %s", mode, result.Execution.CheckIDs(), admission.ProducerGolangci)
 		}
 		doc := report.Build("test", result)
-		if doc.Versions.GolangciLint != "2.12.2" || !doc.Versions.GolangciLintMatches {
+		if doc.Versions.GolangciLint != "2.13.2" || !doc.Versions.GolangciLintMatches {
 			t.Fatalf("%s report records golangci-lint %q (matches=%v)",
 				mode, doc.Versions.GolangciLint, doc.Versions.GolangciLintMatches)
 		}
@@ -290,7 +290,7 @@ func TestToolCrashIsInconclusiveAndNeverEvidence(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "fake-golangci-lint")
 	body := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"--version\" ]; then\n" +
-		"  echo 'golangci-lint has version 2.12.2 built with go1.26.4'\n" +
+		"  echo 'golangci-lint has version 2.13.2 built with go1.27.0'\n" +
 		"  exit 0\n" +
 		"fi\n" +
 		"echo 'panic: internal linter failure' >&2\n" +
@@ -350,7 +350,7 @@ func TestVersionMismatchIsInconclusive(t *testing.T) {
 	requireVerdict(t, result, admission.VerdictInconclusive)
 	var mentionsPin bool
 	for _, failure := range result.Failures {
-		if strings.Contains(failure.Reason, "2.12.2") {
+		if strings.Contains(failure.Reason, "2.13.2") {
 			mentionsPin = true
 		}
 	}

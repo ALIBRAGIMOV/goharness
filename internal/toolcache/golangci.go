@@ -53,11 +53,11 @@ type ArchiveSpec struct {
 // these is never extracted.
 func golangciArchiveSums() map[string]string {
 	return map[string]string{
-		"darwin-arm64":  "a9c54498731b3128f79e090be6110f3e5fffccc617b08142ed244d4126c73f29",
-		"darwin-amd64":  "f6f06d94b6241521c53d15450c5209b028270bf966f842afb11c030c79f5bc16",
-		"linux-amd64":   "8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553",
-		"linux-arm64":   "44cd40a8c76c86755375adfeea52cfd3533cb43d7bd647771e0ae065e166df3a",
-		"windows-amd64": "bd42e3ebc8cb4ececb86941983baaf1dc221bbb04d838e94ce63b49cc91e02bb",
+		"darwin-arm64":  "f4bf83f0b64f055c42b28fc9a38861839f69c096e61c788e72dfaae412011789",
+		"darwin-amd64":  "8a13aaf9cbbb1dee52824e862cf0d0720e5bb97c1f4260d1e51623a09492b57b",
+		"linux-amd64":   "2277d43b98ec0054280f2ac26b53268bae97682444678a59a657dd565da021d6",
+		"linux-arm64":   "a2a4e0065aa41be71f7c5ac90f271b61751331e5d04314e62afe4027855f0893",
+		"windows-amd64": "4735fdc8e84a0cfb7a15a1c364a650942f88215e0d36c674ebc4024f7b554524",
 	}
 }
 
@@ -68,11 +68,11 @@ func golangciArchiveSums() map[string]string {
 // version number proves nothing about what it will report.
 func golangciBinarySums() map[string]string {
 	return map[string]string{
-		"darwin-arm64":  "691b9100ce968ff0009b6b7757ef6a585e31ae9ab11dfe0340ebb6e8e21fdc3d",
-		"darwin-amd64":  "aed31dd446edae61f420d663369578ab9ddacea4594cafa5bc22b9f59c786cf0",
-		"linux-amd64":   "e26335d9bd381a60e5769a13b0ccc7967db5b6fb9c39a896a1f6fd0befe0a661",
-		"linux-arm64":   "66dbbe60d3e1fc6b07807be7cbe58fe9ed45afe190018fba2112870e2e30b737",
-		"windows-amd64": "bed205a512d6ce48a6cce052878fcceb06591bd72d7e6b5e138204ef720eef66",
+		"darwin-arm64":  "78ffa18bf2d9ffbde06ae76d1a266c0f83d354990bcf9028cb22111dcc3f443e",
+		"darwin-amd64":  "f7098c0e8abaaa821d5aa2789d0e5fc06a6a95fd7eef690849d822c9883b6021",
+		"linux-amd64":   "97aa6134a250a0f964d112a5e6c01c80f87e4b0512872ebe0845834b5a03b76b",
+		"linux-arm64":   "85cc0601d07afb7474837d615ae2efe0c1715d1010a0fedf86a4a6fd4630dfe0",
+		"windows-amd64": "6fabccdca5e1f938534194437b114bcd6eedc0a9e58b04994df57c893c565e66",
 	}
 }
 

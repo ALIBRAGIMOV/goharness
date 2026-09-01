@@ -157,8 +157,8 @@ func CompareDocuments(oldDoc, newDoc Document) Diff {
 		Fixed:      groupFindings(fixed),
 		Introduced: groupFindings(introduced),
 		Remaining:  groupFindings(remaining),
+		ExitCode:   DiffExitClean,
 	}
-	d.ExitCode = DiffExitClean
 	if d.Counts.Introduced.Blocking > 0 {
 		d.ExitCode = DiffExitIntroduced
 	}

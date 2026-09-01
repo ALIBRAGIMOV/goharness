@@ -34,7 +34,7 @@ func TestVersionPrintsEveryPin(t *testing.T) {
 		t.Fatalf("exit = %d, want %d", code, cli.ExitAdmitted)
 	}
 	for _, want := range []string{
-		cli.Version, policy.UberGuideCommit, report.SchemaID, "2.12.2",
+		cli.Version, policy.UberGuideCommit, report.SchemaID, "2.13.2",
 		tool.XVulnVersion(), leakcheck.Version,
 	} {
 		if !strings.Contains(out, want) {
@@ -649,7 +649,7 @@ func TestAgentProtocolNamesFieldsTheReportHas(t *testing.T) {
 	document := jsonKeys(t, report.Build(cli.Version, verify.Result{}))
 	claim := jsonKeys(t, admission.QualityClaim{})
 	finding := jsonKeys(t, report.Finding{
-		Evidence: evidence.Evidence{Fix: &evidence.Remediation{Command: "gofmt -w a.go"}},
+		Fix: &evidence.Remediation{Command: "gofmt -w a.go"},
 	})
 	remediation := jsonKeys(t, evidence.Remediation{})
 	unproducible := jsonKeys(t, report.Unproducible{Remedy: "run goharness setup"})

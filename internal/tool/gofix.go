@@ -170,8 +170,12 @@ func parseFixAnalyzerFlags(stream string) ([]string, error) {
 	}
 	var names []string
 	for _, f := range flags {
+		if !strings.HasPrefix(f.Usage, fixAnalyzerUsagePrefix) {
+			continue
+		}
 		usage := strings.TrimSuffix(strings.TrimPrefix(f.Usage, fixAnalyzerUsagePrefix), fixAnalyzerUsageSuffix)
-		if usage == f.Name && strings.HasPrefix(f.Usage, fixAnalyzerUsagePrefix) {
+		// Go 1.27 quotes the analyzer name in the usage text; Go 1.26 did not.
+		if strings.Trim(usage, `"`) == f.Name {
 			names = append(names, f.Name)
 		}
 	}

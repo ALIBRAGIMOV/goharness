@@ -9,8 +9,8 @@ the code is wrong or this document is stale, and either is a defect.
 
 | Component | Pin | Rationale |
 |---|---|---|
-| Go toolchain | go 1.26 (module directive `go 1.26`) | Current stable; loop-variable semantics of Go 1.22+ assumed. |
-| golangci-lint | `v2.12.2` (exact, never `latest`) | Latest stable v2 release at time of pinning. Run as an external executable only; its GPL-licensed internals are never imported or linked. |
+| Go toolchain | go 1.27 (module directive `go 1.27`, `toolchain go1.27.0`) | Current stable; loop-variable semantics of Go 1.22+ assumed. |
+| golangci-lint | `v2.13.2` (exact, never `latest`) | Latest stable v2 release at time of pinning. Run as an external executable only; its GPL-licensed internals are never imported or linked. |
 | Uber Go Style Guide | commit `1d60a91aa5e87d443002e23c21903c49489dbde5` of `github.com/uber-go/guide` | Versioned policy source. The guide is never fetched at verification runtime; a checked-in rule registry references this SHA. |
 | JSON report schema | `goharness.report/v2` | Versioned so consumers can detect breaking changes. |
 

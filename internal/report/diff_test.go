@@ -16,12 +16,10 @@ import (
 // contract is that it looks at nothing else.
 func finding(fingerprint, ruleID, consequence string, blocking bool) report.Finding {
 	return report.Finding{
-		Evidence: evidence.Evidence{
-			Fingerprint: fingerprint, RuleID: ruleID, Consequence: consequence,
-			File: "a.go", Message: "m", Severity: evidence.SeverityError,
-			Classification: evidence.ClassificationRequired,
-		},
-		Blocking: blocking,
+		Fingerprint: fingerprint, RuleID: ruleID, Consequence: consequence,
+		File: "a.go", Message: "m", Severity: evidence.SeverityError,
+		Classification: evidence.ClassificationRequired,
+		Blocking:       blocking,
 	}
 }
 

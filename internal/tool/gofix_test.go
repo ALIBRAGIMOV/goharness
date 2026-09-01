@@ -101,6 +101,24 @@ func TestParseFixAnalyzerFlagsKeepsOnlyAnalyzerSwitches(t *testing.T) {
 	}
 }
 
+// Go 1.27 quotes the analyzer name in the usage text. Read with the Go 1.26
+// form only, every analyzer came back missing and the fix check reported the
+// pinned toolchain as registering none of them.
+func TestParseFixAnalyzerFlagsReadsTheQuotedUsageOfGo127(t *testing.T) {
+	names, err := parseFixAnalyzerFlags(`[
+  {"Name": "any", "Bool": true, "Usage": "enable \"any\" analysis"},
+  {"Name": "buildtags", "Bool": true, "Usage": "deprecated alias for -buildtag"},
+  {"Name": "errorsastype", "Bool": true, "Usage": "enable \"errorsastype\" analysis"},
+  {"Name": "errorsastype.something", "Bool": true, "Usage": "enable \"errorsastype\" analysis"}
+]`)
+	if err != nil {
+		t.Fatalf("parseFixAnalyzerFlags: %v", err)
+	}
+	if !slices.Equal(names, []string{"any", "errorsastype"}) {
+		t.Fatalf("analyzers = %v", names)
+	}
+}
+
 func TestCompareFixAnalyzersSeparatesMissingFromUnclassified(t *testing.T) {
 	support := compareFixAnalyzers(
 		[]string{"any", "inline", "brandnew"},

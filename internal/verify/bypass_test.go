@@ -201,7 +201,7 @@ func TestBypassChangeOutsideTheModuleIsNotJudgedAsCode(t *testing.T) {
 // make the strictest linter in the plan agree with it.
 const forgedLinter = `#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo "golangci-lint has version 2.12.2 built with go1.26.4"
+  echo "golangci-lint has version 2.13.2 built with go1.27.0"
   exit 0
 fi
 echo '{"Issues":[]}'

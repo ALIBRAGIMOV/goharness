@@ -1,8 +1,8 @@
 module github.com/ALIBRAGIMOV/goharness
 
-go 1.26
+go 1.27
 
-toolchain go1.26.6
+toolchain go1.27.0
 
 require (
 	go.uber.org/zap v1.28.0
@@ -12,8 +12,8 @@ require (
 )
 
 require (
-	go.uber.org/multierr v1.10.0 // indirect
-	golang.org/x/mod v0.39.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
+	golang.org/x/mod v0.40.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/telemetry v0.0.0-20260811182544-a038080d80e5 // indirect
+	golang.org/x/telemetry v0.0.0-20260828145429-86cb5733f5b7 // indirect
 )

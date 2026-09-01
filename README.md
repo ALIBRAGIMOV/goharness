@@ -14,8 +14,8 @@ most code is written by AI coding agents and "done" stopped meaning anything.
 ```console
 $ goharness verify
 REJECTED  failing claims: test-effectiveness
-goharness 0.9.0  mode=verify  module github.com/acme/billing (go 1.26)
-tools: go go1.26.6, golangci-lint 2.12.2 (pin 2.12.2), x/vuln v1.7.0
+goharness 0.9.0  mode=verify  module github.com/acme/billing (go 1.27)
+tools: go go1.27.0, golangci-lint 2.13.2 (pin 2.13.2), x/vuln v1.7.0
 scope: 7 changed files against 4f2ab1c9d3e5 (merge-base with default branch), 12 packages, 9 test packages
 risk domains: concurrency, tests
 
@@ -56,7 +56,7 @@ goharness verify    # the admission gate for your current change
 ```
 
 That is the whole setup. Zero configuration gives you the full strict policy.
-Requires Go 1.26 or later.
+Requires Go 1.27 or later.
 
 ## Why it exists
 
@@ -135,7 +135,7 @@ coordinates before the two are compared.
 - **The Go toolchain as the semantic authority:** compilation, `go vet`,
   `go test`, the race detector, `gofmt`, `goimports`, `go mod tidy -diff`, and
   Go 1.26 `go fix`.
-- **golangci-lint at an exact pin (2.12.2)** with an embedded strict config.
+- **golangci-lint at an exact pin (2.13.2)** with an embedded strict config.
   Your `.golangci.yml` is not trusted by default. Every candidate binary is
   verified against a pinned sha256.
 - **Offline vulnerability scanning** with the embedded `golang.org/x/vuln`

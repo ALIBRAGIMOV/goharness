@@ -902,7 +902,7 @@ The CLI is a product surface, not a script wrapper:
   exactly which evidence was unproducible and how to make it producible;
 - `doctor` prints a check table with pass/fail marks and an exact
   remediation command per failure (including the pinned install command for
-  golangci-lint v2.12.2), plus stale-worktree and PATH diagnostics;
+  golangci-lint v2.13.2), plus stale-worktree and PATH diagnostics;
 - `--json` is available on every verifying command and is schema-stable;
   timing fields live in a dedicated block excluded from determinism
   comparisons.
