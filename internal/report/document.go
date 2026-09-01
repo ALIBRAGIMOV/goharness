@@ -3,7 +3,8 @@
 package report
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"slices"
@@ -38,7 +39,7 @@ type Document struct {
 	Contract                Contract                     `json:"contract"`
 	Risks                   Risks                        `json:"risks"`
 	Policy                  PolicyInfo                   `json:"policy"`
-	VulnDB                  *VulnDB                      `json:"vulnDb,omitempty"`
+	VulnDB                  *VulnDB                      `json:"vulnDb,omitzero"`
 	Change                  ChangeInfo                   `json:"change"`
 	Plan                    PlanInfo                     `json:"plan"`
 	Claims                  []admission.QualityClaim     `json:"claims"`
@@ -49,11 +50,11 @@ type Document struct {
 	// Baseline is the burn-down of the acknowledged-debt ledger, present only in
 	// an audit that read one. Absent everywhere else, so a report from a run with
 	// no ledger is byte-for-byte what it always was.
-	Baseline *Baseline `json:"baseline,omitempty"`
+	Baseline *Baseline `json:"baseline,omitzero"`
 	// PolicyShadow is what the repository's own lint configuration hides from
 	// itself. A section, never a claim: it is absent from every verdict, every
 	// count, and every exit code.
-	PolicyShadow *PolicyShadow `json:"policyShadow,omitempty"`
+	PolicyShadow *PolicyShadow `json:"policyShadow,omitzero"`
 	Evidence     []Finding     `json:"evidence"`
 	// EvidenceTruncated says the evidence list is a selection rather than the
 	// whole set, and EvidenceOmitted says how much is missing. Truncation is
@@ -103,10 +104,12 @@ func (s Scope) orFull() Scope {
 // irrelevant and the honest treatment of what the harness does not know is to
 // show it.
 //
-// What diff drops is debt the run placed away from the change: a package the
-// author never opened, or a sibling file of one they did. Those are the rows a
-// reverse-dependency closure produces in the thousands, and they are the reason
-// this scope exists.
+// What diff drops is debt the change did not write: a finding that predates
+// the change in a file it edited, in a sibling file, or anywhere else in the
+// closure. A reverse-dependency closure produces those in the thousands and a
+// legacy file in the hundreds, and an author working a change has nothing to
+// do with any of them; Summary.DebtInChangedFiles counts the ones in edited
+// files so the debt stays visible without being read row by row.
 func (s Scope) Keeps(e evidence.Evidence) bool {
 	if verify.Blocking(e) || e.State == evidence.StateNew || e.State == evidence.StateFixed {
 		return true
@@ -115,7 +118,7 @@ func (s Scope) Keeps(e evidence.Evidence) bool {
 	case ScopeNew:
 		return false
 	case ScopeDiff:
-		return !e.Origin.OutsideChange()
+		return e.Origin.WrittenByChange()
 	default:
 		return true
 	}
@@ -140,6 +143,11 @@ type Summary struct {
 	ByDimension   map[string]int `json:"byDimension"`
 	ByRemedyClass map[string]int `json:"byRemedyClass"`
 	ByFile        map[string]int `json:"byFile"`
+	// DebtInChangedFiles counts, per file the change edited, the pre-existing
+	// advisory findings on lines it did not write. The diff view withholds
+	// those rows; the count is what says the file carries debt, and an audit
+	// is where that debt is judged.
+	DebtInChangedFiles map[string]int `json:"debtInChangedFiles"`
 }
 
 // Coverage states what the verdict does and does not rest on.
@@ -170,6 +178,8 @@ type Coverage struct {
 	// change in one package can create a genuine new finding in another.
 	LocalScanNarrowed bool     `json:"localScanNarrowed"`
 	LocalScanPackages []string `json:"localScanPackages"`
+	// Mutation is what the mutation check measured; absent when it did not run.
+	Mutation *verify.MutationCoverage `json:"mutation,omitzero"`
 	// BaseTestPackages names the test packages the base revision ran. The base
 	// runs a test package only where head's own run of it produced a failure or
 	// a leak, because those are the only rows a base result can reclassify;
@@ -254,7 +264,7 @@ type Versions struct {
 	GolangciLintMatches bool   `json:"golangciLintMatchesPin"`
 	GolangciLintSHA256  string `json:"golangciLintSha256"`
 	XVuln               string `json:"xVuln"`
-	Goleak              string `json:"goleak"`
+	LeakCheck           string `json:"leakCheck"`
 	UberGuideCommit     string `json:"uberGuideCommit"`
 }
 
@@ -412,7 +422,7 @@ func buildFull(version string, r verify.Result) Document {
 			GolangciLintMatches: r.Golangci.MatchesPin(),
 			GolangciLintSHA256:  r.Golangci.SHA256,
 			XVuln:               tool.XVulnVersion(),
-			Goleak:              leakcheck.Version,
+			LeakCheck:           leakcheck.Method,
 			UberGuideCommit:     policy.UberGuideCommit,
 		},
 		Module:           Module{Path: r.Repository.ModulePath, GoDirective: r.Repository.GoDirective},
@@ -437,18 +447,22 @@ func buildFull(version string, r verify.Result) Document {
 
 func buildSummary(findings []Finding) Summary {
 	s := Summary{
-		Total:         len(findings),
-		ByConsequence: map[string]int{},
-		ByRule:        map[string]int{},
-		ByDimension:   map[string]int{},
-		ByRemedyClass: map[string]int{},
-		ByFile:        map[string]int{},
+		Total:              len(findings),
+		ByConsequence:      map[string]int{},
+		ByRule:             map[string]int{},
+		ByDimension:        map[string]int{},
+		ByRemedyClass:      map[string]int{},
+		ByFile:             map[string]int{},
+		DebtInChangedFiles: map[string]int{},
 	}
 	for _, f := range findings {
 		if f.Blocking {
 			s.Blocking++
 		} else {
 			s.Advisory++
+			if f.State == evidence.StatePreexisting && f.Origin == evidence.OriginChangedFile {
+				s.DebtInChangedFiles[f.File]++
+			}
 		}
 		switch f.State {
 		case evidence.StateNew:
@@ -537,6 +551,7 @@ func buildCoverage(r verify.Result) Coverage {
 		TestPackageCount:     len(r.Execution.Tests),
 		TestPackages:         nonNil(r.Execution.Tests),
 		LeakInjectionBlocked: nonNil(r.LeakBlockedPackages),
+		Mutation:             r.Mutation,
 		LocalScanNarrowed:    r.Execution.LocalScope != nil,
 		LocalScanPackages:    nonNil(r.Execution.LocalScope),
 		BaseTestPackages:     nonNil(r.BaseTestPackages),
@@ -681,12 +696,30 @@ func WriteJSON(w io.Writer, version string, r verify.Result) error {
 
 // WriteJSONWithOptions renders the JSON report under rendering limits.
 func WriteJSONWithOptions(w io.Writer, version string, r verify.Result, opts Options) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(BuildWithOptions(version, r, opts)); err != nil {
+	if err := writeDocument(w, BuildWithOptions(version, r, opts)); err != nil {
 		return fmt.Errorf("writing JSON report: %w", err)
 	}
 	return nil
+}
+
+// documentOptions is how every document this package emits is encoded:
+// indented for a human, map keys sorted so two runs over one tree produce one
+// byte sequence, and no HTML escaping, because the document is JSON and not
+// markup. Reading needs no options: the defaults reject duplicate names and
+// invalid UTF-8, and ignore members this binary does not know, so a report
+// from a newer release still compares.
+func documentOptions() json.Options {
+	return json.JoinOptions(json.Deterministic(true), jsontext.Multiline(true), jsontext.WithIndent("  "))
+}
+
+// writeDocument encodes one document followed by a newline, so a file holds
+// exactly one line-terminated value the way every text tool expects.
+func writeDocument(w io.Writer, doc any) error {
+	if err := json.MarshalWrite(w, doc, documentOptions()); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, "\n")
+	return err
 }
 
 // DeterministicJSON renders the report with the timing block removed, which is
@@ -694,7 +727,7 @@ func WriteJSONWithOptions(w io.Writer, version string, r verify.Result, opts Opt
 func DeterministicJSON(version string, r verify.Result) ([]byte, error) {
 	doc := Build(version, r)
 	doc.Timing = Timing{ChecksMs: map[string]int64{}}
-	encoded, err := json.MarshalIndent(doc, "", "  ")
+	encoded, err := json.Marshal(doc, documentOptions())
 	if err != nil {
 		return nil, fmt.Errorf("encoding deterministic report: %w", err)
 	}

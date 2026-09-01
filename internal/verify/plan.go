@@ -24,16 +24,18 @@ const (
 	ModeAudit  Mode = "audit"
 )
 
-// ParseMode maps a command name onto a mode. deep is accepted as a deprecated
-// alias for audit.
-func ParseMode(name string) (Mode, bool) {
-	switch name {
-	case string(ModeFast), string(ModeVerify), string(ModeAudit):
-		return Mode(name), true
-	case "deep":
+// ParseMode maps a command name onto a mode.
+func ParseMode(command string) (Mode, bool) {
+	switch command {
+	case "fast":
+		return ModeFast, true
+	case "verify":
+		return ModeVerify, true
+	case "audit":
 		return ModeAudit, true
+	default:
+		return "", false
 	}
-	return "", false
 }
 
 // IsAdmissionGate reports whether a mode may declare a change complete. fast is
@@ -47,6 +49,22 @@ func (m Mode) IsAdmissionGate() bool {
 type checkResult struct {
 	evidence     []evidence.Evidence
 	unproducible []admission.Unproducible
+	mutation     *MutationCoverage
+}
+
+// MutationCoverage is what the mutation check measured, so a discharged
+// obligation says how much of the change it looked at rather than only that
+// nothing was found wanting.
+type MutationCoverage struct {
+	// Targets counts the changed functions offered to the mutation operators.
+	Targets int `json:"targets"`
+	// Mutants counts the defects generated from them.
+	Mutants  int `json:"mutants"`
+	Ran      int `json:"ran"`
+	Killed   int `json:"killed"`
+	Survived int `json:"survived"`
+	Unbuilt  int `json:"unbuilt"`
+	TimedOut int `json:"timedOut"`
 }
 
 type runFunc func(ctx context.Context) (checkResult, error)

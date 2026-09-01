@@ -1,7 +1,7 @@
 package report
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"slices"
@@ -340,9 +340,7 @@ func ParseDocument(name string, data []byte) (Document, error) {
 
 // WriteDiffJSON renders the comparison as the goharness.diff/v1 document.
 func WriteDiffJSON(w io.Writer, d Diff) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(d); err != nil {
+	if err := writeDocument(w, d); err != nil {
 		return fmt.Errorf("writing JSON diff: %w", err)
 	}
 	return nil

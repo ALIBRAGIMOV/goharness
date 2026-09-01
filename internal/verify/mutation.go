@@ -3,12 +3,11 @@ package verify
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"time"
-
-	"go.uber.org/zap"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/admission"
 	"github.com/ALIBRAGIMOV/goharness/internal/analyze"
@@ -37,23 +36,24 @@ const (
 // and reports whether any test noticed. The worktree is never written: each
 // mutant is a temporary file applied through a go build overlay.
 func (c *comparison) runMutation(ctx context.Context) (checkResult, error) {
-	targets, err := analyze.ChangedFunctions(ctx, c.base.root, c.head.root, c.head.changed)
+	targets, err := analyze.ChangedFunctions(ctx, c.base.tree.FS(), c.head.tree.FS(), c.head.changed)
 	if err != nil {
 		return checkResult{}, err
 	}
+	// A change that edits no function body, or whose functions offer the
+	// operators nothing to damage, has nothing a test could fail to notice.
+	// The obligation is discharged with the count that says so. Reporting it
+	// unproducible made a test-only change and a one-line accessor changes
+	// nobody could finish, with a remedy that asked for branches to exist.
 	if len(targets) == 0 {
-		return checkResult{unproducible: mutationUnproducible(
-			"the change edits no function body that could be mutated",
-			"change production code, or drop tests from the contract's declared risks")}, nil
+		return checkResult{mutation: &MutationCoverage{}}, nil
 	}
-	mutants, err := analyze.GenerateMutants(ctx, c.head.root, targets, MaxMutants)
+	mutants, err := analyze.GenerateMutants(ctx, c.head.tree.FS(), targets, MaxMutants)
 	if err != nil {
 		return checkResult{}, err
 	}
 	if len(mutants) == 0 {
-		return checkResult{unproducible: mutationUnproducible(
-			"no mutable construct was found in the changed functions",
-			"the changed code has no branch, comparison, or error return to mutate")}, nil
+		return checkResult{mutation: &MutationCoverage{Targets: len(targets)}}, nil
 	}
 
 	budget, cancel := context.WithTimeout(ctx, MutationBudget)
@@ -63,6 +63,8 @@ func (c *comparison) runMutation(ctx context.Context) (checkResult, error) {
 	if err != nil {
 		return checkResult{}, err
 	}
+	outcome.mutation.Targets = len(targets)
+	outcome.mutation.Mutants = len(mutants)
 	return outcome, nil
 }
 
@@ -228,10 +230,10 @@ func (c *comparison) runOneMutant(
 	}
 
 	c.engine.Logger.Debug("running mutant",
-		zap.String("file", mutant.File),
-		zap.Int("line", mutant.Line),
-		zap.String("operator", mutant.Operator),
-		zap.Strings("scope", patterns))
+		slog.String("file", mutant.File),
+		slog.Int("line", mutant.Line),
+		slog.String("operator", mutant.Operator),
+		slog.Any("scope", patterns))
 
 	attempt, cancel := context.WithTimeout(ctx, MutantTimeout)
 	defer cancel()
@@ -288,11 +290,20 @@ func (c *comparison) headPackageHasTests(pkgPath string) bool {
 	if !ok {
 		return false
 	}
-	hasTests, err := leakcheck.HasTestFiles(dir)
+	hasTests, err := leakcheck.HasTestFiles(c.head.tree.FS(), c.head.rel(dir))
 	return err == nil && hasTests
 }
 
 func (c *comparison) mutationResult(outcome mutationOutcome) checkResult {
+	result := c.mutationVerdict(outcome)
+	result.mutation = &MutationCoverage{
+		Ran: outcome.ran, Killed: outcome.killed, Survived: len(outcome.survived),
+		Unbuilt: outcome.unbuilt, TimedOut: outcome.timedOut,
+	}
+	return result
+}
+
+func (c *comparison) mutationVerdict(outcome mutationOutcome) checkResult {
 	switch {
 	case outcome.ran == 0 && outcome.timedOut > 0:
 		return checkResult{unproducible: mutationUnproducible(

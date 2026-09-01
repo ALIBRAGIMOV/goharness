@@ -5,11 +5,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
-
-	"go.uber.org/zap"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/admission"
 	"github.com/ALIBRAGIMOV/goharness/internal/analyze"
@@ -83,7 +82,7 @@ func (e *Engine) baseCacheKey(in baseCacheInput) string {
 		"gostdlib=" + e.GoVersion,
 		"golangci=" + e.Golangci.Version + "@" + e.Golangci.SHA256,
 		"xvuln=" + tool.XVulnVersion(),
-		"goleak=" + leakcheck.Version,
+		"leakcheck=" + leakcheck.Method,
 		"config=" + in.configDigest,
 		"base=" + in.base,
 		"analyze=" + in.analyzeOpts,
@@ -110,14 +109,14 @@ func (e *Engine) readBaseSnapshot(key string) (runOutput, bool) {
 	var doc baseSnapshot
 	if err := cache.ReadDerived(baseEvidenceKind, key, &doc); err != nil {
 		if !errors.Is(err, toolcache.ErrNotProvisioned) {
-			e.Logger.Info("base evidence cache unreadable", zap.String("key", key), zap.Error(err))
+			e.Logger.Info("base evidence cache unreadable", slog.String("key", key), slog.Any("error", err))
 		}
 		return runOutput{}, false
 	}
 	if doc.Goharness != e.Version {
 		return runOutput{}, false
 	}
-	e.Logger.Info("base evidence reused", zap.String("key", key), zap.String("base", doc.Base))
+	e.Logger.Info("base evidence reused", slog.String("key", key), slog.String("base", doc.Base))
 	return runOutput{
 		Evidence:     doc.Evidence,
 		Failures:     doc.Failures,
@@ -139,7 +138,7 @@ func (e *Engine) writeBaseSnapshot(key, base string, out runOutput) {
 		Unproducible: out.Unproducible, Produced: out.Produced,
 	}
 	if err := cache.WriteDerived(baseEvidenceKind, key, doc, toolcache.MaxDerivedEntries); err != nil {
-		e.Logger.Info("base evidence not cached", zap.String("key", key), zap.Error(err))
+		e.Logger.Info("base evidence not cached", slog.String("key", key), slog.Any("error", err))
 	}
 }
 

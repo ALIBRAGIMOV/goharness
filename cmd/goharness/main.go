@@ -10,26 +10,21 @@ import (
 	"github.com/ALIBRAGIMOV/goharness/internal/cli"
 )
 
-// signalBuffer holds both signals the harness reacts to, so the second one is
-// never dropped while the first is being handled.
-const signalBuffer = 2
-
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	signals := make(chan os.Signal, signalBuffer)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(signals)
-
-	// The watcher is deliberately process-scoped: the first signal cancels the
-	// run so it can drain and clean up and still report INCONCLUSIVE, and the
-	// second abandons the process immediately. It ends when the process does,
+	// The first signal cancels the run so it can drain, clean up and still
+	// report INCONCLUSIVE; the context carries which signal it was, so the
+	// report can say so. The second signal abandons the process at once. The
+	// watcher is process-scoped on purpose: it ends when the process does,
 	// which is the only lifetime that makes sense for a signal handler.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	abort := make(chan os.Signal, 1)
+	signal.Notify(abort, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(abort)
 	go func() {
-		<-signals
-		cancel()
-		<-signals
+		<-ctx.Done()
+		<-abort
 		os.Exit(cli.ExitAborted)
 	}()
 

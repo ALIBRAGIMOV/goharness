@@ -2,7 +2,8 @@ package cli_test
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,7 +36,7 @@ func TestVersionPrintsEveryPin(t *testing.T) {
 	}
 	for _, want := range []string{
 		cli.Version, policy.UberGuideCommit, report.SchemaID, "2.13.2",
-		tool.XVulnVersion(), leakcheck.Version,
+		tool.XVulnVersion(), leakcheck.Method,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("version output is missing %q:\n%s", want, out)
@@ -223,6 +224,16 @@ func TestJSONOutputIsValidAndSchemaTagged(t *testing.T) {
 	}
 }
 
+// fixtureExtraSource is the uncommitted, rule-clean addition every fixture
+// carries so that a run has a change to judge.
+const fixtureExtraSource = `package lib
+
+// Doubled returns twice the answer.
+func Doubled() int {
+	return 2 * Answer()
+}
+`
+
 const (
 	fixtureSource = `package lib
 
@@ -269,6 +280,10 @@ func newFixtureRepo(t *testing.T) string {
 	git(t, dir, "config", "user.name", "goharness fixture")
 	git(t, dir, "add", "-A")
 	git(t, dir, "commit", "--no-gpg-sign", "-m", "fixture baseline")
+	// The fixture is a change in progress: a clean file the commit does not
+	// hold. A tree with nothing to judge is INCONCLUSIVE by design, and the
+	// commands under test are about what they do with a change.
+	writeFile(t, filepath.Join(dir, "lib", "extra.go"), fixtureExtraSource)
 	return dir
 }
 
@@ -380,7 +395,7 @@ func TestNoArgumentsPrintsStructuredHelp(t *testing.T) {
 
 func TestEveryCommandHasHelp(t *testing.T) {
 	for _, command := range []string{
-		"verify", "audit", "fast", "deep", "explain", "diff", "fix", "doctor", "version",
+		"verify", "audit", "fast", "explain", "diff", "fix", "doctor", "version",
 	} {
 		t.Run(command, func(t *testing.T) {
 			code, out, _ := invoke(t, command, "-h")
@@ -394,19 +409,6 @@ func TestEveryCommandHasHelp(t *testing.T) {
 		})
 	}
 }
-
-func TestDeepPrintsADeprecationNote(t *testing.T) {
-	useGolangci(t)
-	dir := newFixtureRepo(t)
-	_, _, errOut := invoke(t, "deep", "--dir", dir)
-	if !strings.Contains(errOut, "deprecated") || !strings.Contains(errOut, "goharness audit") {
-		t.Fatalf("deep did not announce its deprecation:\n%s", errOut)
-	}
-}
-
-// TestAgentModeSplitsTheStreams is the agent protocol: stdout is exactly the
-// JSON document so it can be piped into a parser, and the human text goes to
-// stderr.
 func TestAgentModeSplitsTheStreams(t *testing.T) {
 	useGolangci(t)
 	dir := newFixtureRepo(t)
@@ -464,7 +466,7 @@ func TestAgentJSONIsDeterministicAcrossRuns(t *testing.T) {
 			t.Fatalf("invalid JSON: %v\n%s", err, raw)
 		}
 		delete(doc, "timing")
-		encoded, err := json.MarshalIndent(doc, "", "  ")
+		encoded, err := json.Marshal(doc, json.Deterministic(true), jsontext.Multiline(true), jsontext.WithIndent("  "))
 		if err != nil {
 			t.Fatalf("re-encoding: %v", err)
 		}
@@ -625,7 +627,7 @@ func jsonKeys(t *testing.T, value any) map[string]bool {
 	if err != nil {
 		t.Fatalf("marshalling %T: %v", value, err)
 	}
-	var decoded map[string]json.RawMessage
+	var decoded map[string]jsontext.Value
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatalf("decoding %T: %v", value, err)
 	}
@@ -688,7 +690,7 @@ func TestAgentProtocolNamesFieldsTheReportHas(t *testing.T) {
 // each one stops immediately after parsing.
 func TestDocumentedFlagsAreAccepted(t *testing.T) {
 	dir := t.TempDir()
-	for _, command := range []string{"verify", "audit", "fast", "deep", "doctor"} {
+	for _, command := range []string{"verify", "audit", "fast", "doctor"} {
 		t.Run(command, func(t *testing.T) {
 			_, help, _ := invoke(t, "help", command)
 			args := append([]string{command}, documentedFlags(t, help, dir)...)
@@ -893,7 +895,7 @@ func TestReportFileTakesTheDocumentOffTheStream(t *testing.T) {
 	if doc.Schema != report.SchemaID || doc.Verdict != "ADMITTED" {
 		t.Fatalf("the report file carries %+v", doc)
 	}
-	if json.Valid([]byte(out)) {
+	if jsontext.Value(out).IsValid() {
 		t.Fatalf("the document was written to stdout as well:\n%s", out)
 	}
 	if !strings.Contains(out, "ADMITTED") {

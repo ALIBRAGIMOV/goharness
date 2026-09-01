@@ -61,8 +61,8 @@ func (s *scanner) checkForbiddenImports() {
 }
 
 func packageDirOf(rel string) string {
-	if i := strings.LastIndex(rel, "/"); i >= 0 {
-		return rel[:i]
+	if dir, _, ok := strings.CutLast(rel, "/"); ok {
+		return dir
 	}
 	return "."
 }

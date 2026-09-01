@@ -1,7 +1,7 @@
 package cli_test
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,9 +16,12 @@ import (
 	"github.com/ALIBRAGIMOV/goharness/internal/toolcache/toolcachetest"
 )
 
-// useCache points the commands at a private cache root and returns it.
+// useCache points the commands at a private cache root and returns it. It
+// isolates the home directory as well, because setup installs the agent
+// skill there and a test must never write into the developer's own.
 func useCache(t *testing.T) *toolcache.Cache {
 	t.Helper()
+	useHome(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("resolving the cache root: %v", err)

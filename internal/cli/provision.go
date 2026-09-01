@@ -18,6 +18,7 @@ func runSetup(ctx context.Context, args []string, streams Streams) int {
 	fs.SetOutput(streams.Err)
 	platform := fs.String("platform", toolcache.CurrentPlatform(),
 		"provision for this os-arch instead of the current machine")
+	noSkill := fs.Bool("no-skill", false, "do not install the agent skill for Claude Code and Codex")
 	if err := fs.Parse(args); err != nil {
 		return ExitInconclusive
 	}
@@ -49,14 +50,32 @@ func runSetup(ctx context.Context, args []string, streams Streams) int {
 			return ExitInconclusive
 		}
 		reportSnapshot(out, "vuln database: already present", manifest)
+		provisionSkill(out, errOut, *noSkill)
 		out.line("\nsetup complete: nothing to download.")
 		return exitFor(out, ExitAdmitted)
 	}
 	if code := refreshSnapshot(ctx, out, errOut, cache, fetcher, "setup"); code != ExitAdmitted {
 		return code
 	}
+	provisionSkill(out, errOut, *noSkill)
 	out.line("\nsetup complete.")
 	return exitFor(out, ExitAdmitted)
+}
+
+// provisionSkill installs the agent skill for the current user as part of
+// setup, so provisioning the binary provisions the protocol an agent follows
+// with it. A copy that cannot be written is reported and does not fail the
+// setup: the tools were provisioned, and the skill has its own command.
+func provisionSkill(out, errOut *printer, skip bool) {
+	if skip {
+		return
+	}
+	targets, err := userSkillTargets()
+	if err != nil {
+		errOut.line("agent skill: not installed: %v", err)
+		return
+	}
+	installSkill(out, errOut, targets, false)
 }
 
 func provisionGolangci(

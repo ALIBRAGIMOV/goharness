@@ -1,7 +1,7 @@
 package verify_test
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,6 +21,7 @@ func runWith(t *testing.T, f *fixture, opts verify.Options) verify.Result {
 	if err != nil {
 		t.Fatalf("verify.Run(%s): %v", opts.Mode, err)
 	}
+	keepReport(t, result)
 	return result
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"go/ast"
+	"io/fs"
 	"maps"
 	"slices"
 	"strconv"
@@ -50,8 +51,8 @@ func (s *ParsedScope) Clones(ctx context.Context, generated map[string]bool) ([]
 
 // CloneFindings parses the given files and reports the functions among them
 // that share a statement shape.
-func CloneFindings(ctx context.Context, root string, relFiles []string) ([]Finding, error) {
-	scope, err := Parse(ctx, root, relFiles)
+func CloneFindings(ctx context.Context, tree fs.FS, relFiles []string) ([]Finding, error) {
+	scope, err := Parse(ctx, tree, relFiles)
 	if err != nil {
 		return nil, err
 	}

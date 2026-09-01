@@ -23,14 +23,14 @@ Commands
   explain       explain a rule ID, or a finding by fingerprint with --report
   diff          compare two reports: fixed, introduced, remaining, by identity
   doctor        report the environment, tool pins, cache, and stale state
-  help          print this text, "help <command>", or "help contract"
-  version       print the version and every pin
+  skill         print the agent skill, or install it for Claude Code and Codex
+  help, version this text, "help <command>", "help contract"; the version and pins
 
-Flags for verify, audit, fast and deep
+Flags for verify, audit and fast
   --json              emit the goharness.report/v2 document
   --agent             machine protocol: JSON on stdout, human text on stderr
   --report FILE       write the JSON document to FILE, not to stdout
-  --dir DIR           directory inside the module to verify (default ".")
+  --dir DIR           any directory inside the module to verify (default ".")
   --base REV          explicit base revision (verify only)
   --contract FILE     task contract (default: goharness.task.yaml, else implicit)
   --timeout DURATION  wall-clock budget (default 20m; audit is unlimited)
@@ -107,7 +107,6 @@ func perCommandUsage() map[string]string {
 	usage := verificationUsage()
 	maps.Copy(usage, provisioningUsage())
 	maps.Copy(usage, referenceUsage())
-	usage["deep"] = usage["audit"] + "\nNote: deep is a deprecated alias for audit.\n"
 	usage["update"] = usage["tools"]
 	return usage
 }
@@ -134,12 +133,14 @@ how close it sits to the code this change wrote:
   untouched        anywhere else in the reverse dependency closure
 
 --evidence selects which of them the report carries. verify defaults to diff:
-everything blocking, everything new or fixed, and the debt in the code this
-change is in. full prints the rest, new prints only what the change moved, and
-top prints full cut to --evidence-limit. Every mode keeps every blocking row,
-so a narrower report changes how much there is to read and never what has to
-be fixed; evidenceScope names the view and evidenceOmitted counts what it
-withheld.
+everything blocking, everything new or fixed, and every finding on a line this
+change wrote. Debt that predates the change in a file it edited is counted per
+file, in summary.debtInChangedFiles and on one line of the text report, rather
+than listed. full prints everything, new prints only what the change moved,
+and top prints full cut to --evidence-limit. Every mode keeps every blocking
+row, so a narrower report changes how much there is to read and never what
+has to be fixed; evidenceScope names the view and evidenceOmitted counts what
+it withheld.
 
 --report FILE writes the JSON document to a file and leaves the stream for the
 human report, which is what an editor or agent bridge with a short timeout
@@ -150,12 +151,16 @@ in one package can break another it never opened. Such a finding is new and
 untouched, and it blocks.
 
 Rules that block even on a finding the base revision already had, inline
-suppressions above all, do so where this change wrote or edited the code. One
-left in a file you are editing rejects the change; one in a package you never
-opened is reported as debt and rejects an audit instead.
+suppressions above all, do so on the lines this change wrote: one it adds,
+rewrites or moves rejects the change. One that predates the change, in a file
+it edited or anywhere else, is reported as debt and rejects an audit instead.
 
-The base revision is a commit that cannot change, so its evidence is cached
-and reused; --no-cache recomputes it and must reach the same verdict.
+The base revision is the merge-base with the default branch; on the default
+branch itself it is HEAD while the working tree carries uncommitted work, and
+the parent commit once everything is committed. --base names it explicitly,
+and the report records which applied. A commit cannot change, so base
+evidence is cached and reused; --no-cache recomputes it and must reach the
+same verdict.
 
 A task contract narrows scope or records a permission: see
 "goharness help contract".
@@ -225,15 +230,17 @@ Examples
 
 func provisioningUsage() map[string]string {
 	return map[string]string{
-		"setup": `usage: goharness setup [--platform OS-ARCH]
+		"setup": `usage: goharness setup [--platform OS-ARCH] [--no-skill]
 
 Provisions everything this machine is missing: the pinned golangci-lint
-release, verified against its checksum before extraction, and an initial
-vulnerability database snapshot. Idempotent, so running it twice downloads
-nothing the second time.
+release, verified against its checksum before extraction, an initial
+vulnerability database snapshot, and the agent skill, installed where Claude
+Code and Codex read skills from (--no-skill leaves it out; "goharness help
+skill" has the paths). Idempotent, so running it twice downloads nothing the
+second time.
 
-Together with "goharness tools update" this is the only command that reaches
-the network or writes the cache.
+Together with "goharness tools update" and "goharness skill install" this is
+the only command that reaches the network or writes outside the repository.
 
 Environment
   GOHARNESS_CACHE            where tools and snapshots live
@@ -243,6 +250,32 @@ Environment
 Examples
   goharness setup
   GOHARNESS_CACHE=/opt/goharness-cache goharness setup
+`,
+		"skill": `usage: goharness skill print
+       goharness skill install [--project] [--dir DIR] [--force]
+
+The agent skill: the completion protocol, the report's reading order and the
+routes an agent must not take, in the Agent Skills format that Claude Code
+and Codex read. "goharness setup" installs it for the current user; this
+command prints it, or installs it for a repository.
+
+  print       write the skill to stdout
+  install     write it where the agents read it:
+                ~/.claude/skills/goharness/SKILL.md   Claude Code
+                ~/.agents/skills/goharness/SKILL.md   Codex
+              --project writes the same two paths under the repository root
+              found from --dir (default "."), where a commit carries them to
+              every checkout and every cloud session
+  --force     replace a file at one of those paths that goharness did not
+              write; without it such a file is named and left alone
+
+A copy goharness wrote is replaced by every newer release, so the protocol an
+agent follows is always the one the installed binary enforces.
+
+Examples
+  goharness skill install
+  goharness skill install --project && git add .claude .agents
+  goharness skill print
 `,
 		"tools": `usage: goharness tools update [--platform OS-ARCH]
 
@@ -402,8 +435,8 @@ Examples
 // knownCommands is the set nearest-match suggestion searches.
 func knownCommands() []string {
 	return []string{
-		"verify", "audit", "fast", "deep", "setup", "tools", "fix",
-		"explain", "diff", "doctor", "help", "version",
+		"verify", "audit", "fast", "setup", "tools", "fix",
+		"explain", "diff", "doctor", "skill", "help", "version",
 	}
 }
 

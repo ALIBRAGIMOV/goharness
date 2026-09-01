@@ -160,8 +160,8 @@ func importLocalName(spec *ast.ImportSpec) string {
 		return spec.Name.Name
 	}
 	path := strings.Trim(spec.Path.Value, `"`)
-	if i := strings.LastIndex(path, "/"); i >= 0 {
-		path = path[i+1:]
+	if _, base, ok := strings.CutLast(path, "/"); ok {
+		return base
 	}
 	return path
 }

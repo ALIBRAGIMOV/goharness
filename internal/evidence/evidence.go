@@ -73,6 +73,12 @@ func (o Origin) InChange() bool {
 	return o == OriginAddedLine || o == OriginChangedFile
 }
 
+// WrittenByChange reports a finding on a line the change wrote, or one the run
+// could not place, which is treated as the change's throughout.
+func (o Origin) WrittenByChange() bool {
+	return o == OriginAddedLine || o == OriginUnscoped
+}
+
 // OutsideChange reports a finding the run placed, and placed away from the code
 // the change wrote or edited.
 //
@@ -117,8 +123,8 @@ type Evidence struct {
 	ToolVersion  string   `json:"toolVersion,omitempty"`
 	Severity     Severity `json:"severity"`
 	File         string   `json:"file,omitempty"`
-	Line         int      `json:"line,omitempty"`
-	Column       int      `json:"column,omitempty"`
+	Line         int      `json:"line,omitzero"`
+	Column       int      `json:"column,omitzero"`
 	Package      string   `json:"package,omitempty"`
 	Message      string   `json:"message"`
 	// Identity is what makes two findings the same finding, for the producers
@@ -143,7 +149,7 @@ type Evidence struct {
 	// handful of decisions.
 	RemedyClass string       `json:"remedyClass,omitempty"`
 	DocURL      string       `json:"docUrl,omitempty"`
-	Fix         *Remediation `json:"fix,omitempty"`
+	Fix         *Remediation `json:"fix,omitzero"`
 }
 
 // Consequence classes, as they appear on a finding. They are spelled here

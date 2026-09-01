@@ -110,7 +110,6 @@ func TestDiffScopeKeepsWhatTheChangeIsAnswerableFor(t *testing.T) {
 	for _, want := range []string{
 		"new defect in a file the change wrote",
 		"new defect the change caused elsewhere",
-		"debt in a file the change wrote",
 		"defect this change removed",
 		"a finding with nowhere to sit",
 	} {
@@ -124,10 +123,16 @@ func TestDiffScopeKeepsWhatTheChangeIsAnswerableFor(t *testing.T) {
 		// A sibling of a file the change wrote is the bucket that produced 846
 		// rows of noise on one merge request; the author never opened it.
 		"debt beside a file the change wrote",
+		// Debt on a line the change did not write, in a file it did edit, is
+		// the bucket a legacy file produces in the hundreds. It is counted.
+		"debt in a file the change wrote",
 	} {
 		if slices.Contains(kept, unwanted) {
 			t.Fatalf("--evidence diff kept %q, which the change did not write and did not cause", unwanted)
 		}
+	}
+	if got := doc.Summary.DebtInChangedFiles["changed.go"]; got != 1 {
+		t.Fatalf("debt in changed.go = %d, want 1: the withheld row has to be counted somewhere", got)
 	}
 }
 
@@ -203,7 +208,10 @@ func TestTheTextReportSaysWhatItIsNotShowing(t *testing.T) {
 	if !strings.Contains(out, "not shown") || !strings.Contains(out, "--evidence full") {
 		t.Fatalf("the text report does not say what it withheld or how to see it:\n%s", out)
 	}
-	if !strings.Contains(out, "debt in a file the change wrote") {
-		t.Fatalf("the text report dropped debt in a changed file:\n%s", out)
+	if strings.Contains(out, "debt in a file the change wrote") {
+		t.Fatalf("the text report listed debt on a line the change did not write:\n%s", out)
+	}
+	if !strings.Contains(out, "debt in edited files") || !strings.Contains(out, "changed.go 1") {
+		t.Fatalf("the text report does not count the edited-file debt it withheld:\n%s", out)
 	}
 }

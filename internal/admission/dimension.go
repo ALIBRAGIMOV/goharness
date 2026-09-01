@@ -86,6 +86,7 @@ func nativeDimensions() map[string]Dimension {
 		policy.RuleMutantsSurvived:     DimTestEffectiveness,
 		policy.RuleBenchTimeDelta:      DimPerformance,
 		policy.RuleBenchAllocDelta:     DimPerformance,
+		policy.RuleBenchBroken:         DimPerformance,
 		policy.RuleScopeViolation:      DimRequirements,
 	}
 }

@@ -17,7 +17,7 @@ func TestDetectRisksActivatesDomainsFromNonGoPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	profile, err := DetectRisks(t.Context(), DetectionInput{
-		Root:         root,
+		Tree:         os.DirFS(root),
 		ChangedFiles: []string{"go.mod", "migrations/002_add_index.sql", "docs/README.md"},
 	})
 	if err != nil {

@@ -31,6 +31,7 @@ const (
 	RuleNewDependency     = "GH-DEP-001"
 	RuleBenchTimeDelta    = "GH-PERF-001"
 	RuleBenchAllocDelta   = "GH-PERF-002"
+	RuleBenchBroken       = "GH-PERF-003"
 	RuleScopeViolation    = "GH-SCOPE-001"
 )
 
@@ -85,8 +86,8 @@ func concurrencyRules() []Rule {
 			Classification: ClassRequired,
 			Lifecycle:      LifecycleRequired,
 			Consequence:    ConsequenceUnsafeBehavior,
-			Rationale:      "A goroutine still alive after the package's tests finish escaped every cleanup path the tests exercised; in production the same code leaks goroutines per request. Detected at runtime by a pinned embedded goleak injected into the race run, so no test code changes are needed.",
-			Enforcement:    "embedded go.uber.org/goleak via go test -overlay, head only",
+			Rationale:      "A goroutine that is still blocked after the package's tests finish, on a channel or lock that nothing reachable can ever release, escaped every cleanup path the tests exercised; in production the same code leaks goroutines per request. Detected by the runtime's own goroutineleak profile, read by a TestMain goharness injects into the race run, so no test code changes are needed.",
+			Enforcement:    "runtime/pprof goroutineleak profile via a TestMain injected with go test -overlay, at head and at base",
 			DocURL:         modelDoc,
 		},
 		{
@@ -386,6 +387,17 @@ func diffEvidenceRules() []Rule {
 			Lifecycle:      LifecycleRequired,
 			Consequence:    ConsequenceStructural,
 			Rationale:      "Allocation counts are the least noisy performance signal Go exposes; a rise in them is a real change in behaviour.",
+			Enforcement:    "base/head benchmark comparison (internal/tool)",
+			DocURL:         modelDoc,
+		},
+		{
+			ID:             RuleBenchBroken,
+			Title:          "Benchmark fails at both revisions",
+			Pack:           PackDiffEvidence,
+			Classification: ClassAdvisory,
+			Lifecycle:      LifecycleAdvisory,
+			Consequence:    ConsequenceHygiene,
+			Rationale:      "A benchmark that panics or fails measures nothing. The comparison skips it so the benchmarks that run still judge the change, and records it here, because a performance claim discharged around a benchmark that cannot run is one the reader should see the shape of.",
 			Enforcement:    "base/head benchmark comparison (internal/tool)",
 			DocURL:         modelDoc,
 		},

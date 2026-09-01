@@ -11,10 +11,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"maps"
-	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -87,8 +86,8 @@ type ParsedScope struct {
 }
 
 // Parse reads and parses every given file once.
-func Parse(ctx context.Context, root string, relFiles []string) (*ParsedScope, error) {
-	units, err := parseUnits(ctx, root, relFiles)
+func Parse(ctx context.Context, tree fs.FS, relFiles []string) (*ParsedScope, error) {
+	units, err := parseUnits(ctx, tree, relFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -133,8 +132,8 @@ func (s *ParsedScope) Scan(ctx context.Context, opts Options) ([]Finding, error)
 }
 
 // Scan parses the given files and runs every enabled scanner family over them.
-func Scan(ctx context.Context, root string, relFiles []string, opts Options) ([]Finding, error) {
-	scope, err := Parse(ctx, root, relFiles)
+func Scan(ctx context.Context, tree fs.FS, relFiles []string, opts Options) ([]Finding, error) {
+	scope, err := Parse(ctx, tree, relFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +165,7 @@ func ScanFileWithOptions(relPath string, src []byte, opts Options) ([]Finding, e
 	return findings, nil
 }
 
-func parseUnits(ctx context.Context, root string, relFiles []string) ([]*unit, error) {
+func parseUnits(ctx context.Context, tree fs.FS, relFiles []string) ([]*unit, error) {
 	byDir := map[string][]string{}
 	for _, rel := range relFiles {
 		dir := path.Dir(rel)
@@ -181,7 +180,7 @@ func parseUnits(ctx context.Context, root string, relFiles []string) ([]*unit, e
 		}
 		u := &unit{dir: dir, fset: token.NewFileSet()}
 		for _, rel := range slices.Sorted(slices.Values(byDir[dir])) {
-			src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+			src, err := fs.ReadFile(tree, rel)
 			if err != nil {
 				return nil, fmt.Errorf("reading %s: %w", rel, err)
 			}

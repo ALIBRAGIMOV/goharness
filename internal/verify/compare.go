@@ -2,9 +2,10 @@ package verify
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -92,11 +93,11 @@ func (c *comparison) runAPICompat(ctx context.Context) (checkResult, error) {
 }
 
 func (c *comparison) runMaintainability(ctx context.Context) (checkResult, error) {
-	headMetrics, err := analyze.ComputeMetrics(ctx, c.head.root, c.head.files)
+	headMetrics, err := analyze.ComputeMetrics(ctx, c.head.tree.FS(), c.head.files)
 	if err != nil {
 		return checkResult{}, err
 	}
-	baseMetrics, err := analyze.ComputeMetrics(ctx, c.base.root, c.base.files)
+	baseMetrics, err := analyze.ComputeMetrics(ctx, c.base.tree.FS(), c.base.files)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -105,16 +106,16 @@ func (c *comparison) runMaintainability(ctx context.Context) (checkResult, error
 }
 
 func (c *comparison) runAntiWeakening(ctx context.Context) (checkResult, error) {
-	headShapes, err := analyze.TestShapes(ctx, c.head.root, c.head.files)
+	headShapes, err := analyze.TestShapes(ctx, c.head.tree.FS(), c.head.files)
 	if err != nil {
 		return checkResult{}, err
 	}
-	baseShapes, err := analyze.TestShapes(ctx, c.base.root, c.base.files)
+	baseShapes, err := analyze.TestShapes(ctx, c.base.tree.FS(), c.base.files)
 	if err != nil {
 		return checkResult{}, err
 	}
 	survives := func(dir string) bool {
-		_, err := os.Stat(filepath.Join(c.head.root, filepath.FromSlash(dir)))
+		_, err := fs.Stat(c.head.tree.FS(), dir)
 		return err == nil
 	}
 	findings := analyze.WeakeningFindings(baseShapes, headShapes, survives)
@@ -135,26 +136,49 @@ func (c *comparison) runBenchmarks(ctx context.Context) (checkResult, error) {
 	patterns := c.head.graph.PatternsFor(changed)
 	if len(patterns) == 0 {
 		return checkResult{unproducible: unmeasurableBench(
-			"no package the change edited could be benchmarked")}, nil
+			"no package the change edited could be benchmarked", benchRemedy)}, nil
 	}
 	// Named from the head scope so that both revisions measure the same packages
 	// whatever the base tree happens to hold.
 	basePatterns := c.base.graph.PatternsFor(changed)
-	baseResults, headResults, err := c.sampleBenchmarks(ctx, basePatterns, patterns)
+	baseRun, headRun, err := c.sampleBenchmarks(ctx, basePatterns, patterns)
 	if err != nil {
 		return checkResult{}, err
 	}
-	common := tool.BenchmarkNames(baseResults, headResults)
-	if len(common) == 0 {
-		return checkResult{unproducible: unmeasurableBench(
-			"no benchmark ran at both base and head")}, nil
+
+	var result checkResult
+	// A benchmark that fails at both revisions measured nothing about the
+	// change and is reported as the debt it is; one that fails only at head
+	// ran at base, so the change is what broke it, and the claim it feeds
+	// cannot be discharged around it.
+	for _, name := range slices.Sorted(maps.Keys(headRun.Broken)) {
+		broken := headRun.Broken[name]
+		if _, atBase := baseRun.Broken[name]; !atBase {
+			result.unproducible = append(result.unproducible, unmeasurableBench(
+				name+" fails at head and ran at the base revision: "+broken.Output,
+				"fix the benchmark; it ran before this change")...)
+			continue
+		}
+		e := c.head.newEvidence(policy.RuleBenchBroken, "go test -bench", tool.GoVersion(),
+			evidence.SeverityWarning, "", 0, 0, broken.Package,
+			name+" fails at the base revision and at head, so it measures nothing: "+broken.Output)
+		e.Identity = policy.RuleBenchBroken + " " + broken.Package + " " + name
+		result.evidence = append(result.evidence, c.head.engine.Policy.Decorate(e))
 	}
 
-	var out []evidence.Evidence
-	for _, name := range common {
-		out = append(out, c.compareBenchmark(name, baseResults[name], headResults[name])...)
+	common := tool.BenchmarkNames(baseRun.Results, headRun.Results)
+	if len(common) == 0 && len(result.unproducible) == 0 {
+		reason := "no benchmark ran at both base and head"
+		if broken := slices.Sorted(maps.Keys(headRun.Broken)); len(broken) > 0 {
+			reason += "; failing: " + strings.Join(broken, ", ")
+		}
+		result.unproducible = unmeasurableBench(reason, benchRemedy)
 	}
-	return checkResult{evidence: out}, nil
+	for _, name := range common {
+		result.evidence = append(result.evidence,
+			c.compareBenchmark(name, baseRun.Results[name], headRun.Results[name])...)
+	}
+	return result, nil
 }
 
 // sampleBenchmarks measures both revisions, alternating between them.
@@ -167,33 +191,34 @@ func (c *comparison) runBenchmarks(ctx context.Context) (checkResult, error) {
 // rather than the weather.
 func (c *comparison) sampleBenchmarks(
 	ctx context.Context, basePatterns, headPatterns []string,
-) (base, head map[string]tool.BenchResult, err error) {
-	base, head = map[string]tool.BenchResult{}, map[string]tool.BenchResult{}
+) (base, head tool.BenchRun, err error) {
+	base = tool.BenchRun{Results: map[string]tool.BenchResult{}, Broken: map[string]tool.BrokenBenchmark{}}
+	head = tool.BenchRun{Results: map[string]tool.BenchResult{}, Broken: map[string]tool.BrokenBenchmark{}}
 	for range tool.BenchSamples {
-		baseSample, err := tool.RunBenchmarks(ctx, c.engine.Runner, c.base.root, basePatterns)
+		baseSample, err := tool.RunBenchmarks(ctx, c.engine.Runner, c.base.root,
+			basePatterns, slices.Sorted(maps.Keys(base.Broken)))
 		if err != nil {
-			return nil, nil, err
+			return tool.BenchRun{}, tool.BenchRun{}, err
 		}
-		headSample, err := tool.RunBenchmarks(ctx, c.engine.Runner, c.head.root, headPatterns)
+		headSample, err := tool.RunBenchmarks(ctx, c.engine.Runner, c.head.root,
+			headPatterns, slices.Sorted(maps.Keys(head.Broken)))
 		if err != nil {
-			return nil, nil, err
+			return tool.BenchRun{}, tool.BenchRun{}, err
 		}
-		tool.MergeBenchResults(base, baseSample)
-		tool.MergeBenchResults(head, headSample)
+		tool.MergeBenchResults(base.Results, baseSample.Results)
+		tool.MergeBenchResults(head.Results, headSample.Results)
+		maps.Copy(base.Broken, baseSample.Broken)
+		maps.Copy(head.Broken, headSample.Broken)
 	}
 	return base, head, nil
 }
 
-func unmeasurableBench(reason string) []admission.Unproducible {
+const benchRemedy = "add a Benchmark function to the changed package, or remove hot-path from the contract's declared risks"
+
+func unmeasurableBench(reason, remedy string) []admission.Unproducible {
 	return []admission.Unproducible{
-		{
-			Kind: admission.KindBenchDelta, Reason: reason,
-			Remedy: "add a Benchmark function to the changed package, or remove hot-path from the contract's declared risks",
-		},
-		{
-			Kind: admission.KindAllocDelta, Reason: reason,
-			Remedy: "add a Benchmark function to the changed package, or remove hot-path from the contract's declared risks",
-		},
+		{Kind: admission.KindBenchDelta, Reason: reason, Remedy: remedy},
+		{Kind: admission.KindAllocDelta, Reason: reason, Remedy: remedy},
 	}
 }
 
@@ -260,14 +285,14 @@ func regression(base, head, budgetPercent float64) (float64, bool) {
 // than a defect, and the finding exists so that the decision is seen as one
 // instead of passing as a line in a lockfile.
 func (c *comparison) runDependencies(_ context.Context) (checkResult, error) {
-	headSrc, err := os.ReadFile(filepath.Join(c.head.root, "go.mod"))
+	headSrc, err := c.head.tree.ReadFile("go.mod")
 	if err != nil {
 		return checkResult{}, fmt.Errorf("reading go.mod at head: %w", err)
 	}
 	// A base without a go.mod required nothing, so every head requirement is
 	// an addition; the module itself being new is the change's business.
-	baseSrc, err := os.ReadFile(filepath.Join(c.base.root, "go.mod"))
-	if err != nil && !os.IsNotExist(err) {
+	baseSrc, err := c.base.tree.ReadFile("go.mod")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return checkResult{}, fmt.Errorf("reading go.mod at base: %w", err)
 	}
 	direct := map[string]bool{}

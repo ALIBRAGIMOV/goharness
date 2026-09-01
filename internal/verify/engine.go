@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"maps"
 	"os"
 	"path"
@@ -14,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
@@ -32,14 +33,17 @@ import (
 type Engine struct {
 	Runner         tool.Runner
 	Git            repo.Git
-	Logger         *zap.Logger
+	Logger         *slog.Logger
 	Policy         policy.ResolvedPolicy
 	Golangci       tool.Golangci
 	GolangciConfig string
 	Version        string
 	Concurrency    int64
 	ChangedEntries []change.Entry
-	Progress       func(ProgressEvent)
+	// EmptyChange says the run had a base revision to diff against and the diff
+	// held nothing, in this module or outside it: there is no change to admit.
+	EmptyChange bool
+	Progress    func(ProgressEvent)
 	// ConfigDigest identifies the project configuration in force, so cached
 	// evidence produced under a different policy is never reused.
 	ConfigDigest string
@@ -76,6 +80,7 @@ type checkOutcome struct {
 	tool         string
 	evidence     []evidence.Evidence
 	unproducible []admission.Unproducible
+	mutation     *MutationCoverage
 	failure      error
 	skipped      bool
 	blocking     bool
@@ -91,6 +96,7 @@ type runOutput struct {
 	Produced     []admission.EvidenceKind
 	Unproducible []admission.Unproducible
 	Timings      map[string]time.Duration
+	Mutation     *MutationCoverage
 }
 
 func (o *runOutput) merge(other runOutput) {
@@ -99,6 +105,9 @@ func (o *runOutput) merge(other runOutput) {
 	o.Skipped = append(o.Skipped, other.Skipped...)
 	o.Produced = append(o.Produced, other.Produced...)
 	o.Unproducible = append(o.Unproducible, other.Unproducible...)
+	if other.Mutation != nil {
+		o.Mutation = other.Mutation
+	}
 	if o.Timings == nil {
 		o.Timings = map[string]time.Duration{}
 	}
@@ -268,19 +277,20 @@ func (e *Engine) runOne(ctx context.Context, check Check, total int) (outcome ch
 			outcome.failure = fmt.Errorf("check %s panicked: %v\n%s",
 				check.ID, recovered, debug.Stack())
 		}
-		e.Logger.Info("check finished",
-			zap.String("check", check.ID),
-			zap.Duration("elapsed", outcome.elapsed),
-			zap.Bool("failed", outcome.failure != nil))
+		e.Logger.LogAttrs(ctx, slog.LevelInfo, "check finished",
+			slog.String("check", check.ID),
+			slog.Duration("elapsed", outcome.elapsed),
+			slog.Bool("failed", outcome.failure != nil))
 	}()
 
-	e.Logger.Info("check started", zap.String("check", check.ID))
+	e.Logger.LogAttrs(ctx, slog.LevelInfo, "check started", slog.String("check", check.ID))
 	result, err := check.run(ctx)
 	if err == nil {
 		err = pathHygiene(check.ID, result.evidence)
 	}
 	outcome.evidence = result.evidence
 	outcome.unproducible = result.unproducible
+	outcome.mutation = result.mutation
 	outcome.failure = err
 	outcome.blocking = check.ID == admission.ProducerCompile && len(result.evidence) > 0
 	return outcome
@@ -316,6 +326,9 @@ func collect(checks []Check, outcomes []checkOutcome) runOutput {
 		default:
 			out.Evidence = append(out.Evidence, o.evidence...)
 			out.Unproducible = append(out.Unproducible, o.unproducible...)
+			if o.mutation != nil {
+				out.Mutation = o.mutation
+			}
 			for _, u := range o.unproducible {
 				unproduced[u.Kind] = true
 			}
@@ -405,27 +418,28 @@ func hintFor(checkID string) string {
 	case admission.ProducerMutation:
 		return "add a test that exercises the changed functions"
 	case admission.ProducerBenchmark:
-		return "add a Benchmark function to the changed package"
+		return "the benchmark run failed before it measured anything; the reason above is its output, " +
+			"and `go test -run '^$' -bench . ` on the changed packages reproduces it"
 	default:
 		return ""
 	}
 }
 
-// Blocking reports whether one piece of evidence can fail its claim.
+// Blocking reports whether one finding stops admission.
 //
-// The ungrandfatherable core needs the second condition. Those rules block on a
-// pre-existing finding too, because a suppression that rides in on history is
-// still a suppression, but enforcing that across a reverse-dependency closure
-// means a legacy repository can never admit anything: on one production monorepo
-// 429 historical rows failed policy-integrity for every merge request, a
-// repository-hygiene goal enforced by a change gate that no author clears inside
-// a branch.
+// A required finding blocks unless the base revision already had it. The
+// ungrandfatherable core, inline suppressions above all, blocks on a
+// pre-existing finding too, but only on a line this change wrote: one it
+// leaves as it found it, in a file it edits, is the repository's debt,
+// reported beside the change and rejected by an audit, where no ledger may
+// acknowledge it. Enforcing the core across every file a change opens made
+// a legacy monorepo unable to admit anything, and the author of a change
+// could neither fix a directive they did not write nor except it, because
+// the exception is a policy edit no change may grant itself.
 //
-// So such a finding blocks unless the run placed it away from the change.
-// Nothing about the anti-laundering property moves: one the change adds is new
-// and blocks wherever it is, one it leaves in a file it edits blocks, and the
-// repository is cleaned by the traffic through it. An audit places nothing, so
-// an audit blocks on all of them and no ledger may acknowledge them.
+// Nothing about the anti-laundering property moves: a suppression the change
+// adds is new and blocks wherever it is, one it rewrites or moves sits on an
+// added line and blocks, and one the run could not place is the change's.
 func Blocking(e evidence.Evidence) bool {
 	if e.Classification != evidence.ClassificationRequired {
 		return false
@@ -434,7 +448,7 @@ func Blocking(e evidence.Evidence) bool {
 	case evidence.StateFixed:
 		return false
 	case evidence.StatePreexisting:
-		return policy.IsUngrandfatherable(e.RuleID) && !e.Origin.OutsideChange()
+		return policy.IsUngrandfatherable(e.RuleID) && e.Origin.WrittenByChange()
 	default:
 		return true
 	}
@@ -449,7 +463,7 @@ type Options struct {
 	Now          time.Time
 	Limit        int64
 	Timeout      time.Duration
-	Logger       *zap.Logger
+	Logger       *slog.Logger
 	Progress     func(ProgressEvent)
 	// PlanOnly stops the run once the obligation set is known, which is what
 	// --explain-plan needs: the plan without paying for the evidence.
@@ -488,6 +502,8 @@ type Result struct {
 	// LeakBlockedPackages names the test packages where goroutine-leak
 	// verification could not be injected because a TestMain already exists.
 	LeakBlockedPackages []string
+	// Mutation is what the mutation check measured, nil when it did not run.
+	Mutation *MutationCoverage
 	// BaseTestPackages names the test packages the base revision ran, which are
 	// exactly the ones whose head evidence a base result can reclassify, and
 	// empty when head's suite passed. A base that ran less than head has to say
@@ -607,7 +623,7 @@ type runSetup struct {
 func prepare(ctx context.Context, version string, opts Options) (runSetup, error) {
 	logger := opts.Logger
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.DiscardHandler)
 	}
 	runner := tool.ExecRunner{}
 	git := repo.ExecGit{Runner: runner}
@@ -662,6 +678,8 @@ func prepare(ctx context.Context, version string, opts Options) (runSetup, error
 	engine := &Engine{
 		Runner: runner, Git: git, Logger: logger, Policy: resolved,
 		Version: version, Concurrency: opts.Limit, ChangedEntries: cs.Entries,
+		EmptyChange: opts.Mode != ModeAudit && !cs.FullScope &&
+			len(cs.Entries) == 0 && len(cs.OutsideModule) == 0,
 		Progress: opts.Progress, ConfigDigest: configDigest,
 		NoCache: opts.NoCache, Debt: ledger, phase: "head",
 	}
@@ -696,8 +714,13 @@ func prepare(ctx context.Context, version string, opts Options) (runSetup, error
 // predates the change under verification, so the change cannot have written it.
 func resolveContract(
 	ctx context.Context, git repo.Git, r repo.Repository, base, explicitPath string,
-) (admission.TaskContract, error) {
-	head, err := admission.LoadContract(explicitPath, r.Root)
+) (_ admission.TaskContract, err error) {
+	tree, err := os.OpenRoot(r.Root)
+	if err != nil {
+		return admission.TaskContract{}, fmt.Errorf("opening %s: %w", r.Root, err)
+	}
+	defer func() { err = errors.Join(err, tree.Close()) }()
+	head, err := admission.LoadContract(explicitPath, tree.FS())
 	if err != nil {
 		return admission.TaskContract{}, err
 	}
@@ -779,6 +802,12 @@ func interrupted(parent, run context.Context, err error) bool {
 
 func interruptedResult(result Result, parent, run context.Context, started time.Time) Result {
 	reason, kind := "interrupted", "the run was cancelled before it could gather evidence"
+	// The parent context says why it was cancelled: os/signal names the signal
+	// in the cause, and a reader deciding whether a CI runner was preempted or
+	// a person pressed Ctrl+C deserves that word rather than "cancelled".
+	if cause := context.Cause(parent); cause != nil && !errors.Is(cause, context.Canceled) {
+		kind = "the run was stopped by " + cause.Error() + " before it could gather evidence"
+	}
 	result.Interrupted = true
 	if errors.Is(run.Err(), context.DeadlineExceeded) && parent.Err() == nil {
 		reason, kind = "timed out", "the run exceeded its --timeout before it could gather evidence"
@@ -880,7 +909,7 @@ type executeInput struct {
 	planOnly   bool
 }
 
-func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error) {
+func (e *Engine) execute(ctx context.Context, in executeInput) (_ runOutput, err error) {
 	repositoryWide := in.mode == ModeAudit || in.change.FullScope
 	baseAvailable := in.mode == ModeVerify && in.change.HasBase() && in.repository.HasGit
 
@@ -893,9 +922,10 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 	if err != nil {
 		return runOutput{}, err
 	}
+	defer func() { err = errors.Join(err, headTarget.close()) }()
 
 	risks, err := admission.DetectRisks(ctx, admission.DetectionInput{
-		Root:         in.repository.Root,
+		Tree:         headTarget.tree.FS(),
 		ChangedFiles: in.change.Files, // every file: a migration or a go.mod edit activates a domain by its path
 		ScopeFiles:   headTarget.files,
 		Contract:     in.contract,
@@ -918,10 +948,10 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 	in.result.Execution = execution
 	in.result.GeneratedExempt = slices.Sorted(maps.Keys(headTarget.exemptFiles))
 
-	e.Logger.Info("plan built",
-		zap.Int("packages", len(execution.Packages)),
-		zap.Int("obligations", len(plan.Obligations)),
-		zap.Int("checks", len(execution.Checks)))
+	e.Logger.LogAttrs(ctx, slog.LevelInfo, "plan built",
+		slog.Int("packages", len(execution.Packages)),
+		slog.Int("obligations", len(plan.Obligations)),
+		slog.Int("checks", len(execution.Checks)))
 
 	if in.planOnly {
 		return runOutput{Timings: map[string]time.Duration{}}, nil
@@ -994,6 +1024,7 @@ func (e *Engine) compareWithBase(
 	if err != nil {
 		return err
 	}
+	defer func() { err = errors.Join(err, baseTarget.close()) }()
 	baseTarget.analyzeOpts = headTarget.analyzeOpts
 	// The base runs its tests the way head ran them, leak detector included:
 	// a leak head found in a package the base also leaks in is pre-existing
@@ -1031,6 +1062,7 @@ func (e *Engine) compareWithBase(
 	}
 	comparisonRun.Evidence = evidence.Finalize(decorate(e.Policy, comparisonRun.Evidence))
 	out.merge(comparisonRun)
+	in.result.Mutation = comparisonRun.Mutation
 	evidence.SortPresentation(out.Evidence)
 	return nil
 }
@@ -1152,10 +1184,15 @@ func snapshotIfGit(ctx context.Context, git repo.Git, r repo.Repository) (repo.S
 // loadProjectConfig reads the project policy and returns a digest of the exact
 // bytes it was parsed from, which is what tells cached evidence apart from
 // evidence produced under a policy that has since been edited.
-func loadProjectConfig(root string) (policy.Config, string, error) {
-	data, err := os.ReadFile(filepath.Join(root, policy.ConfigFileName))
+func loadProjectConfig(root string) (_ policy.Config, _ string, err error) {
+	tree, err := os.OpenRoot(root)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		return policy.Config{}, "", fmt.Errorf("opening %s: %w", root, err)
+	}
+	defer func() { err = errors.Join(err, tree.Close()) }()
+	data, err := tree.ReadFile(policy.ConfigFileName)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			return policy.Config{}, "none", nil
 		}
 		return policy.Config{}, "", fmt.Errorf("reading %s: %w", policy.ConfigFileName, err)
@@ -1187,7 +1224,7 @@ func decorate(p policy.ResolvedPolicy, items []evidence.Evidence) []evidence.Evi
 // words of comment into a suppression for a whole file. The decision reads the
 // head diff in both trees, so a regenerated file is examined at base and at
 // head alike and its unchanged findings stay pre-existing debt.
-func (e *Engine) partitionGenerated(root string, files []string) (p generatedPartition, err error) {
+func (e *Engine) partitionGenerated(tree fs.FS, files []string) (p generatedPartition, err error) {
 	changed := make(map[string]bool, len(e.ChangedEntries))
 	for _, entry := range e.ChangedEntries {
 		if entry.Status != change.StatusDeleted {
@@ -1200,7 +1237,7 @@ func (e *Engine) partitionGenerated(root string, files []string) (p generatedPar
 		generated: map[string]bool{},
 	}
 	for _, rel := range files {
-		generated, genErr := analyze.IsGenerated(filepath.Join(root, filepath.FromSlash(rel)))
+		generated, genErr := analyze.IsGenerated(tree, rel)
 		if genErr != nil {
 			return generatedPartition{}, genErr
 		}
@@ -1297,13 +1334,17 @@ func (e *Engine) buildTarget(ctx context.Context, in targetInput) (*target, Exec
 	if err != nil {
 		return nil, ExecutionPlan{}, err
 	}
-	partition, err := e.partitionGenerated(in.root, files)
+	tree, err := os.OpenRoot(in.root)
 	if err != nil {
-		return nil, ExecutionPlan{}, err
+		return nil, ExecutionPlan{}, fmt.Errorf("opening %s: %w", in.root, err)
+	}
+	partition, err := e.partitionGenerated(tree.FS(), files)
+	if err != nil {
+		return nil, ExecutionPlan{}, errors.Join(err, tree.Close())
 	}
 
 	t := &target{
-		engine: e, root: in.root, modulePath: in.modulePath, graph: graph,
+		engine: e, root: in.root, tree: tree, modulePath: in.modulePath, graph: graph,
 		packages: lintPkgs, testPackages: testPkgs,
 		files: files, judged: partition.judged, exemptFiles: partition.exempt,
 		generatedFiles: partition.generated,

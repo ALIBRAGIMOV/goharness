@@ -24,7 +24,7 @@ import (
 )
 
 // Version is the harness version recorded in every report.
-const Version = "0.9.0"
+const Version = "0.10.0"
 
 // Exit codes. They are the harness's contract with any caller.
 const (
@@ -64,7 +64,7 @@ func Main(ctx context.Context, args []string, streams Streams) int {
 		return exitFor(p, ExitAdmitted)
 	}
 	switch command {
-	case "fast", "verify", "audit", "deep":
+	case "fast", "verify", "audit":
 		return runVerification(ctx, command, rest, streams)
 	case "setup":
 		return runSetup(ctx, rest, streams)
@@ -78,6 +78,8 @@ func Main(ctx context.Context, args []string, streams Streams) int {
 		return runDiff(rest, streams)
 	case "doctor":
 		return runDoctor(ctx, rest, streams)
+	case "skill":
+		return runSkill(ctx, rest, streams)
 	case "version":
 		return runVersion(streams)
 	case "help", "-h", "--help":
@@ -266,13 +268,8 @@ func runVerification(ctx context.Context, command string, args []string, streams
 		errOut.line("--jobs must be zero or a positive count, got %d", flags.jobs)
 		return ExitInconclusive
 	}
-	if command == "deep" {
-		errOut.line("note: `deep` is deprecated and now runs `audit`; use `goharness audit`")
-	}
 
-	logger := newLogger(streams.Err, LogOptions{
-		Verbosity: flags.verbosity, JSON: flags.logJSON, Quiet: flags.agent,
-	})
+	logger := newLogger(streams.Err, LogOptions{Verbosity: flags.verbosity, JSON: flags.logJSON})
 	reportOut, textOut := streams.Out, streams.Out
 	if flags.agent {
 		textOut = streams.Err
@@ -285,9 +282,6 @@ func runVerification(ctx context.Context, command string, args []string, streams
 		PlanOnly: flags.explainPlan, NoCache: flags.noCache,
 	})
 	bar.Clear()
-	if syncErr := syncLogger(logger); syncErr != nil {
-		errOut.line("goharness %s: %v", command, syncErr)
-	}
 	if err != nil {
 		errOut.line("goharness %s: %v", command, err)
 		if errors.Is(err, verify.ErrNotAModule) {
@@ -611,7 +605,7 @@ func runVersion(streams Streams) int {
 	out.line("go:              %s", tool.GoVersion())
 	out.line("golangci-lint:   %s (exact pin)", tool.GolangciLintPin)
 	out.line("x/vuln:          %s (embedded)", tool.XVulnVersion())
-	out.line("goleak:          %s (vendored)", leakcheck.Version)
+	out.line("leak check:      %s, from the toolchain above", leakcheck.Method)
 	out.line("go fix:          %d analyzers, from the toolchain above", len(policy.GoFixAnalyzers()))
 	out.line("uber guide:      %s", policy.UberGuideCommit)
 	out.line("report schema:   %s", report.SchemaID)

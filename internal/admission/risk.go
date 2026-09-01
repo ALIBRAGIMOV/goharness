@@ -2,13 +2,13 @@ package admission
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
+	"io/fs"
 	"path"
-	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -77,7 +77,7 @@ func (p *RiskProfile) normalize() {
 // DetectionInput is what risk detection reads: the changed files, the files of
 // the packages in scope (to find benchmarks), and the tree to read them from.
 type DetectionInput struct {
-	Root         string
+	Tree         fs.FS
 	ChangedFiles []string
 	ScopeFiles   []string
 	Contract     TaskContract
@@ -116,7 +116,7 @@ func DetectRisks(ctx context.Context, in DetectionInput) (RiskProfile, error) {
 		if !strings.HasSuffix(rel, ".go") {
 			continue
 		}
-		if err := detectInFile(in.Root, rel, &profile); err != nil {
+		if err := detectInFile(in.Tree, rel, &profile); err != nil {
 			return RiskProfile{}, err
 		}
 	}
@@ -148,10 +148,10 @@ func isMigrationPath(rel string) bool {
 	return false
 }
 
-func detectInFile(root, rel string, profile *RiskProfile) error {
-	src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+func detectInFile(tree fs.FS, rel string, profile *RiskProfile) error {
+	src, err := fs.ReadFile(tree, rel)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("reading %s for risk detection: %w", rel, err)
@@ -294,7 +294,7 @@ func detectBenchmarks(ctx context.Context, in DetectionInput, profile *RiskProfi
 		if !strings.HasSuffix(rel, "_test.go") || !changedDirs[path.Dir(rel)] {
 			continue
 		}
-		src, err := os.ReadFile(filepath.Join(in.Root, filepath.FromSlash(rel)))
+		src, err := fs.ReadFile(in.Tree, rel)
 		if err != nil {
 			continue
 		}

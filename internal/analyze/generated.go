@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"io/fs"
 	"strings"
 )
 
@@ -20,10 +20,10 @@ const generatedHeaderLimit = 64 << 10
 // The marker is a claim, not a fact: any author can type it. Callers use it to
 // decide what a change is not responsible for, never to decide that code is
 // correct.
-func IsGenerated(path string) (_ bool, err error) {
-	file, err := os.Open(path)
+func IsGenerated(tree fs.FS, rel string) (_ bool, err error) {
+	file, err := tree.Open(rel)
 	if err != nil {
-		return false, fmt.Errorf("reading %s: %w", path, err)
+		return false, fmt.Errorf("reading %s: %w", rel, err)
 	}
 	defer func() { err = errors.Join(err, file.Close()) }()
 
@@ -38,7 +38,7 @@ func IsGenerated(path string) (_ bool, err error) {
 		}
 	}
 	if scanErr := lines.Err(); scanErr != nil {
-		return false, fmt.Errorf("reading %s: %w", path, scanErr)
+		return false, fmt.Errorf("reading %s: %w", rel, scanErr)
 	}
 	return false, nil
 }

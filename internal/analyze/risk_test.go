@@ -3,6 +3,7 @@ package analyze_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -306,7 +307,7 @@ func metricsFor(t *testing.T, name, src string) analyze.Metrics {
 	t.Helper()
 	dir := t.TempDir()
 	writeSource(t, dir, name, src)
-	metrics, err := analyze.ComputeMetrics(context.Background(), dir, []string{name})
+	metrics, err := analyze.ComputeMetrics(context.Background(), os.DirFS(dir), []string{name})
 	if err != nil {
 		t.Fatalf("ComputeMetrics: %v", err)
 	}
@@ -329,11 +330,11 @@ func Classify(score int) string {
 	writeSource(t, dir, "p.go", src)
 	targets := []analyze.FunctionTarget{{Package: ".", File: "p.go", Name: "Classify"}}
 
-	first, err := analyze.GenerateMutants(context.Background(), dir, targets, 16)
+	first, err := analyze.GenerateMutants(context.Background(), os.DirFS(dir), targets, 16)
 	if err != nil {
 		t.Fatalf("GenerateMutants: %v", err)
 	}
-	second, err := analyze.GenerateMutants(context.Background(), dir, targets, 16)
+	second, err := analyze.GenerateMutants(context.Background(), os.DirFS(dir), targets, 16)
 	if err != nil {
 		t.Fatalf("GenerateMutants: %v", err)
 	}
@@ -361,7 +362,7 @@ func TestMutantsRespectTheBudget(t *testing.T) {
 	src.WriteString("\treturn 0\n}\n")
 	writeSource(t, dir, "p.go", src.String())
 
-	mutants, err := analyze.GenerateMutants(context.Background(), dir,
+	mutants, err := analyze.GenerateMutants(context.Background(), os.DirFS(dir),
 		[]analyze.FunctionTarget{{Package: ".", File: "p.go", Name: "F"}}, 16)
 	if err != nil {
 		t.Fatalf("GenerateMutants: %v", err)
@@ -401,7 +402,7 @@ func F(a int) int {
 		})
 	}
 
-	mutants, err := analyze.GenerateMutants(context.Background(), dir, targets, 16)
+	mutants, err := analyze.GenerateMutants(context.Background(), os.DirFS(dir), targets, 16)
 	if err != nil {
 		t.Fatalf("GenerateMutants: %v", err)
 	}
@@ -441,11 +442,11 @@ func TestThing(t *testing.T) {
 	t.Skip("later")
 }
 `)
-	base, err := analyze.TestShapes(context.Background(), baseDir, []string{"p_test.go"})
+	base, err := analyze.TestShapes(context.Background(), os.DirFS(baseDir), []string{"p_test.go"})
 	if err != nil {
 		t.Fatalf("TestShapes(base): %v", err)
 	}
-	head, err := analyze.TestShapes(context.Background(), headDir, []string{"p_test.go"})
+	head, err := analyze.TestShapes(context.Background(), os.DirFS(headDir), []string{"p_test.go"})
 	if err != nil {
 		t.Fatalf("TestShapes(head): %v", err)
 	}
@@ -470,7 +471,7 @@ func TestThing(t *testing.T) {
 	}
 }
 `)
-	shapes, err := analyze.TestShapes(context.Background(), dir, []string{"p_test.go"})
+	shapes, err := analyze.TestShapes(context.Background(), os.DirFS(dir), []string{"p_test.go"})
 	if err != nil {
 		t.Fatalf("TestShapes: %v", err)
 	}

@@ -3,7 +3,7 @@ package verify_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,7 +25,33 @@ func run(t *testing.T, f *fixture, mode verify.Mode) verify.Result {
 	if err != nil {
 		t.Fatalf("verify.Run(%s): %v", mode, err)
 	}
+	keepReport(t, result)
 	return result
+}
+
+// keepReport writes the run's JSON report into the test's artifact directory
+// when the test fails. Under `go test -artifacts` that directory survives the
+// run, so a CI failure ships the document a reader needs instead of the few
+// lines a Fatalf could quote; without the flag it is a temporary directory
+// the test framework removes.
+func keepReport(t *testing.T, result verify.Result) {
+	t.Helper()
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		encoded, err := report.DeterministicJSON("test", result)
+		if err != nil {
+			t.Logf("report not kept: %v", err)
+			return
+		}
+		name := filepath.Join(t.ArtifactDir(), "report.json")
+		if err := os.WriteFile(name, encoded, 0o600); err != nil {
+			t.Logf("report not kept: %v", err)
+			return
+		}
+		t.Logf("report kept at %s", name)
+	})
 }
 
 func ruleIDs(items []evidence.Evidence) []string {
@@ -794,6 +820,7 @@ func TestFastIsNeverSufficientForCompletion(t *testing.T) {
 	f.write("lib/lib.go", cleanLibrary)
 	f.write("lib/lib_test.go", cleanLibraryTest)
 	f.commit("clean baseline")
+	f.write("lib/lib.go", renamedAnswerLibrary)
 
 	fast := run(t, f, verify.ModeFast)
 	requireVerdict(t, fast, admission.VerdictAdmitted)
@@ -802,7 +829,7 @@ func TestFastIsNeverSufficientForCompletion(t *testing.T) {
 	}
 	verified := run(t, f, verify.ModeVerify)
 	if !verified.Decision.SufficientForCompletion {
-		t.Fatalf("verify on a clean tree is not sufficient: %s", verified.Decision.Reason)
+		t.Fatalf("verify on a clean change is not sufficient: %s", verified.Decision.Reason)
 	}
 }
 
@@ -881,5 +908,73 @@ func TestScopeViolationFailsRequirementsCompliance(t *testing.T) {
 	}
 	if !slices.Contains(blockingRules(result.Evidence), policy.RuleScopeViolation) {
 		t.Fatalf("blocking rules = %v, want %s", blockingRules(result.Evidence), policy.RuleScopeViolation)
+	}
+}
+
+// brokenBenchmarkSource is a test file whose benchmark cannot run: a real
+// repository carried one for years, and one run of it took every measurement
+// of its package down with it.
+const brokenBenchmarkSource = benchmarkSource + `
+func BenchmarkBroken(b *testing.B) {
+	panic("this benchmark has been broken since before the change")
+}
+`
+
+// TestABenchmarkBrokenAtBothRevisionsIsDebtNotAnUnmeasurableChange pins the
+// recovery: the benchmark that fails is skipped, the one that runs measures
+// the change, the claim is discharged, and the breakage is a row.
+func TestABenchmarkBrokenAtBothRevisionsIsDebtNotAnUnmeasurableChange(t *testing.T) {
+	useGolangci(t)
+	f := newFixture(t)
+	f.write("lib/lib.go", benchmarkedLibrary)
+	f.write("lib/lib_test.go", brokenBenchmarkSource)
+	f.commit("baseline with a broken benchmark")
+	f.write("lib/lib.go", strings.Replace(benchmarkedLibrary, "total := 0", "total := 0 // widened", 1))
+
+	result := run(t, f, verify.ModeVerify)
+	claim := claimFor(t, result, admission.DimPerformance)
+	if claim.State != admission.ClaimPass {
+		t.Fatalf("performance = %s (%s), want PASS: the benchmark that runs measured the change", claim.State, claim.Reason)
+	}
+	var reported bool
+	for _, e := range result.Evidence {
+		if e.RuleID != policy.RuleBenchBroken {
+			continue
+		}
+		reported = true
+		if verify.Blocking(e) || !strings.Contains(e.Message, "BenchmarkBroken") || e.Package == "" {
+			t.Fatalf("the broken benchmark row is wrong: %+v", e)
+		}
+	}
+	if !reported {
+		t.Fatalf("the broken benchmark was not reported: %v", ruleIDs(result.Evidence))
+	}
+}
+
+// TestABenchmarkTheChangeBrokeMakesPerformanceUnmeasurable is the guard in the
+// other direction: a benchmark that ran at base and fails at head is the
+// change's doing, and no other benchmark can discharge the claim around it.
+func TestABenchmarkTheChangeBrokeMakesPerformanceUnmeasurable(t *testing.T) {
+	useGolangci(t)
+	f := newFixture(t)
+	f.write("lib/lib.go", benchmarkedLibrary)
+	f.write("lib/lib_test.go", benchmarkSource)
+	f.commit("baseline with a working benchmark")
+	f.write("lib/lib_test.go", strings.Replace(benchmarkSource,
+		"for b.Loop() {", "panic(\"broken by the change\")\n\tfor b.Loop() {", 1))
+
+	result := run(t, f, verify.ModeVerify)
+	if result.Decision.Verdict == admission.VerdictAdmitted {
+		t.Fatalf("a change that broke the only benchmark was admitted")
+	}
+	var named bool
+	for _, u := range result.Unproducible {
+		if u.Kind == admission.KindBenchDelta && strings.Contains(u.Reason, "BenchmarkSum") &&
+			strings.Contains(u.Reason, "fails at head") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("the benchmark the change broke was not named: %+v", result.Unproducible)
 	}
 }

@@ -6,7 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -252,7 +252,7 @@ func mirrorIndexes(ctx context.Context, fetcher Fetcher, base, staging string) (
 // entryIDs reads the vulnerability index the origin already gave us rather than
 // re-deriving it, so the snapshot mirrors exactly what the database advertises.
 func entryIDs(staging string) ([]string, error) {
-	data, err := os.ReadFile(filepath.Join(staging, vulnIndexDir, "vulns.json"))
+	data, err := readStaged(staging, vulnIndexDir+"/vulns.json")
 	if err != nil {
 		return nil, fmt.Errorf("reading the mirrored vulnerability index: %w", err)
 	}
@@ -339,8 +339,20 @@ func writeSnapshotFile(staging, relative string, data []byte) error {
 	return nil
 }
 
+// readStaged reads one mirrored file through a root bounded to the staging
+// directory, so an index entry naming a path outside it is refused rather than
+// followed.
+func readStaged(staging, rel string) (_ []byte, err error) {
+	root, err := os.OpenRoot(staging)
+	if err != nil {
+		return nil, fmt.Errorf("opening the staging directory: %w", err)
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
+	return root.ReadFile(filepath.FromSlash(rel))
+}
+
 func snapshotModified(staging string) (time.Time, error) {
-	data, err := os.ReadFile(filepath.Join(staging, vulnIndexDir, "db.json"))
+	data, err := readStaged(staging, vulnIndexDir+"/db.json")
 	if err != nil {
 		return time.Time{}, fmt.Errorf("reading the mirrored database metadata: %w", err)
 	}

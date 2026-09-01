@@ -128,6 +128,7 @@ func TestPolicyShadowNeverChangesTheVerdict(t *testing.T) {
 // a diff and has nothing to say about the repository's standing configuration.
 func TestPolicyShadowIsAuditOnly(t *testing.T) {
 	f := shadowFixture(t, true)
+	f.write("lib/lib.go", renamedAnswerLibrary)
 	result := run(t, f, verify.ModeVerify)
 	if result.PolicyShadow != nil {
 		t.Fatalf("verify reported a policy shadow: %+v", result.PolicyShadow)

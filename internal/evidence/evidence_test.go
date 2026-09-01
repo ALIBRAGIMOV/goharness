@@ -251,7 +251,7 @@ func TestRealignWithoutRenamesIsTheIdentity(t *testing.T) {
 // TestAStatedIdentitySurvivesAVolatileMessage is the mechanism behind the
 // producers whose text moves between runs.
 //
-// A failing test prints a timestamp; goleak prints the goroutines it happened to
+// A failing test prints a timestamp; a leak profile lists the goroutines it happened to
 // find, in the order the runtime handed them over. Naming a finding by its
 // description then renames it every run: ten test failures and eleven leaks were
 // reported as introduced between two runs of one commit, and one flaky race

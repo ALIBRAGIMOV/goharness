@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/admission"
+	"github.com/ALIBRAGIMOV/goharness/internal/change"
 	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
@@ -407,15 +408,40 @@ func TestMovingAFileIntroducesNothingByItself(t *testing.T) {
 	})
 }
 
-// TestBypassAnOldSuppressionInAnEditedFileStillRejects is the blocking half of
-// the rule that scopes the ungrandfatherable core to the change.
+// TestBypassARewrittenOldSuppressionStillRejects is the blocking half of the
+// rule that scopes the ungrandfatherable core to the lines the change wrote.
 //
 // Those rules stopped blocking across the whole reverse-dependency closure,
 // because 429 historical directives failing every merge request is a repository
-// goal enforced by a change gate and no author clears it inside a branch. The
-// route that buys, and the one this closes, is leaving one in a file you are
-// already editing: the change is in there, so the change answers for it.
-func TestBypassAnOldSuppressionInAnEditedFileStillRejects(t *testing.T) {
+// goal enforced by a change gate and no author clears it inside a branch. They
+// then stopped blocking on the untouched lines of an edited file, because an
+// author who appends one function to a legacy file can neither fix a directive
+// they did not write nor except it, and a gate nobody can pass is routed
+// around. What still buys nothing is rewriting or moving one: the line is the
+// change's then, however old the directive on it is.
+func TestBypassARewrittenOldSuppressionStillRejects(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", suppressedLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.commit("a repository that arrives with a suppression")
+		f.anchor()
+		f.write("lib/lib.go", strings.Replace(suppressedLibrary,
+			"//nolint:errcheck", "//nolint:errcheck // kept on purpose", 1))
+
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictRejected)
+		if !slices.Contains(blockingRules(result.Evidence), policy.RuleSuppressNolint) {
+			t.Fatalf("blocking rules = %v, want %s; a suppression this change rewrote "+
+				"did not block", blockingRules(result.Evidence), policy.RuleSuppressNolint)
+		}
+	})
+}
+
+// TestAnOldSuppressionInAnEditedFileIsDebtNotRejection is the false-positive
+// guard on the closure above: a directive that predates the change, on a line
+// it did not write, is reported beside the change and left to the audit.
+func TestAnOldSuppressionInAnEditedFileIsDebtNotRejection(t *testing.T) {
 	eachLayout(t, func(t *testing.T, lay layout) {
 		f := newFixtureIn(t, lay)
 		f.write("lib/lib.go", suppressedLibrary)
@@ -425,10 +451,14 @@ func TestBypassAnOldSuppressionInAnEditedFileStillRejects(t *testing.T) {
 		f.write("lib/lib.go", suppressedLibrary+cleanAddition)
 
 		result := run(t, f, verify.ModeVerify)
-		requireVerdict(t, result, admission.VerdictRejected)
-		if !slices.Contains(blockingRules(result.Evidence), policy.RuleSuppressNolint) {
-			t.Fatalf("blocking rules = %v, want %s; a suppression survived in a file "+
-				"this change edited", blockingRules(result.Evidence), policy.RuleSuppressNolint)
+		requireVerdict(t, result, admission.VerdictAdmitted)
+		if !slices.Contains(ruleIDs(result.Evidence), policy.RuleSuppressNolint) {
+			t.Fatalf("the old suppression stopped being reported: %v", ruleIDs(result.Evidence))
+		}
+		for _, e := range result.Evidence {
+			if e.RuleID == policy.RuleSuppressNolint && e.Origin != evidence.OriginChangedFile {
+				t.Fatalf("the old suppression was placed at %q, want %q", e.Origin, evidence.OriginChangedFile)
+			}
 		}
 	})
 }
@@ -546,5 +576,140 @@ func TestBypassVulnerableDependencyIsNotAdmittedByVerify(t *testing.T) {
 		if result.VulnDB == nil {
 			t.Fatal("the result does not record which snapshot produced the evidence")
 		}
+	})
+}
+
+// TestBypassABuildConstraintCannotHideAFailingTest closes the route where a
+// test that would fail stays in the tree but leaves the build: a constraint the
+// change adds to the test file excludes it under the configuration the gate
+// runs, so `go test` runs nothing there and reports nothing. The test the
+// constraint removed from the build is a deleted test, whatever the file still
+// says.
+func TestBypassABuildConstraintCannotHideAFailingTest(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", cleanLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.commit("clean baseline")
+		f.anchor()
+		f.write("lib/lib.go", wrongAnswerLibrary)
+		f.write("lib/lib_test.go", "//go:build integration\n\n"+cleanLibraryTest)
+
+		result := run(t, f, verify.ModeVerify)
+		if result.Decision.Verdict == admission.VerdictAdmitted {
+			t.Fatalf("a failing test hidden behind a build constraint was admitted")
+		}
+		if !slices.Contains(ruleIDs(result.Evidence), policy.RuleTestDeleted) {
+			t.Fatalf("the test the constraint excluded was not reported as deleted: %v",
+				ruleIDs(result.Evidence))
+		}
+	})
+}
+
+// TestASatisfiedBuildConstraintKeepsATestCounted is the false-positive guard: a
+// constraint this configuration satisfies leaves the test in the build, and a
+// test that still runs was not deleted.
+func TestASatisfiedBuildConstraintKeepsATestCounted(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("lib/lib_test.go", "//go:build go1.18\n\n"+cleanLibraryTest)
+
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictAdmitted)
+		if slices.Contains(ruleIDs(result.Evidence), policy.RuleTestDeleted) {
+			t.Fatalf("a test behind a satisfied constraint was reported as deleted")
+		}
+	})
+}
+
+// TestBypassAnEmptyChangeIsNotSufficientForCompletion closes the route where
+// nothing is judged and the document still says the task may be called done:
+// an agent that commits its work and verifies against the commit it just made,
+// or that never changed anything, must not receive a completion certificate
+// for a change the gate never saw.
+func TestBypassAnEmptyChangeIsNotSufficientForCompletion(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+
+		result := runWith(t, f, verify.Options{Mode: verify.ModeVerify, Base: "HEAD"})
+		requireVerdict(t, result, admission.VerdictInconclusive)
+		if result.Decision.SufficientForCompletion {
+			t.Fatalf("an empty change was declared sufficient for completion")
+		}
+		if !hasUnproducible(result.Unproducible, admission.KindChangeVisible) {
+			t.Fatalf("an empty change produced no visibility obligation: %+v", result.Unproducible)
+		}
+	})
+}
+
+// TestADocumentationOnlyChangeIsStillAChange is the false-positive guard for
+// the empty-change closure: a change that touches no Go file is still a change
+// the gate saw, and it is judged and admitted like any other.
+func TestADocumentationOnlyChangeIsStillAChange(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("README.md", "# lib\n\nA fixture with a documented purpose.\n")
+
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictAdmitted)
+		if hasUnproducible(result.Unproducible, admission.KindChangeVisible) {
+			t.Fatalf("a documentation change was treated as no change: %+v", result.Unproducible)
+		}
+	})
+}
+
+// TestBypassUncommittedWorkOnTheDefaultBranchDoesNotInheritTheLastCommit pins
+// the base revision for the commonest shape a clone has: HEAD on the default
+// branch, the last commit somebody else's, the working tree the operator's.
+// Judging against the parent commit there blamed the working tree for the
+// debt that commit carried, and would have admitted the commit's suppression
+// as part of a change that never wrote it had the rule gone the other way.
+func TestBypassUncommittedWorkOnTheDefaultBranchDoesNotInheritTheLastCommit(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", cleanLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.commit("clean baseline")
+		f.write("consumer/consumer.go", suppressedConsumer)
+		f.write("consumer/consumer_test.go", consumerTest)
+		f.commit("an upstream commit that arrives with a suppression")
+		f.write("lib/lib.go", renamedAnswerLibrary)
+
+		result := run(t, f, verify.ModeVerify)
+		if result.Change.BaseOrigin != change.BaseFromHead {
+			t.Fatalf("base origin = %q, want %q", result.Change.BaseOrigin, change.BaseFromHead)
+		}
+		requireVerdict(t, result, admission.VerdictAdmitted)
+		for _, e := range result.Evidence {
+			if e.RuleID == policy.RuleSuppressNolint && e.State == evidence.StateNew {
+				t.Fatalf("the last commit's suppression was charged to the working tree: %+v", e)
+			}
+		}
+	})
+}
+
+// TestACleanTreeOnTheDefaultBranchJudgesTheLastCommit is the paired guard: with
+// nothing uncommitted, the last commit is the only change there is, and it is
+// still judged rather than waved through as an empty diff.
+func TestACleanTreeOnTheDefaultBranchJudgesTheLastCommit(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := newFixtureIn(t, lay)
+		f.write("lib/lib.go", cleanLibrary)
+		f.write("lib/lib_test.go", cleanLibraryTest)
+		f.commit("clean baseline")
+		f.write("lib/lib.go", suppressedLibrary)
+		f.commit("a commit that adds a suppression")
+
+		result := run(t, f, verify.ModeVerify)
+		if result.Change.BaseOrigin != change.BaseFromParent {
+			t.Fatalf("base origin = %q, want %q", result.Change.BaseOrigin, change.BaseFromParent)
+		}
+		requireVerdict(t, result, admission.VerdictRejected)
 	})
 }

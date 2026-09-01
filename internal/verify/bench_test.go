@@ -3,9 +3,8 @@ package verify
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"testing"
-
-	"go.uber.org/zap"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/admission"
 	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
@@ -16,7 +15,7 @@ import (
 // so a regression in wave computation or aggregation is visible separately from
 // the cost of the tools it runs.
 func BenchmarkSchedule(b *testing.B) {
-	engine := &Engine{Logger: zap.NewNop(), Concurrency: 4}
+	engine := &Engine{Logger: slog.New(slog.DiscardHandler), Concurrency: 4}
 	checks := make([]Check, 0, 24)
 	checks = append(checks, Check{
 		ID:       admission.ProducerCompile,

@@ -2,13 +2,14 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"go/version"
 	"io"
 	"os"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 )
@@ -210,13 +211,13 @@ func RunTests(ctx context.Context, runner Runner, dir string, patterns, extraArg
 }
 
 func parseTestJSON(stdout string) ([]TestFailure, error) {
-	dec := json.NewDecoder(strings.NewReader(stdout))
+	dec := jsontext.NewDecoder(strings.NewReader(stdout))
 	output := map[string][]string{}
 	var failures []TestFailure
 	for {
 		var ev testEvent
-		if err := dec.Decode(&ev); err != nil {
-			if err == io.EOF {
+		if err := json.UnmarshalDecode(dec, &ev); err != nil {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			return nil, fmt.Errorf("decoding go test JSON: %w", err)
@@ -297,38 +298,20 @@ func ResolveGoVersion(ctx context.Context, runner Runner, dir string) (string, e
 	return version, nil
 }
 
-// CompareGoVersions orders two "go1.26.6" strings by their numeric components,
-// returning a negative number when a precedes b.
+// CompareGoVersions orders two "go1.26.6" strings by release, returning a
+// negative number when a precedes b. It is go/version's ordering: release
+// numbers compare as integers (go1.26.10 is newer than go1.26.9, which sorts
+// the other way as text), a release candidate precedes its release (go1.27rc1
+// is below a floor of go1.27.0, as a floor means it to be), and the bare
+// language version go1.27 precedes them both.
 //
-// Release numbers are compared as integers because they are integers: go1.26.10
-// is newer than go1.26.9 and sorts before it as text, so a string comparison
-// would report a patched host as older than the floor it satisfies and turn a
-// clean security scan inconclusive.
+// A string that is not a version, such as a devel or gccgo build, compares
+// equal to everything: the caller treats that as "no opinion" rather than as
+// an ordering, and never calls a toolchain it cannot read below the floor.
 func CompareGoVersions(a, b string) int {
-	return slices.Compare(goVersionParts(a), goVersionParts(b))
-}
-
-// goVersionParts reduces a version string to its numeric components. Anything
-// that is not a release number, such as a devel or gccgo string, yields no
-// components and therefore compares equal to every other unparsable value; the
-// caller treats that as "no opinion" rather than as an ordering.
-func goVersionParts(version string) []int {
-	trimmed, ok := strings.CutPrefix(strings.TrimSpace(version), "go")
-	if !ok {
-		return nil
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if !version.IsValid(a) || !version.IsValid(b) {
+		return 0
 	}
-	// A release candidate or beta suffix carries no ordering this comparison
-	// needs, and the numbers before it are the ones a floor is written against.
-	for _, cut := range []string{"rc", "beta", "-", "+", " "} {
-		trimmed, _, _ = strings.Cut(trimmed, cut)
-	}
-	var parts []int
-	for field := range strings.SplitSeq(trimmed, ".") {
-		n, err := strconv.Atoi(field)
-		if err != nil {
-			return nil
-		}
-		parts = append(parts, n)
-	}
-	return parts
+	return version.Compare(a, b)
 }

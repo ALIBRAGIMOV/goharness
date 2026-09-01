@@ -4,7 +4,11 @@ import (
 	"context"
 	"fmt"
 	"go/ast"
+	"go/build"
+	"io"
+	"io/fs"
 	"maps"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,14 +31,21 @@ type TestShape struct {
 }
 
 // TestShapes measures every test function in the given files.
-func TestShapes(ctx context.Context, root string, relFiles []string) (map[string]TestShape, error) {
+func TestShapes(ctx context.Context, tree fs.FS, relFiles []string) (map[string]TestShape, error) {
 	testFiles := make([]string, 0, len(relFiles))
 	for _, rel := range relFiles {
-		if strings.HasSuffix(rel, "_test.go") {
+		if !strings.HasSuffix(rel, "_test.go") {
+			continue
+		}
+		built, err := inBuild(tree, rel)
+		if err != nil {
+			return nil, fmt.Errorf("reading build constraints of %s: %w", rel, err)
+		}
+		if built {
 			testFiles = append(testFiles, rel)
 		}
 	}
-	units, err := parseUnits(ctx, root, testFiles)
+	units, err := parseUnits(ctx, tree, testFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -46,6 +57,20 @@ func TestShapes(ctx context.Context, root string, relFiles []string) (map[string
 		u.collectTestShapes(shapes)
 	}
 	return shapes, nil
+}
+
+// inBuild reports whether the build the gate runs compiles rel: its name and
+// its go:build constraint are evaluated against the default context, which is
+// the configuration `go test` sees under the sanitised environment. A test
+// file the build excludes runs no tests, so its functions are not shapes of
+// the suite whatever the file still says; treating them as present is how a
+// constraint typed above a failing test made that test disappear without
+// anything reporting a deletion.
+func inBuild(tree fs.FS, rel string) (bool, error) {
+	ctxt := build.Default
+	ctxt.JoinPath = path.Join
+	ctxt.OpenFile = func(name string) (io.ReadCloser, error) { return tree.Open(name) }
+	return ctxt.MatchFile(path.Dir(rel), path.Base(rel))
 }
 
 func (u *unit) collectTestShapes(shapes map[string]TestShape) {

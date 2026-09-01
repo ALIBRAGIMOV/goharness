@@ -51,7 +51,7 @@ func TestPathHygieneAcceptsEveryShapeTheHarnessProduces(t *testing.T) {
 
 // TestOneLeakSiteIsOneFinding pins the collapse.
 //
-// goleak reports the leak once per test package that reached it, so one leaking
+// The leak run reports a site once per test package that reached it, so one leaking
 // helper produced thirty-six identical rows on a production run and the report
 // told its reader to fix each of them. The site is the unit of repair.
 func TestOneLeakSiteIsOneFinding(t *testing.T) {
@@ -62,7 +62,7 @@ func TestOneLeakSiteIsOneFinding(t *testing.T) {
 		packages: map[string]bool{"a": true, "b": true, "c": true},
 	}
 	msg := site.message()
-	// Sorted, because the order goleak prints them in is the order the runtime
+	// Sorted, because the order the profile prints them in is the order the runtime
 	// produced them and it moves between runs.
 	if !strings.Contains(msg, "database/sql.(*DB).opener, stat.(*Sender).loop") {
 		t.Fatalf("the leaked functions are not in a stable order: %q", msg)

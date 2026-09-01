@@ -4,14 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"maps"
-	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -40,12 +40,12 @@ type Mutant struct {
 // snapshots, plus the functions the change introduced. This is the mutation
 // engine's subject set: mutating unchanged code would measure the whole suite
 // rather than the change.
-func ChangedFunctions(ctx context.Context, baseRoot, headRoot string, relFiles []string) ([]FunctionTarget, error) {
-	baseBodies, err := functionBodies(ctx, baseRoot, relFiles)
+func ChangedFunctions(ctx context.Context, base, head fs.FS, relFiles []string) ([]FunctionTarget, error) {
+	baseBodies, err := functionBodies(ctx, base, relFiles)
 	if err != nil {
 		return nil, err
 	}
-	headBodies, err := functionBodies(ctx, headRoot, relFiles)
+	headBodies, err := functionBodies(ctx, head, relFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +65,7 @@ type functionBody struct {
 	target FunctionTarget
 }
 
-func functionBodies(ctx context.Context, root string, relFiles []string) (map[string]functionBody, error) {
+func functionBodies(ctx context.Context, tree fs.FS, relFiles []string) (map[string]functionBody, error) {
 	out := map[string]functionBody{}
 	for _, rel := range relFiles {
 		if err := ctx.Err(); err != nil {
@@ -74,9 +74,9 @@ func functionBodies(ctx context.Context, root string, relFiles []string) (map[st
 		if !strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, "_test.go") {
 			continue
 		}
-		src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		src, err := fs.ReadFile(tree, rel)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
 			return nil, fmt.Errorf("reading %s: %w", rel, err)
@@ -118,7 +118,7 @@ func functionBodies(ctx context.Context, root string, relFiles []string) (map[st
 // when the change is one file: a nineteen-file branch produced sixteen mutants
 // that all came from its alphabetically first package, so the evidence spoke
 // about that package and said nothing at all about the other eighteen.
-func GenerateMutants(ctx context.Context, root string, targets []FunctionTarget, limit int) ([]Mutant, error) {
+func GenerateMutants(ctx context.Context, tree fs.FS, targets []FunctionTarget, limit int) ([]Mutant, error) {
 	byFile := map[string][]FunctionTarget{}
 	for _, t := range targets {
 		byFile[t.File] = append(byFile[t.File], t)
@@ -129,7 +129,7 @@ func GenerateMutants(ctx context.Context, root string, targets []FunctionTarget,
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		fileMutants, err := mutateFile(root, rel, byFile[rel])
+		fileMutants, err := mutateFile(tree, rel, byFile[rel])
 		if err != nil {
 			return nil, err
 		}
@@ -196,8 +196,8 @@ type edit struct {
 	line        int
 }
 
-func mutateFile(root, rel string, targets []FunctionTarget) ([]Mutant, error) {
-	src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+func mutateFile(tree fs.FS, rel string, targets []FunctionTarget) ([]Mutant, error) {
+	src, err := fs.ReadFile(tree, rel)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s for mutation: %w", rel, err)
 	}

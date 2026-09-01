@@ -27,7 +27,7 @@ const passedStream = `{"Action":"start","Package":"example.com/m/lib"}
 `
 
 // A package-level failure with no named test and no failed build is a test
-// binary that died: a panic, a timeout, or goleak's TestMain. The mutant was
+// binary that died: a panic, a timeout, or the injected leak TestMain. The mutant was
 // noticed.
 const crashedStream = `{"Action":"start","Package":"example.com/m/lib"}
 {"Action":"output","Package":"example.com/m/lib","Output":"panic: boom\n"}

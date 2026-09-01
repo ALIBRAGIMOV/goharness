@@ -74,8 +74,8 @@ func calleeOf(message string) (callee, qualifier string) {
 		return "", ""
 	}
 	name = strings.TrimSuffix(strings.TrimSpace(name), "()")
-	if idx := strings.LastIndex(name, "."); idx >= 0 {
-		return name[idx+1:], name[:idx]
+	if pkg, symbol, ok := strings.CutLast(name, "."); ok {
+		return symbol, pkg
 	}
 	return name, ""
 }

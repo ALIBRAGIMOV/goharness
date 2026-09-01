@@ -49,7 +49,7 @@ func cloneScope(t *testing.T) (*analyze.ParsedScope, []string) {
 			t.Fatalf("writing %s: %v", rel, err)
 		}
 	}
-	scope, err := analyze.Parse(t.Context(), root, files)
+	scope, err := analyze.Parse(t.Context(), os.DirFS(root), files)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

@@ -267,7 +267,7 @@ func TestContractScopeMatching(t *testing.T) {
 
 func TestLoadContractFallsBackToTheImplicitDefault(t *testing.T) {
 	t.Parallel()
-	contract, err := admission.LoadContract("", t.TempDir())
+	contract, err := admission.LoadContract("", os.DirFS(t.TempDir()))
 	if err != nil {
 		t.Fatalf("LoadContract: %v", err)
 	}
@@ -299,7 +299,7 @@ budgets:
     maxTimeIncreasePercent: 5
     maxAllocIncreasePercent: 0
 `)
-	contract, err := admission.LoadContract("", dir)
+	contract, err := admission.LoadContract("", os.DirFS(dir))
 	if err != nil {
 		t.Fatalf("LoadContract: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestParseContractRejectsUnknownKeysAndRisks(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			writeContract(t, dir, body)
-			if _, err := admission.LoadContract("", dir); err == nil {
+			if _, err := admission.LoadContract("", os.DirFS(dir)); err == nil {
 				t.Fatal("expected an error, got none")
 			}
 		})

@@ -1,7 +1,9 @@
 package tool
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -44,16 +46,20 @@ type analysisResult struct {
 	failure     string
 }
 
-// UnmarshalJSON decodes either the diagnostic list or the analyzer error.
-func (r *analysisResult) UnmarshalJSON(data []byte) error {
+// UnmarshalJSONFrom decodes either the diagnostic list or the analyzer error.
+func (r *analysisResult) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	value, err := dec.ReadValue()
+	if err != nil {
+		return err
+	}
 	var failed struct {
 		Err string `json:"error"`
 	}
-	if err := json.Unmarshal(data, &failed); err == nil && failed.Err != "" {
+	if err := json.Unmarshal(value, &failed); err == nil && failed.Err != "" {
 		r.failure = failed.Err
 		return nil
 	}
-	return json.Unmarshal(data, &r.diagnostics)
+	return json.Unmarshal(value, &r.diagnostics)
 }
 
 // analysisEntry is one analyzer's result for one package.
@@ -69,12 +75,12 @@ type analysisEntry struct {
 // map, and a report whose evidence order came from map iteration would differ
 // between two runs over an unchanged tree.
 func decodeAnalysisJSON(stream string) ([]analysisEntry, error) {
-	dec := json.NewDecoder(strings.NewReader(stream))
+	dec := jsontext.NewDecoder(strings.NewReader(stream))
 	var out []analysisEntry
 	for {
 		var tree map[string]map[string]analysisResult
-		if err := dec.Decode(&tree); err != nil {
-			if err == io.EOF {
+		if err := json.UnmarshalDecode(dec, &tree); err != nil {
+			if errors.Is(err, io.EOF) {
 				return out, nil
 			}
 			return out, fmt.Errorf("decoding analysis JSON: %w", err)

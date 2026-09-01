@@ -3,7 +3,8 @@ package tool
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -123,12 +124,12 @@ func isVulnerabilitiesFound(err error) bool {
 }
 
 func parseVulnStream(stdout string) ([]VulnFinding, error) {
-	dec := json.NewDecoder(strings.NewReader(stdout))
+	dec := jsontext.NewDecoder(strings.NewReader(stdout))
 	summaries := map[string]string{}
 	var findings []VulnFinding
 	for {
 		var msg vulnMessage
-		if err := dec.Decode(&msg); err != nil {
+		if err := json.UnmarshalDecode(dec, &msg); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}

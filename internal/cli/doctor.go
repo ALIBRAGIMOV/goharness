@@ -62,6 +62,7 @@ func runDoctor(ctx context.Context, args []string, streams Streams) int {
 	cache, cacheHealthy := reportCache(out)
 	healthy = cacheHealthy && healthy
 	healthy = reportVulnDB(out, cache, time.Now()) && healthy
+	reportSkill(out)
 
 	out.line("")
 	out.line("uber guide pin: %s", policy.UberGuideCommit)
@@ -134,8 +135,8 @@ func reportGoFix(ctx context.Context, out *printer, runner tool.Runner, dir stri
 func reportScanner(out *printer) {
 	out.line("%s vuln scanner   embedded golang.org/x/vuln %s", mark(true),
 		orUnknown(tool.XVulnVersion()))
-	out.line("%s leak check     embedded go.uber.org/goleak %s, injected into race runs",
-		mark(true), leakcheck.Version)
+	out.line("%s leak check     %s profile, read by a TestMain injected into race runs (needs %s or later on PATH)",
+		mark(true), leakcheck.Method, leakcheck.MinimumGoVersion)
 }
 
 // reportCache inspects the provisioned cache. Doctor only reads: it reports

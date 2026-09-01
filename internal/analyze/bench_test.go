@@ -57,20 +57,20 @@ func TestSharedParseAnswersExactlyAsSeparateParsesDo(t *testing.T) {
 	root, files := harnessFiles(t)
 	opts := analyze.Options{Concurrency: true, Network: true, Persistence: true}
 
-	separateScan, err := analyze.Scan(t.Context(), root, files, opts)
+	separateScan, err := analyze.Scan(t.Context(), os.DirFS(root), files, opts)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	separateMetrics, err := analyze.ComputeMetrics(t.Context(), root, files)
+	separateMetrics, err := analyze.ComputeMetrics(t.Context(), os.DirFS(root), files)
 	if err != nil {
 		t.Fatalf("ComputeMetrics: %v", err)
 	}
-	separateClones, err := analyze.CloneFindings(t.Context(), root, files)
+	separateClones, err := analyze.CloneFindings(t.Context(), os.DirFS(root), files)
 	if err != nil {
 		t.Fatalf("CloneFindings: %v", err)
 	}
 
-	scope, err := analyze.Parse(t.Context(), root, files)
+	scope, err := analyze.Parse(t.Context(), os.DirFS(root), files)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestSharedParseAnswersExactlyAsSeparateParsesDo(t *testing.T) {
 func TestSharedParseSurvivesConcurrentReaders(t *testing.T) {
 	t.Parallel()
 	root, files := harnessFiles(t)
-	scope, err := analyze.Parse(t.Context(), root, files)
+	scope, err := analyze.Parse(t.Context(), os.DirFS(root), files)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -293,13 +293,13 @@ func BenchmarkSeparateParses(b *testing.B) {
 	root, files := benchCorpus(b)
 	opts := analyze.Options{Concurrency: true, Network: true, Persistence: true}
 	for b.Loop() {
-		if _, err := analyze.Scan(b.Context(), root, files, opts); err != nil {
+		if _, err := analyze.Scan(b.Context(), os.DirFS(root), files, opts); err != nil {
 			b.Fatal(err)
 		}
-		if _, err := analyze.ComputeMetrics(b.Context(), root, files); err != nil {
+		if _, err := analyze.ComputeMetrics(b.Context(), os.DirFS(root), files); err != nil {
 			b.Fatal(err)
 		}
-		if _, err := analyze.CloneFindings(b.Context(), root, files); err != nil {
+		if _, err := analyze.CloneFindings(b.Context(), os.DirFS(root), files); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -310,7 +310,7 @@ func BenchmarkSharedParse(b *testing.B) {
 	root, files := benchCorpus(b)
 	opts := analyze.Options{Concurrency: true, Network: true, Persistence: true}
 	for b.Loop() {
-		scope, err := analyze.Parse(b.Context(), root, files)
+		scope, err := analyze.Parse(b.Context(), os.DirFS(root), files)
 		if err != nil {
 			b.Fatal(err)
 		}

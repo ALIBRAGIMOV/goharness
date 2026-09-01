@@ -155,14 +155,13 @@ func APIBreakFindings(base, head map[string]Exported) []Finding {
 }
 
 func splitSymbol(key string) (pkgPath, symbol string) {
-	i := strings.LastIndex(key, ".")
-	if i < 0 {
+	prefix, name, ok := strings.CutLast(key, ".")
+	if !ok {
 		return "", key
 	}
-	prefix, name := key[:i], key[i+1:]
 	// A method key is pkg.Type.Method; fold the type back into the symbol.
-	if j := strings.LastIndex(prefix, "."); j >= 0 && len(prefix) > j+1 && isUpper(prefix[j+1]) {
-		return prefix[:j], prefix[j+1:] + "." + name
+	if pkg, typ, ok := strings.CutLast(prefix, "."); ok && typ != "" && isUpper(typ[0]) {
+		return pkg, typ + "." + name
 	}
 	return prefix, name
 }

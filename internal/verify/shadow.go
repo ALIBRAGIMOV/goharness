@@ -2,8 +2,9 @@ package verify
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -67,12 +68,17 @@ func detectPolicyShadow(root string, items []evidence.Evidence) *PolicyShadow {
 // readGolangciConfig finds the configuration golangci-lint would read at the
 // module root, in golangci's own resolution order.
 func readGolangciConfig(root string) (name string, src []byte, err error) {
+	tree, err := os.OpenRoot(root)
+	if err != nil {
+		return "", nil, fmt.Errorf("opening %s: %w", root, err)
+	}
+	defer func() { err = errors.Join(err, tree.Close()) }()
 	for _, candidate := range tool.GolangciConfigNames() {
-		data, readErr := os.ReadFile(filepath.Join(root, candidate))
+		data, readErr := tree.ReadFile(candidate)
 		if readErr == nil {
 			return candidate, data, nil
 		}
-		if !errors.Is(readErr, os.ErrNotExist) {
+		if !errors.Is(readErr, fs.ErrNotExist) {
 			return candidate, nil, readErr
 		}
 	}

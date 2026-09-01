@@ -1,40 +1,57 @@
 // Package leakcheck injects goroutine-leak verification into a module's test
-// packages without touching the worktree. It materializes a pinned, embedded
-// copy of go.uber.org/goleak as a virtual package inside the module and adds a
-// generated TestMain per test package, all through a `go test -overlay` file.
+// packages without touching the worktree. It adds one generated TestMain per
+// test package through a `go test -overlay` file; after the package's tests
+// pass, that TestMain asks the runtime for its goroutineleak profile and fails
+// the package when the profile is not empty.
+//
+// The runtime's definition of a leak is the one the harness wants: a goroutine
+// blocked on a channel, mutex or condition that nothing reachable can ever
+// release. It is decided by reachability during a collection, not by whether a
+// goroutine happened to still be alive when the tests returned, so a worker
+// that is one scheduling tick from exiting is not reported and a worker parked
+// on a channel every reference to which has been dropped is.
 package leakcheck
 
 import (
-	"embed"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
 )
 
-// Version is the embedded goleak release. The sources under goleaksrc are that
-// release verbatim (MIT licensed, see goleaksrc/LICENSE) with only the internal
-// import path rewritten at materialization time.
-const Version = "v1.3.0"
+// Method names the detector, for the report's versions block and for cache
+// keys: base evidence produced by one detector must not answer for another.
+// The runtime version travels separately, because the profile is the
+// runtime's and changes with it.
+const Method = "runtime/pprof goroutineleak"
 
-// overlayDir is the virtual directory injected at the module root. The name is
-// chosen to collide with nothing a real module would contain.
-const overlayDir = "zz_goharness_leakcheck"
+// MinimumGoVersion is the first release whose runtime offers the profile
+// without an experiment flag. The tests run under the go command on PATH, and
+// an older one makes the obligation unproducible rather than silently clean.
+const MinimumGoVersion = "go1.27"
 
 // TestMainFileName is the generated per-package file. It only ever exists
 // inside the overlay, never on disk.
 const TestMainFileName = "zz_goharness_leak_test.go"
 
-const upstreamStackImport = "go.uber.org/goleak/internal/stack"
-
-//go:embed goleaksrc
-var embedded embed.FS
+// The generated TestMain announces its result with these lines. They are the
+// contract between the code that runs inside the test binary and the parser
+// here, so both read the same constants.
+const (
+	leakMarker        = "goharness leak check: "
+	leakedSuffix      = " goroutine(s) blocked forever after the tests finished"
+	unavailableMarker = leakMarker + "unavailable"
+	profileHeader     = "goroutineleak profile: total "
+)
 
 // Package identifies one test package to instrument.
 type Package struct {
@@ -45,52 +62,14 @@ type Package struct {
 	Name string
 }
 
-// Overlay writes the embedded goleak sources and one generated TestMain per
-// package into scratchDir and returns the path of a `go test -overlay` file
-// mapping virtual module paths onto them. The module itself is never written.
-func Overlay(scratchDir, moduleRoot, modulePath string, pkgs []Package) (string, error) {
-	if modulePath == "" {
-		return "", fmt.Errorf("leakcheck overlay: module path is empty")
-	}
-	fakeImport := modulePath + "/" + overlayDir + "/goleak"
-	replacements := map[string]string{}
-
-	place := func(embeddedDir, virtualDir string) error {
-		entries, err := embedded.ReadDir(embeddedDir)
-		if err != nil {
-			return fmt.Errorf("reading embedded goleak sources: %w", err)
-		}
-		for _, entry := range entries {
-			name, ok := strings.CutSuffix(entry.Name(), ".gosrc")
-			if !ok {
-				continue
-			}
-			src, err := embedded.ReadFile(embeddedDir + "/" + entry.Name())
-			if err != nil {
-				return fmt.Errorf("reading embedded %s: %w", entry.Name(), err)
-			}
-			rewritten := strings.ReplaceAll(string(src),
-				upstreamStackImport, fakeImport+"/internal/stack")
-			onDisk := filepath.Join(scratchDir, filepath.FromSlash(virtualDir), name+".go")
-			if err := writeScratch(onDisk, rewritten); err != nil {
-				return err
-			}
-			virtual := filepath.Join(moduleRoot, filepath.FromSlash(virtualDir), name+".go")
-			replacements[virtual] = onDisk
-		}
-		return nil
-	}
-	if err := place("goleaksrc/goleak", overlayDir+"/goleak"); err != nil {
-		return "", err
-	}
-	if err := place("goleaksrc/stack", overlayDir+"/goleak/internal/stack"); err != nil {
-		return "", err
-	}
-
+// Overlay writes one generated TestMain per package into scratchDir and
+// returns the path of a `go test -overlay` file mapping the virtual module
+// paths onto them. The module itself is never written.
+func Overlay(scratchDir, moduleRoot string, pkgs []Package) (string, error) {
+	replacements := make(map[string]string, len(pkgs))
 	for _, pkg := range pkgs {
-		src := testMainSource(pkg.Name, fakeImport)
 		onDisk := filepath.Join(scratchDir, "testmain", filepath.FromSlash(pkg.Dir), TestMainFileName)
-		if err := writeScratch(onDisk, src); err != nil {
+		if err := writeScratch(onDisk, testMainSource(pkg.Name)); err != nil {
 			return "", err
 		}
 		virtual := filepath.Join(moduleRoot, filepath.FromSlash(pkg.Dir), TestMainFileName)
@@ -109,35 +88,80 @@ func writeScratch(path, content string) error {
 	return nil
 }
 
-func testMainSource(pkgName, fakeImport string) string {
+// testMainSource is the injected file. It uses nothing but the standard
+// library, so it compiles inside any module without adding a requirement, and
+// it only speaks when the tests passed: a leak report on top of a failing
+// suite would be noise, and the failing tests are the finding.
+func testMainSource(pkgName string) string {
 	return fmt.Sprintf(`package %s_test
 
 import (
+	"bytes"
+	"fmt"
+	"os"
+	"runtime/pprof"
+	"strconv"
+	"strings"
 	"testing"
-
-	goleak %q
 )
 
+// TestMain is generated by goharness inside a build overlay and never exists
+// on disk. After the package's tests pass it asks the runtime which goroutines
+// are blocked forever and fails the package when there are any.
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	code := m.Run()
+	if code != 0 {
+		os.Exit(code)
+	}
+	profile := pprof.Lookup("goroutineleak")
+	if profile == nil {
+		fmt.Fprintln(os.Stderr, %[2]q)
+		os.Exit(1)
+	}
+	var buf bytes.Buffer
+	if err := profile.WriteTo(&buf, 1); err != nil {
+		fmt.Fprintln(os.Stderr, %[2]q+": "+err.Error())
+		os.Exit(1)
+	}
+	first, _, _ := strings.Cut(buf.String(), "\n")
+	total, _ := strconv.Atoi(strings.TrimPrefix(first, %[3]q))
+	if total == 0 {
+		os.Exit(0)
+	}
+	fmt.Fprintf(os.Stderr, "%%s%%d%%s\n%%s", %[4]q, total, %[5]q, buf.String())
+	os.Exit(1)
 }
-`, pkgName, fakeImport)
+`, pkgName, unavailableMarker, profileHeader, leakMarker, leakedSuffix)
 }
 
-// HasTestMain reports whether any _test.go file in absDir already declares a
+// fsDir names a module-relative directory the way io/fs wants it: the root is
+// ".", never the empty string a path-relative computation produces.
+func fsDir(dir string) string {
+	if dir == "" {
+		return "."
+	}
+	return dir
+}
+
+// HasTestMain reports whether any _test.go file in dir already declares a
 // TestMain. Injection there would not compile, so the caller reports the
 // obligation as unproducible instead of guessing.
-func HasTestMain(absDir string) (bool, error) {
-	entries, err := os.ReadDir(absDir)
+func HasTestMain(tree fs.FS, dir string) (bool, error) {
+	dir = fsDir(dir)
+	entries, err := fs.ReadDir(tree, dir)
 	if err != nil {
-		return false, fmt.Errorf("listing %s: %w", absDir, err)
+		return false, fmt.Errorf("listing %s: %w", dir, err)
 	}
 	fset := token.NewFileSet()
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
 			continue
 		}
-		file, err := parser.ParseFile(fset, filepath.Join(absDir, entry.Name()), nil, parser.SkipObjectResolution)
+		src, err := fs.ReadFile(tree, path.Join(dir, entry.Name()))
+		if err != nil {
+			return false, fmt.Errorf("reading %s: %w", path.Join(dir, entry.Name()), err)
+		}
+		file, err := parser.ParseFile(fset, entry.Name(), src, parser.SkipObjectResolution)
 		if err != nil {
 			// A malformed test file is the compile check's finding; it cannot
 			// hide a TestMain from us and from the compiler at the same time.
@@ -152,11 +176,12 @@ func HasTestMain(absDir string) (bool, error) {
 	return false, nil
 }
 
-// HasTestFiles reports whether absDir contains any _test.go file at all.
-func HasTestFiles(absDir string) (bool, error) {
-	entries, err := os.ReadDir(absDir)
+// HasTestFiles reports whether dir contains any _test.go file at all.
+func HasTestFiles(tree fs.FS, dir string) (bool, error) {
+	dir = fsDir(dir)
+	entries, err := fs.ReadDir(tree, dir)
 	if err != nil {
-		return false, fmt.Errorf("listing %s: %w", absDir, err)
+		return false, fmt.Errorf("listing %s: %w", dir, err)
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), "_test.go") {
@@ -166,72 +191,103 @@ func HasTestFiles(absDir string) (bool, error) {
 	return false, nil
 }
 
-// LeakOrigin is the first source location goleak attributed to a leaked
-// goroutine's stack, in "file:line" form as the runtime printed it.
+// IsLeakFailure reports whether a test failure's output is the injected
+// TestMain reporting leaked goroutines rather than an ordinary assertion
+// failure.
+func IsLeakFailure(output string) bool {
+	return strings.Contains(output, leakMarker) && !IsLeakUnavailable(output)
+}
+
+// IsLeakUnavailable reports whether the injected TestMain could not obtain the
+// profile at all, which happens when the go command on PATH is older than
+// MinimumGoVersion. That is a gap in the evidence, never a clean result.
+func IsLeakUnavailable(output string) bool {
+	return strings.Contains(output, unavailableMarker)
+}
+
+// frame is one symbolised line of a profile stack: the function on it and the
+// source position, as the runtime printed them.
+type frame struct {
+	function string
+	position string
+}
+
+// topFrames returns the first symbolised frame of every leaked goroutine's
+// stack, in the order the profile listed them.
 //
-// goleak knows where the goroutine came from and prints it; dropping that on
-// the floor left every leak finding with no location at all, so a reader had no
-// place to jump to and a scoped exception had nothing to match against. The
-// line number is not part of any fingerprint, so surfacing it costs no
-// stability.
-func LeakOrigin(output string) (string, bool) {
+// The profile's text form is one header line per distinct stack ("N @ pc pc
+// ...") followed by one "#\tpc\tfunction+offset\tfile:line" line per frame,
+// runtime frames already elided. The first frame is therefore the innermost
+// non-runtime function: the place the goroutine is parked.
+func topFrames(output string) []frame {
+	var frames []frame
+	expectTop := false
 	for line := range strings.SplitSeq(output, "\n") {
-		trimmed := strings.TrimSpace(line)
-		rest, ok := strings.CutPrefix(trimmed, "/")
-		if !ok {
+		if !strings.HasPrefix(line, "#") {
+			_, rest, isHeader := strings.Cut(line, " @ ")
+			expectTop = isHeader && rest != ""
 			continue
 		}
-		// A stack frame line is a path followed by ":line +0xoffset"; the offset is
-		// an address and must not reach the report.
-		location, _, _ := strings.Cut(rest, " ")
-		if path, lineNo, found := strings.Cut(location, ":"); found && lineNo != "" {
-			return "/" + path + ":" + lineNo, true
+		if !expectTop {
+			continue
+		}
+		expectTop = false
+		fields := strings.Split(line, "\t")
+		if len(fields) < 4 {
+			continue
+		}
+		function, _, _ := strings.Cut(fields[2], "+")
+		frames = append(frames, frame{function: function, position: strings.TrimSpace(fields[3])})
+	}
+	return frames
+}
+
+// LeakOrigin is the source location of the first leaked goroutine's parked
+// frame, in "file:line" form as the runtime printed it. The line number is not
+// part of any fingerprint, so surfacing it costs no stability, and without it
+// a leak finding had no place a reader could open.
+func LeakOrigin(output string) (string, bool) {
+	for _, f := range topFrames(output) {
+		path, lineNo, found := strings.Cut(f.position, ":")
+		if found && path != "" && lineNo != "" {
+			if _, err := strconv.Atoi(lineNo); err == nil {
+				return f.position, true
+			}
 		}
 	}
 	return "", false
 }
 
-// LeakFunctions extracts the functions goleak found on top of the leaked
-// goroutines' stacks, sorted and without repeats.
+// LeakFunctions extracts the functions the leaked goroutines are parked in,
+// sorted and without repeats.
 //
-// Sorted, because goleak reports the goroutines in whatever order the runtime
-// hands them over and the set itself varies between runs of the same code. A
+// Sorted, because the runtime reports goroutines in whatever order it holds
+// them and the set itself can vary between runs of the same code. A
 // description built in that order is a different string every time, and a
-// finding named by its description is then a different finding every time: on a
-// production run the same leak arrived as new, fixed and pre-existing inside one
-// report. Order and membership belong in the message; neither may reach an
+// finding named by its description is then a different finding every time: on
+// a production run the same leak arrived as new, fixed and pre-existing inside
+// one report. Order and membership belong in the message; neither may reach an
 // identity.
 func LeakFunctions(output string) []string {
 	seen := map[string]bool{}
 	var funcs []string
-	for line := range strings.SplitSeq(output, "\n") {
-		_, rest, found := strings.Cut(line, "with ")
-		if !found {
+	for _, f := range topFrames(output) {
+		if f.function == "" || seen[f.function] {
 			continue
 		}
-		fn, _, found := strings.Cut(rest, " on top of the stack")
-		if !found || fn == "" || seen[fn] {
-			continue
-		}
-		seen[fn] = true
-		funcs = append(funcs, fn)
+		seen[f.function] = true
+		funcs = append(funcs, f.function)
 	}
 	slices.Sort(funcs)
 	return funcs
 }
 
-// LeakMessage extracts a deterministic description from goleak output, keeping
-// the leaked functions and dropping goroutine IDs and addresses.
+// LeakMessage extracts a deterministic description from the profile, keeping
+// the parked functions and dropping goroutine counts and addresses.
 func LeakMessage(output string) (string, bool) {
 	funcs := LeakFunctions(output)
 	if len(funcs) == 0 {
 		return "", false
 	}
 	return "tests leave goroutines running after completion: " + strings.Join(funcs, ", "), true
-}
-
-// IsLeakFailure reports whether a test failure's output is goleak reporting
-// leaked goroutines rather than an ordinary assertion failure.
-func IsLeakFailure(output string) bool {
-	return strings.Contains(output, "found unexpected goroutines")
 }

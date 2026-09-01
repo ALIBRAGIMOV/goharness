@@ -3,7 +3,7 @@ package toolcache_test
 import (
 	"bytes"
 	"compress/gzip"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"net/http"
 	"net/http/httptest"

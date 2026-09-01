@@ -18,8 +18,11 @@ type BaseOrigin string
 const (
 	BaseFromFlag      BaseOrigin = "explicit --base"
 	BaseFromMergeBase BaseOrigin = "merge-base with default branch"
-	BaseFromParent    BaseOrigin = "parent commit"
-	BaseUnavailable   BaseOrigin = "unavailable"
+	// BaseFromHead is HEAD itself: the working tree carries uncommitted work and
+	// HEAD is on the default branch, so that work is the change.
+	BaseFromHead    BaseOrigin = "HEAD, judging uncommitted work"
+	BaseFromParent  BaseOrigin = "parent commit"
+	BaseUnavailable BaseOrigin = "unavailable"
 )
 
 // Status is how a file was changed. It matters for rules that treat rewriting
@@ -96,7 +99,8 @@ func (c ChangeSet) HasBase() bool {
 }
 
 // ResolveBase picks the base revision in the documented order: explicit flag,
-// merge-base with the default branch, then the parent commit.
+// merge-base with the default branch, HEAD when HEAD is on the default branch
+// and the working tree carries uncommitted work, then the parent commit.
 func ResolveBase(ctx context.Context, git repo.Git, r repo.Repository, explicit string) (string, BaseOrigin, error) {
 	if !r.HasGit || !r.HasCommits {
 		return "", BaseUnavailable, nil
@@ -116,9 +120,25 @@ func ResolveBase(ctx context.Context, git repo.Git, r repo.Repository, explicit 
 
 	for _, branch := range defaultBranchCandidates(ctx, git, r) {
 		merged, ok := tryRev(ctx, git, r, "merge-base", branch, "HEAD")
-		if ok && merged != head {
+		if !ok {
+			continue
+		}
+		if merged != head {
 			return merged, BaseFromMergeBase, nil
 		}
+		// HEAD is on the default branch. Uncommitted work is then the change and
+		// HEAD is its base. Judging the commit before HEAD as well, which is what
+		// the parent fallback below does, blamed an operator's working tree for
+		// the debt of whatever upstream commit their clone happened to sit on.
+		// With a clean tree the last commit is the only candidate there is.
+		snapshot, err := repo.CaptureSnapshot(ctx, git, r.Root)
+		if err != nil {
+			return "", BaseUnavailable, err
+		}
+		if len(snapshot.Entries) > 0 {
+			return head, BaseFromHead, nil
+		}
+		break
 	}
 	if parent, ok := tryRev(ctx, git, r, "rev-parse", "--verify", "HEAD^{commit}~1"); ok {
 		return parent, BaseFromParent, nil

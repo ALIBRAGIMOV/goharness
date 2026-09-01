@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -198,7 +199,35 @@ func writeCounts(b *strings.Builder, p Palette, r verify.Result, scope Scope) {
 	fmt.Fprintf(b, "\nevidence: %d new, %d pre-existing, %d fixed, %d advisory; %d tool failure(s); %s\n",
 		newFindings, preexisting, fixed, advisory, len(r.Failures), r.Duration.Round(1e6))
 	writeSlowestChecks(b, p, r)
+	writeMutation(b, p, r)
 	writeScopeNote(b, p, r, scope)
+}
+
+// writeMutation says what the mutation check measured, in one line. A
+// discharged test-effectiveness claim over zero mutants is honest only when
+// the reader can see that zero.
+func writeMutation(b *strings.Builder, p Palette, r verify.Result) {
+	m := r.Mutation
+	if m == nil {
+		return
+	}
+	var line string
+	switch {
+	case m.Targets == 0:
+		line = "mutation: no function body changed, nothing to mutate"
+	case m.Mutants == 0:
+		line = fmt.Sprintf("mutation: %d changed function(s) offer no construct to mutate", m.Targets)
+	default:
+		line = fmt.Sprintf("mutation: %d mutant(s) over %d changed function(s); %d ran, %d killed, %d survived",
+			m.Mutants, m.Targets, m.Ran, m.Killed, m.Survived)
+		if m.Unbuilt > 0 {
+			line += fmt.Sprintf(", %d did not build", m.Unbuilt)
+		}
+		if m.TimedOut > 0 {
+			line += fmt.Sprintf(", %d timed out", m.TimedOut)
+		}
+	}
+	fmt.Fprintf(b, "%s\n", p.dim(line))
 }
 
 // Past slowCheckThreshold the report says where the time went. Below it the
@@ -258,6 +287,42 @@ func writeScopeNote(b *strings.Builder, p Palette, r verify.Result, scope Scope)
 	fmt.Fprintf(b, "%s\n", p.dim(fmt.Sprintf(
 		"--evidence %s: %d of %d finding(s) not shown; "+
 			"rerun with --evidence full to read them", scope, omitted, len(r.Evidence))))
+	writeEditedFileDebt(b, p, r, scope)
+}
+
+// debtFilesShown bounds the debt line: past it the line names the largest
+// files and counts the rest, because a change that opens thirty legacy files
+// needs the number, not the list.
+const debtFilesShown = 5
+
+// writeEditedFileDebt names the files the change edited whose pre-existing
+// findings the view withheld. The rows are debt an audit judges; the line is
+// what keeps a short report from reading as a clean file.
+func writeEditedFileDebt(b *strings.Builder, p Palette, r verify.Result, scope Scope) {
+	debt := map[string]int{}
+	for _, e := range r.Evidence {
+		if !scope.Keeps(e) && e.State == evidence.StatePreexisting && e.Origin == evidence.OriginChangedFile {
+			debt[e.File]++
+		}
+	}
+	if len(debt) == 0 {
+		return
+	}
+	files := slices.SortedFunc(maps.Keys(debt), func(x, y string) int {
+		if c := cmp.Compare(debt[y], debt[x]); c != 0 {
+			return c
+		}
+		return strings.Compare(x, y)
+	})
+	parts := make([]string, 0, debtFilesShown)
+	for _, file := range files[:min(len(files), debtFilesShown)] {
+		parts = append(parts, fmt.Sprintf("%s %d", file, debt[file]))
+	}
+	line := "debt in edited files, pre-existing and not shown: " + strings.Join(parts, ", ")
+	if len(files) > len(parts) {
+		line += fmt.Sprintf(" and %d more file(s)", len(files)-len(parts))
+	}
+	fmt.Fprintf(b, "%s\n", p.dim(line+"; an audit judges it"))
 }
 
 // writeBaseline prints the ledger burn-down in one line, which is the whole

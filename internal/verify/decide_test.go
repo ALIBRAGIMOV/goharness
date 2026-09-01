@@ -83,8 +83,8 @@ func TestParseMode(t *testing.T) {
 			t.Fatalf("ParseMode(%q) = %q, %v", name, mode, ok)
 		}
 	}
-	if mode, ok := verify.ParseMode("deep"); !ok || mode != verify.ModeAudit {
-		t.Fatalf("ParseMode(\"deep\") = %q, %v; want the audit alias", mode, ok)
+	if mode, ok := verify.ParseMode("deep"); ok || mode != "" {
+		t.Fatalf("ParseMode(\"deep\") = %q, %v; the alias was retired and must not resolve", mode, ok)
 	}
 	if _, ok := verify.ParseMode("fix"); ok {
 		t.Fatal("ParseMode accepted an unknown mode")

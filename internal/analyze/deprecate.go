@@ -3,7 +3,6 @@ package analyze
 import (
 	"go/ast"
 	"go/token"
-	"strings"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
@@ -81,12 +80,20 @@ func migratable(doc *ast.CommentGroup) bool {
 	return deprecated(doc) && !hasFixInline(doc)
 }
 
+// hasFixInline reads the directive the way the go command does: through
+// ast.ParseDirective, so spacing and a trailing comment do not hide it and a
+// line that merely mentions the words is not mistaken for it.
 func hasFixInline(doc *ast.CommentGroup) bool {
 	if doc == nil {
 		return false
 	}
 	for _, line := range doc.List {
-		if strings.TrimSpace(line.Text) == fixInlineDirective {
+		directive, ok := ast.ParseDirective(line.Slash, line.Text)
+		if !ok || directive.Tool != "go" || directive.Name != "fix" {
+			continue
+		}
+		args, err := directive.ParseArgs()
+		if err == nil && len(args) > 0 && args[0].Arg == "inline" {
 			return true
 		}
 	}

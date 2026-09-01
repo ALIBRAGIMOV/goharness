@@ -2,12 +2,15 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,58 +80,171 @@ func median(samples []BenchSample, pick func(BenchSample) float64) float64 {
 	return values[len(values)/2]
 }
 
-// RunBenchmarks executes every benchmark in the given packages once and returns
-// the parsed samples keyed by benchmark name. Callers take repeated samples by
-// calling again, which is what lets a comparison interleave the two sides.
-func RunBenchmarks(ctx context.Context, runner Runner, dir string, patterns []string) (map[string]BenchResult, error) {
-	if len(patterns) == 0 {
-		return map[string]BenchResult{}, nil
-	}
-	args := []string{
-		"test", "-run", "^$", "-bench", ".", "-benchmem",
-		"-benchtime", BenchTime, "-count", "1", "-json",
-	}
-	args = append(args, patterns...)
-
-	res, err := runner.Run(ctx, Command{Dir: dir, Name: "go", Args: args})
-	if err != nil {
-		return nil, err
-	}
-	results, parseErr := parseBenchmarkStream(res.Stdout)
-	if parseErr != nil {
-		return nil, parseErr
-	}
-	if len(results) == 0 && res.ExitCode != 0 {
-		return nil, fmt.Errorf("go test -bench exited %d without producing measurements: %s",
-			res.ExitCode, strings.TrimSpace(firstLines(res.Stderr+res.Stdout, 20)))
-	}
-	return results, nil
+// BrokenBenchmark is a benchmark the run could not measure because it failed:
+// a panic, a fatal error, or a Fatal call inside the benchmark.
+type BrokenBenchmark struct {
+	Package string
+	// Output is the first line of the failure that says what went wrong.
+	Output string
 }
 
-func parseBenchmarkStream(stdout string) (map[string]BenchResult, error) {
-	dec := json.NewDecoder(strings.NewReader(stdout))
-	out := map[string]BenchResult{}
+// BenchRun is one sampling of a package set.
+type BenchRun struct {
+	Results map[string]BenchResult
+	// Broken maps every benchmark that failed to what it said. Each is skipped
+	// and the packages are run again without it, so a benchmark that panics
+	// costs its own measurement rather than every measurement of its package.
+	Broken map[string]BrokenBenchmark
+}
+
+// maxBrokenBenchmarks bounds how many failing benchmarks one sampling skips
+// past: each is another run of the binaries, and a package set where more of
+// them fail is reported as the failure it is.
+const maxBrokenBenchmarks = 5
+
+// RunBenchmarks executes every benchmark in the given packages once, except
+// the names in skip, and returns the parsed samples keyed by benchmark name.
+// Callers take repeated samples by calling again, which is what lets a
+// comparison interleave the two sides, and pass the Broken names of earlier
+// samples as skip so a failure is paid for once.
+func RunBenchmarks(ctx context.Context, runner Runner, dir string, patterns, skip []string) (BenchRun, error) {
+	run := BenchRun{Results: map[string]BenchResult{}, Broken: map[string]BrokenBenchmark{}}
+	if len(patterns) == 0 {
+		return run, nil
+	}
+	skip = slices.Clone(skip)
+	for attempt := 0; ; attempt++ {
+		args := []string{
+			"test", "-run", "^$", "-bench", ".", "-benchmem",
+			"-benchtime", BenchTime, "-count", "1", "-json",
+		}
+		if len(skip) > 0 {
+			args = append(args, "-skip", skipPattern(skip))
+		}
+		args = append(args, patterns...)
+
+		res, err := runner.Run(ctx, Command{Dir: dir, Name: "go", Args: args})
+		if err != nil {
+			return BenchRun{}, err
+		}
+		stream, parseErr := parseBenchmarkStream(res.Stdout)
+		if parseErr != nil {
+			return BenchRun{}, parseErr
+		}
+		if res.ExitCode == 0 {
+			run.Results = stream.results
+			return run, nil
+		}
+		name, broken, found := stream.failure()
+		if !found || attempt == maxBrokenBenchmarks {
+			return BenchRun{}, fmt.Errorf("go test -bench exited %d without producing measurements: %s",
+				res.ExitCode, strings.TrimSpace(firstLines(stream.text()+res.Stderr, 20)))
+		}
+		run.Broken[name] = broken
+		skip = append(skip, name)
+	}
+}
+
+// skipPattern builds the -skip expression for whole benchmarks. A failing
+// sub-benchmark takes its parent with it, because the parent is what -skip
+// addresses and what the next sample must not start.
+func skipPattern(names []string) string {
+	quoted := make([]string, 0, len(names))
+	for _, name := range names {
+		quoted = append(quoted, regexp.QuoteMeta(name))
+	}
+	return "^(" + strings.Join(quoted, "|") + ")$"
+}
+
+// benchStream is what one -json benchmark run said: the measurements, which
+// benchmark each package was running last, which ones reported failure, and
+// every output line in order for the reader who has to see the rest.
+type benchStream struct {
+	results map[string]BenchResult
+	running map[string]string
+	order   []string
+	failed  []benchFailure
+	output  map[string][]string
+	lines   []string
+}
+
+type benchFailure struct {
+	name, pkg string
+}
+
+func parseBenchmarkStream(stdout string) (*benchStream, error) {
+	dec := jsontext.NewDecoder(strings.NewReader(stdout))
+	stream := &benchStream{
+		results: map[string]BenchResult{}, running: map[string]string{}, output: map[string][]string{},
+	}
 	for {
 		var ev testEvent
-		if err := dec.Decode(&ev); err != nil {
-			if strings.Contains(err.Error(), "EOF") {
+		if err := json.UnmarshalDecode(dec, &ev); err != nil {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			return nil, fmt.Errorf("decoding benchmark output: %w", err)
 		}
-		if ev.Action != "output" {
-			continue
+		switch ev.Action {
+		case "run":
+			stream.running[ev.Package] = ev.Test
+			stream.order = append(stream.order, ev.Package)
+		case "fail":
+			if ev.Test != "" {
+				stream.failed = append(stream.failed, benchFailure{name: ev.Test, pkg: ev.Package})
+			}
+		case "output":
+			stream.lines = append(stream.lines, strings.TrimRight(ev.Output, "\n"))
+			if ev.Test != "" {
+				key := ev.Package + " " + ev.Test
+				stream.output[key] = append(stream.output[key], ev.Output)
+			}
+			name, sample, ok := parseBenchmarkLine(ev.Output)
+			if !ok {
+				continue
+			}
+			result := stream.results[name]
+			result.Name = name
+			result.Samples = append(result.Samples, sample)
+			stream.results[name] = result
 		}
-		name, sample, ok := parseBenchmarkLine(ev.Output)
-		if !ok {
-			continue
-		}
-		result := out[name]
-		result.Name = name
-		result.Samples = append(result.Samples, sample)
-		out[name] = result
 	}
-	return out, nil
+	return stream, nil
+}
+
+// failure names the benchmark that brought the run down: the first one the
+// stream reported as failed, else the one that was running when the process
+// died, which is what a panic leaves behind. The name is the top-level
+// benchmark, since that is the unit -skip addresses.
+func (s *benchStream) failure() (string, BrokenBenchmark, bool) {
+	var name, pkg string
+	switch {
+	case len(s.failed) > 0:
+		name, pkg = s.failed[0].name, s.failed[0].pkg
+	case len(s.order) > 0:
+		pkg = s.order[len(s.order)-1]
+		name = s.running[pkg]
+	}
+	if name == "" {
+		return "", BrokenBenchmark{}, false
+	}
+	line := "no output captured"
+	for _, out := range s.output[pkg+" "+name] {
+		trimmed := strings.TrimSpace(out)
+		if trimmed == "" || strings.HasPrefix(trimmed, "===") || strings.HasPrefix(trimmed, "---") || trimmed == name {
+			continue
+		}
+		line = trimmed
+		break
+	}
+	top, _, _ := strings.Cut(name, "/")
+	return top, BrokenBenchmark{Package: pkg, Output: line}, true
+}
+
+// text returns the run's output as the reader would have seen it without
+// -json, which is the only form an error message should quote.
+func (s *benchStream) text() string {
+	return strings.Join(s.lines, "\n")
 }
 
 // parseBenchmarkLine reads one "BenchmarkX-8  200  1234 ns/op  56 B/op  7
@@ -139,9 +255,9 @@ func parseBenchmarkLine(line string) (name string, sample BenchSample, ok bool) 
 		return "", BenchSample{}, false
 	}
 	name = fields[0]
-	if i := strings.LastIndex(name, "-"); i > 0 {
-		if _, err := strconv.Atoi(name[i+1:]); err == nil {
-			name = name[:i]
+	if base, procs, ok := strings.CutLast(name, "-"); ok && base != "" {
+		if _, err := strconv.Atoi(procs); err == nil {
+			name = base
 		}
 	}
 	measured := false
@@ -169,7 +285,7 @@ func OverlayPath(dir string, replacements map[string]string) (string, error) {
 	document := struct {
 		Replace map[string]string `json:"Replace"`
 	}{Replace: replacements}
-	encoded, err := json.Marshal(document)
+	encoded, err := json.Marshal(document, json.Deterministic(true))
 	if err != nil {
 		return "", fmt.Errorf("encoding build overlay: %w", err)
 	}
@@ -227,12 +343,12 @@ func RunTestsWithOverlay(ctx context.Context, runner Runner, dir, overlay string
 // noticed the mutant is the evidence the run was after, whatever happened to
 // packages further away that never compiled against it.
 func overlayOutcome(stdout string) (OverlayOutcome, error) {
-	dec := json.NewDecoder(strings.NewReader(stdout))
+	dec := jsontext.NewDecoder(strings.NewReader(stdout))
 	outcome := OverlayPassed
 	for {
 		var ev testEvent
-		if err := dec.Decode(&ev); err != nil {
-			if err == io.EOF {
+		if err := json.UnmarshalDecode(dec, &ev); err != nil {
+			if errors.Is(err, io.EOF) {
 				return outcome, nil
 			}
 			return OverlayPassed, fmt.Errorf("decoding go test JSON: %w", err)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"io/fs"
 	"maps"
 	"slices"
 	"strings"
@@ -76,8 +77,8 @@ func (s *ParsedScope) Metrics(ctx context.Context) (Metrics, error) {
 
 // ComputeMetrics parses the given files and measures every function and package
 // in them.
-func ComputeMetrics(ctx context.Context, root string, relFiles []string) (Metrics, error) {
-	scope, err := Parse(ctx, root, relFiles)
+func ComputeMetrics(ctx context.Context, tree fs.FS, relFiles []string) (Metrics, error) {
+	scope, err := Parse(ctx, tree, relFiles)
 	if err != nil {
 		return Metrics{}, err
 	}

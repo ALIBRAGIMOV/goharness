@@ -165,8 +165,10 @@ func MandatoryRuleIDs() []string {
 	}
 }
 
-// UngrandfatherableRuleIDs lists rules that block whenever they are in scope,
-// even when identical evidence exists at the base revision.
+// UngrandfatherableRuleIDs lists the rules that block on a pre-existing
+// finding as well: everywhere in an audit, and on the lines the change wrote
+// in a change gate, where a directive the change rewrote or moved is the
+// change's however old it is.
 func UngrandfatherableRuleIDs() []string {
 	return []string{
 		RuleSuppressNolint,

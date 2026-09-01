@@ -3,9 +3,9 @@ package admission
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -104,7 +104,7 @@ func scopeMatch(pattern, file string) bool {
 
 // LoadContract resolves the contract in priority order: the explicit flag, the
 // conventional file at the repository root, then the implicit default.
-func LoadContract(explicitPath, repoRoot string) (TaskContract, error) {
+func LoadContract(explicitPath string, tree fs.FS) (TaskContract, error) {
 	if explicitPath != "" {
 		data, err := os.ReadFile(explicitPath)
 		if err != nil {
@@ -112,9 +112,9 @@ func LoadContract(explicitPath, repoRoot string) (TaskContract, error) {
 		}
 		return ParseContract(data, ContractFromFlag)
 	}
-	data, err := os.ReadFile(filepath.Join(repoRoot, ContractFileName))
+	data, err := fs.ReadFile(tree, ContractFileName)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return TaskContract{
 				Source: ContractFromDefault,
 				Goal:   "this change must be admissible under the strict policy",

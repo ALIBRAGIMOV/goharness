@@ -4,17 +4,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
-
-	"go.uber.org/zap"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
 	"github.com/ALIBRAGIMOV/goharness/internal/toolcache"
@@ -95,7 +93,7 @@ func (t *target) scopePackages(ctx context.Context) error {
 func (t *target) contentDigest(files []string) (string, error) {
 	parts := make([]string, 0, len(files))
 	for _, rel := range files {
-		src, err := os.ReadFile(filepath.Join(t.root, filepath.FromSlash(rel)))
+		src, err := t.tree.ReadFile(filepath.FromSlash(rel))
 		if err != nil {
 			return "", fmt.Errorf("reading %s: %w", rel, err)
 		}
@@ -152,7 +150,7 @@ func (t *target) moduleDigest() string {
 	names := []string{"go.mod", "go.sum"}
 	parts := make([]string, 0, len(names))
 	for _, name := range names {
-		src, err := os.ReadFile(filepath.Join(t.root, name))
+		src, err := t.tree.ReadFile(name)
 		if err != nil {
 			parts = append(parts, name+"\x00absent")
 			continue
@@ -178,7 +176,9 @@ type headEntry[T any] struct {
 }
 
 func payloadIntegrity[T any](payload T) (string, error) {
-	encoded, err := json.Marshal(payload)
+	// Deterministic, because the sum is the identity of the payload and a map
+	// encoded in iteration order would give one payload many identities.
+	encoded, err := json.Marshal(payload, json.Deterministic(true))
 	if err != nil {
 		return "", err
 	}
@@ -198,7 +198,7 @@ func readHeadEntry[T any](e *Engine, kind, key string) (payload T, ok bool) {
 	if err := cache.ReadDerived(kind, key, &doc); err != nil {
 		if !errors.Is(err, toolcache.ErrNotProvisioned) {
 			e.Logger.Info("head evidence cache unreadable",
-				zap.String("kind", kind), zap.String("key", key), zap.Error(err))
+				slog.String("kind", kind), slog.String("key", key), slog.Any("error", err))
 		}
 		return zero, false
 	}
@@ -208,7 +208,7 @@ func readHeadEntry[T any](e *Engine, kind, key string) (payload T, ok bool) {
 	integrity, err := payloadIntegrity(doc.Payload)
 	if err != nil || integrity != doc.Integrity {
 		e.Logger.Info("head evidence entry failed its integrity check; recomputing",
-			zap.String("kind", kind), zap.String("key", key))
+			slog.String("kind", kind), slog.String("key", key))
 		return zero, false
 	}
 	return doc.Payload, true
@@ -229,6 +229,6 @@ func writeHeadEntry[T any](e *Engine, kind, key string, payload T) {
 	doc := headEntry[T]{Key: key, Goharness: e.Version, Integrity: integrity, Payload: payload}
 	if err := cache.WriteDerived(kind, key, doc, toolcache.MaxPerPackageEntries); err != nil {
 		e.Logger.Info("head evidence not cached",
-			zap.String("kind", kind), zap.String("key", key), zap.Error(err))
+			slog.String("kind", kind), slog.String("key", key), slog.Any("error", err))
 	}
 }

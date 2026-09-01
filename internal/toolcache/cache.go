@@ -11,7 +11,8 @@ package toolcache
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -196,7 +197,7 @@ func writeJSON(path string, document any) (err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
-	encoded, err := json.MarshalIndent(document, "", "  ")
+	encoded, err := json.Marshal(document, json.Deterministic(true), jsontext.Multiline(true), jsontext.WithIndent("  "))
 	if err != nil {
 		return fmt.Errorf("encoding %s: %w", path, err)
 	}

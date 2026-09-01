@@ -3,6 +3,7 @@ package leakcheck_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/leakcheck"
@@ -42,7 +43,7 @@ func Start() func() {
 
 func runInjected(t *testing.T, moduleRoot string) []tool.TestFailure {
 	t.Helper()
-	overlay, err := leakcheck.Overlay(t.TempDir(), moduleRoot, "example.com/leakfixture",
+	overlay, err := leakcheck.Overlay(t.TempDir(), moduleRoot,
 		[]leakcheck.Package{{Dir: "lib", Name: "lib"}})
 	if err != nil {
 		t.Fatalf("building overlay: %v", err)
@@ -55,7 +56,7 @@ func runInjected(t *testing.T, moduleRoot string) []tool.TestFailure {
 	return failures
 }
 
-func TestInjectedGoleakCatchesALeakedGoroutine(t *testing.T) {
+func TestInjectedTestMainCatchesALeakedGoroutine(t *testing.T) {
 	t.Parallel()
 	dir := newLeakModule(t, `package lib
 
@@ -84,7 +85,7 @@ func TestStart(t *testing.T) {
 	}
 }
 
-func TestInjectedGoleakPassesWhenGoroutinesAreStopped(t *testing.T) {
+func TestInjectedTestMainPassesWhenGoroutinesAreStopped(t *testing.T) {
 	t.Parallel()
 	dir := newLeakModule(t, `package lib
 
@@ -107,44 +108,77 @@ func TestHasTestMainDetection(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "a_test.go", "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { t.Log(1) }\n")
-	found, err := leakcheck.HasTestMain(dir)
+	found, err := leakcheck.HasTestMain(os.DirFS(dir), ".")
 	if err != nil || found {
 		t.Fatalf("HasTestMain = %v, %v; want false, nil", found, err)
 	}
 	writeFile(t, dir, "main_test.go", "package p\n\nimport \"testing\"\n\nfunc TestMain(m *testing.M) { m.Run() }\n")
-	found, err = leakcheck.HasTestMain(dir)
+	found, err = leakcheck.HasTestMain(os.DirFS(dir), ".")
 	if err != nil || !found {
 		t.Fatalf("HasTestMain = %v, %v; want true, nil", found, err)
 	}
 }
 
+// profileOutput is what the injected TestMain prints for two leaked goroutines
+// parked in different functions, exactly as the runtime formats the profile at
+// debug level 1: one header per distinct stack, then its frames with the
+// runtime's own frames already elided.
+const profileOutput = `goharness leak check: 2 goroutine(s) blocked forever after the tests finished
+goroutineleak profile: total 2
+1 @ 0x1043c4428 0x104358670 0x1043581f4 0x104468524 0x1043cacc4
+#	0x104468523	example.com/x/lib.Start.func1+0x23	/src/x/lib/lib.go:19
+
+1 @ 0x1043c4428 0x104358670 0x1043581f4 0x104468999 0x1043cacc4
+#	0x104468998	example.com/x/lib.(*Pool).run+0x58	/src/x/lib/pool.go:41
+#	0x104468777	example.com/x/lib.(*Pool).loop+0x11	/src/x/lib/pool.go:30
+
+`
+
 // TestLeakOriginNamesASourceLocation covers the anchor that turns a
-// package-scoped leak finding into something a reader can open. goleak has the
-// leaked goroutine's stack at detection time and the harness discarded it,
-// leaving every leak finding with no location at all.
+// package-scoped leak finding into something a reader can open: the parked
+// frame of the first leaked goroutine, with its line and without the address.
 func TestLeakOriginNamesASourceLocation(t *testing.T) {
 	t.Parallel()
-	const output = `found unexpected goroutines:
-[Goroutine 21 in state chan receive, with example.com/x/lib.Start.func1 on top of the stack:
-goroutine 21 [chan receive]:
-example.com/x/lib.Start.func1()
-	/src/x/lib/lib.go:19 +0x34
-created by example.com/x/lib.Start in goroutine 20
-	/src/x/lib/lib.go:17 +0x64
-]
-`
-	got, ok := leakcheck.LeakOrigin(output)
+	got, ok := leakcheck.LeakOrigin(profileOutput)
 	if !ok {
-		t.Fatalf("no origin extracted from goleak output")
+		t.Fatalf("no origin extracted from the profile")
 	}
 	if got != "/src/x/lib/lib.go:19" {
-		t.Fatalf("origin = %q, want the first stack frame with its line and no address", got)
+		t.Fatalf("origin = %q, want the parked frame with its line and no address", got)
+	}
+}
+
+// TestLeakFunctionsNamesTheParkedFrames pins the identity input: one function
+// per leaked goroutine, the innermost non-runtime frame, sorted, no repeats.
+func TestLeakFunctionsNamesTheParkedFrames(t *testing.T) {
+	t.Parallel()
+	got := leakcheck.LeakFunctions(profileOutput + profileOutput)
+	want := []string{"example.com/x/lib.(*Pool).run", "example.com/x/lib.Start.func1"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("LeakFunctions = %v, want %v", got, want)
+	}
+	if !leakcheck.IsLeakFailure(profileOutput) {
+		t.Fatal("the profile output is not recognised as a leak")
 	}
 }
 
 func TestLeakOriginReportsAbsenceRatherThanGuessing(t *testing.T) {
 	t.Parallel()
-	if got, ok := leakcheck.LeakOrigin("found unexpected goroutines:\nno frames here\n"); ok {
+	if got, ok := leakcheck.LeakOrigin("goharness leak check: 1 goroutine(s) blocked forever after the tests finished\nno frames here\n"); ok {
 		t.Fatalf("an output with no stack frame yielded %q", got)
+	}
+}
+
+// TestUnavailableProfileIsNotALeakAndNotClean pins the third outcome: a go
+// command older than the profile makes the injected TestMain fail with the
+// unavailable marker, which is missing evidence rather than either verdict.
+func TestUnavailableProfileIsNotALeakAndNotClean(t *testing.T) {
+	t.Parallel()
+	const output = "goharness leak check: unavailable\n"
+	if !leakcheck.IsLeakUnavailable(output) {
+		t.Fatal("the unavailable marker is not recognised")
+	}
+	if leakcheck.IsLeakFailure(output) {
+		t.Fatal("an unavailable profile was read as a leak")
 	}
 }

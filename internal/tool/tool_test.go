@@ -310,7 +310,9 @@ func TestCompareGoVersionsOrdersNumerically(t *testing.T) {
 		{"go1.26.10", "go1.26.9", 1},
 		{"go1.9", "go1.10", -1},
 		{"go1.26", "go1.26.0", -1},
-		{"go1.27rc1", "go1.27", 0},
+		{"go1.27rc1", "go1.27.0", -1},
+		{"go1.27rc1", "go1.27rc2", -1},
+		{"go1.27", "go1.27rc1", -1},
 		{"devel +abc", "devel +def", 0},
 	}
 	for _, tc := range cases {

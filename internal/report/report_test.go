@@ -2,7 +2,8 @@ package report_test
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"maps"
 	"strings"
 	"testing"
@@ -186,7 +187,7 @@ func summaryFixture(t *testing.T) verify.Result {
 			Message: "Error return value of `rows.Close` is not checked", State: evidence.StatePreexisting},
 		{RuleID: policy.RuleCommentEmDash, File: "doc.go", Line: 3, Tool: "goharness",
 			Message: "comment contains the em dash", State: evidence.StateNew},
-		{RuleID: policy.RuleGoroutineLeak, Package: "example.com/x/server", Tool: "goleak",
+		{RuleID: policy.RuleGoroutineLeak, Package: "example.com/x/server", Tool: "runtime/pprof",
 			Message: "tests leave goroutines running", State: evidence.StateFixed},
 	}))
 	r.Execution.Files = []string{"store.go", "doc.go"}
@@ -526,7 +527,7 @@ func TestNewBlocksAreAbsentWhenThereIsNothingToSay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshalling: %v", err)
 	}
-	var fields map[string]json.RawMessage
+	var fields map[string]jsontext.Value
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		t.Fatalf("decoding: %v", err)
 	}

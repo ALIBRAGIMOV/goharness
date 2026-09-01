@@ -2,7 +2,8 @@ package report_test
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"strings"
 	"testing"
 
@@ -273,7 +274,7 @@ func TestDiffJSONIsTaggedAndDeterministic(t *testing.T) {
 	if first != render() {
 		t.Fatal("two renderings of the same inputs differ")
 	}
-	var decoded map[string]json.RawMessage
+	var decoded map[string]jsontext.Value
 	if err := json.Unmarshal([]byte(first), &decoded); err != nil {
 		t.Fatalf("the diff document is not valid JSON: %v", err)
 	}

@@ -28,8 +28,13 @@ import (
 // target is one tree to verify: the head worktree, or the temporary base
 // worktree during comparison.
 type target struct {
-	engine       *Engine
-	root         string
+	engine *Engine
+	root   string
+	// tree is root opened as a boundary: every read of repository content goes
+	// through it, so a path that escapes the tree, by symlink or by dot-dot,
+	// cannot be read and judged as this repository's code. It is closed when the
+	// run that built the target ends.
+	tree         *os.Root
 	modulePath   string
 	graph        change.PackageGraph
 	packages     []string
@@ -385,7 +390,7 @@ func (t *target) gofmtPackage(ctx context.Context, pkg packageScope) ([]formatFi
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		src, err := os.ReadFile(filepath.Join(t.root, filepath.FromSlash(rel)))
+		src, err := t.tree.ReadFile(filepath.FromSlash(rel))
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", rel, err)
 		}
@@ -409,12 +414,13 @@ func (t *target) goimportsPackage(ctx context.Context, pkg packageScope) ([]form
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		full := filepath.Join(t.root, filepath.FromSlash(rel))
-		src, err := os.ReadFile(full)
+		src, err := t.tree.ReadFile(filepath.FromSlash(rel))
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", rel, err)
 		}
-		processed, err := imports.Process(full, src, options)
+		// The full path is the file's name to goimports, which resolves sibling
+		// packages from it; the bytes come from the bounded tree.
+		processed, err := imports.Process(filepath.Join(t.root, filepath.FromSlash(rel)), src, options)
 		if err != nil {
 			continue
 		}
@@ -442,7 +448,7 @@ func (t *target) parseScope(ctx context.Context) error {
 	if t.parsed != nil {
 		return nil
 	}
-	scope, err := analyze.Parse(ctx, t.root, t.judged)
+	scope, err := analyze.Parse(ctx, t.tree.FS(), t.judged)
 	if err != nil {
 		return err
 	}
@@ -594,6 +600,20 @@ func (t *target) runVisibility(_ context.Context) (checkResult, error) {
 	if t.isBase {
 		return checkResult{}, nil
 	}
+	// A diff that holds nothing is not a clean change; it is no change. A
+	// document that called it admitted would certify work the gate never saw,
+	// which is what an agent verifying against the commit it just made, or
+	// against a tree it never edited, would present as completion.
+	if t.engine.EmptyChange {
+		return checkResult{unproducible: []admission.Unproducible{{
+			Kind: admission.KindChangeVisible,
+			Reason: "nothing differs between the base revision and the working tree, " +
+				"so there is no change to admit",
+			Remedy: "if the work is already committed, name the revision before it with --base; " +
+				"the default base is the merge-base with the default branch, or HEAD when the " +
+				"working tree carries uncommitted work",
+		}}}, nil
+	}
 	unexamined, faults := t.graph.Unexamined(t.engine.ChangedEntries)
 	// A file the harness could not read is a fault in the harness, and saying so
 	// in the vocabulary of build constraints would send the reader hunting for a
@@ -636,7 +656,7 @@ func (t *target) editedGeneratedFile(entry change.Entry) (bool, error) {
 	if entry.Status != change.StatusModified || !strings.HasSuffix(entry.Path, ".go") {
 		return false, nil
 	}
-	return analyze.IsGenerated(filepath.Join(t.root, filepath.FromSlash(entry.Path)))
+	return analyze.IsGenerated(t.tree.FS(), entry.Path)
 }
 
 // isPolicyFile covers the durable policy only. The task contract is a per-run
@@ -847,7 +867,7 @@ func (t *target) runLeakRaceTests(ctx context.Context) (_ checkResult, err error
 			Kind: admission.KindLeakClean,
 			Reason: "a TestMain already exists in " + strings.Join(inChange, ", ") +
 				", which this change touches, so goroutine-leak verification cannot be injected there",
-			Remedy: "call goleak.VerifyTestMain from those TestMain functions, or remove them",
+			Remedy: "remove those TestMain functions so goharness can inject its own, or have them fail the package when runtime/pprof's goroutineleak profile is not empty after m.Run",
 		})
 	}
 
@@ -862,7 +882,7 @@ func (t *target) runLeakRaceTests(ctx context.Context) (_ checkResult, err error
 				err = fmt.Errorf("removing leak-check scratch directory: %w", rmErr)
 			}
 		}()
-		overlay, ovErr := leakcheck.Overlay(scratch, t.root, t.modulePath, injectablePkgs)
+		overlay, ovErr := leakcheck.Overlay(scratch, t.root, injectablePkgs)
 		if ovErr != nil {
 			return checkResult{}, ovErr
 		}
@@ -895,13 +915,29 @@ func (t *target) runLeakRaceTests(ctx context.Context) (_ checkResult, err error
 func (t *target) interpretLeakRun(ctx context.Context, failures []tool.TestFailure) (checkResult, error) {
 	var res checkResult
 	var failed []tool.TestFailure
+	var unavailable []string
 	leaks := map[string]*leakSite{}
 	for _, f := range failures {
-		if !leakcheck.IsLeakFailure(f.Output) {
+		switch {
+		case leakcheck.IsLeakUnavailable(f.Output):
+			unavailable = append(unavailable, f.Package)
+		case leakcheck.IsLeakFailure(f.Output):
+			t.recordLeak(leaks, f)
+		default:
 			failed = append(failed, f)
-			continue
 		}
-		t.recordLeak(leaks, f)
+	}
+	// The tests ran under the go command on PATH, and a runtime older than the
+	// profile cannot say whether anything leaked. That is missing evidence, and
+	// the one thing it must never become is a clean result.
+	if len(unavailable) > 0 {
+		slices.Sort(unavailable)
+		res.unproducible = append(res.unproducible, admission.Unproducible{
+			Kind: admission.KindLeakClean,
+			Reason: "the go command on PATH offers no goroutineleak profile, so leak verification could not run in " +
+				strings.Join(unavailable, ", "),
+			Remedy: "put " + leakcheck.MinimumGoVersion + " or later first on PATH",
+		})
 	}
 	res.evidence = append(res.evidence, t.leakEvidence(leaks)...)
 	confirmed, flaky, err := t.confirmFailures(ctx, failed, []string{"-race"})
@@ -942,7 +978,7 @@ type leakSite struct {
 // A leak belongs to a place rather than to a line, but "nowhere" is not a
 // location: with an empty file a reader has nothing to open and a scoped
 // exception can never match. The package directory is the most precise anchor
-// that is true, and goleak's own stack head names the origin when it falls
+// that is true, and the profile's parked frame names the origin when it falls
 // inside this tree.
 func (t *target) recordLeak(sites map[string]*leakSite, f tool.TestFailure) {
 	file, line := t.leakAnchor(f)
@@ -966,8 +1002,8 @@ func (t *target) recordLeak(sites map[string]*leakSite, f tool.TestFailure) {
 
 // leakEvidence renders one finding per leaking site.
 //
-// The identity is the site and nothing else. goleak lists the goroutines it
-// found in whatever order the runtime produced them, and the list's membership
+// The identity is the site and nothing else. The profile lists the goroutines
+// in whatever order the runtime holds them, and the list's membership
 // varies between runs of the same code, so a finding named by that list is a new
 // finding every run: eleven leaks were reported as introduced between two runs
 // of one commit. The list is what the message is for.
@@ -976,7 +1012,7 @@ func (t *target) leakEvidence(sites map[string]*leakSite) []evidence.Evidence {
 	for _, key := range slices.Sorted(maps.Keys(sites)) {
 		site := sites[key]
 		e := t.newEvidence(policy.RuleGoroutineLeak,
-			"goleak "+leakcheck.Version, tool.GoVersion(),
+			leakcheck.Method, tool.GoVersion(),
 			evidence.SeverityError, site.file, site.line, 0, site.pkg, site.message())
 		e.Identity = policy.RuleGoroutineLeak + " at " + key
 		out = append(out, e)
@@ -1005,14 +1041,14 @@ func (t *target) classifyLeakPackages() (injectable []string, pkgs []leakcheck.P
 		if !ok {
 			continue
 		}
-		hasTests, listErr := leakcheck.HasTestFiles(dir)
+		hasTests, listErr := leakcheck.HasTestFiles(t.tree.FS(), t.rel(dir))
 		if listErr != nil {
 			return nil, nil, nil, listErr
 		}
 		if !hasTests {
 			continue
 		}
-		hasMain, mainErr := leakcheck.HasTestMain(dir)
+		hasMain, mainErr := leakcheck.HasTestMain(t.tree.FS(), t.rel(dir))
 		if mainErr != nil {
 			return nil, nil, nil, mainErr
 		}
@@ -1318,7 +1354,7 @@ func (t *target) belowToolchainFloor() (string, bool) {
 
 // leakAnchor locates a leak as precisely as the tools allow.
 //
-// goleak's stack head is used only when it points inside this tree: a goroutine
+// The parked frame is used only when it points inside this tree: a goroutine
 // parked in the standard library or a dependency is real, but naming a file the
 // reader cannot edit is worse than naming the package they can. The line is
 // reported for navigation only; fingerprints exclude it, so a leak keeps its
@@ -1343,4 +1379,13 @@ func parseLine(text string) int {
 		return 0
 	}
 	return n
+}
+
+// close releases the tree. A target is built by a run and closed by the same
+// run; nothing reads through it afterwards.
+func (t *target) close() error {
+	if t.tree == nil {
+		return nil
+	}
+	return t.tree.Close()
 }
