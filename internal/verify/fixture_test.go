@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
+	"github.com/ALIBRAGIMOV/goharness/internal/toolcache"
 )
 
 // fixture is a throwaway git repository containing a single Go module, built
@@ -94,6 +95,22 @@ func newFixtureIn(t *testing.T, lay layout) *fixture {
 		if mkErr := os.MkdirAll(moduleDir, 0o750); mkErr != nil {
 			t.Fatalf("creating module directory: %v", mkErr)
 		}
+	}
+	// Fixture commits carry a fixed author, committer and date, so the same
+	// sources produce the same commit hash in every run, and a base snapshot
+	// cached by one run of the suite would answer for the next one even after
+	// the code that produced it changed. Every fixture therefore gets its own
+	// cache root; a case that provisions one before building the fixture keeps
+	// it. The pinned linter is the one thing the developer's cache legitimately
+	// supplies, so it is resolved first and handed over by path, and a case that
+	// isolates linter sources afterwards still overrides it.
+	if os.Getenv(toolcache.EnvCacheRoot) == "" {
+		if os.Getenv(tool.GolangciLintEnvVar) == "" {
+			if discovered, err := tool.DiscoverGolangci(moduleRoot(t)); err == nil {
+				t.Setenv(tool.GolangciLintEnvVar, discovered.Path)
+			}
+		}
+		t.Setenv(toolcache.EnvCacheRoot, filepath.Join(t.TempDir(), "goharness-cache"))
 	}
 	f := &fixture{t: t, dir: dir, moduleDir: moduleDir, layout: lay}
 	f.git("init", "--initial-branch=main")

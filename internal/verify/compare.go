@@ -13,6 +13,7 @@ import (
 	"github.com/ALIBRAGIMOV/goharness/internal/analyze"
 	"github.com/ALIBRAGIMOV/goharness/internal/evidence"
 	"github.com/ALIBRAGIMOV/goharness/internal/policy"
+	"github.com/ALIBRAGIMOV/goharness/internal/repo"
 	"github.com/ALIBRAGIMOV/goharness/internal/tool"
 )
 
@@ -31,6 +32,7 @@ func (c *comparison) checksFor(planned []admission.PlannedCheck) []Check {
 		admission.ProducerAntiWeaken:   c.runAntiWeakening,
 		admission.ProducerMutation:     c.runMutation,
 		admission.ProducerBenchmark:    c.runBenchmarks,
+		admission.ProducerDependency:   c.runDependencies,
 	}
 	checks := make([]Check, 0, len(planned))
 	for _, p := range planned {
@@ -251,4 +253,41 @@ func regression(base, head, budgetPercent float64) (float64, bool) {
 	}
 	rise := (head - base) / base * 100
 	return rise, rise > budgetPercent
+}
+
+// runDependencies reports the direct requirements head's go.mod carries that
+// base's did not. The rule is advisory: a new dependency is a decision rather
+// than a defect, and the finding exists so that the decision is seen as one
+// instead of passing as a line in a lockfile.
+func (c *comparison) runDependencies(_ context.Context) (checkResult, error) {
+	headSrc, err := os.ReadFile(filepath.Join(c.head.root, "go.mod"))
+	if err != nil {
+		return checkResult{}, fmt.Errorf("reading go.mod at head: %w", err)
+	}
+	// A base without a go.mod required nothing, so every head requirement is
+	// an addition; the module itself being new is the change's business.
+	baseSrc, err := os.ReadFile(filepath.Join(c.base.root, "go.mod"))
+	if err != nil && !os.IsNotExist(err) {
+		return checkResult{}, fmt.Errorf("reading go.mod at base: %w", err)
+	}
+	direct := map[string]bool{}
+	for _, req := range repo.ParseRequirements(string(baseSrc)) {
+		if !req.Indirect {
+			direct[req.Path] = true
+		}
+	}
+	var out []evidence.Evidence
+	for _, req := range repo.ParseRequirements(string(headSrc)) {
+		if req.Indirect || direct[req.Path] {
+			continue
+		}
+		e := c.head.newEvidence(policy.RuleNewDependency, "goharness", c.engine.Version,
+			evidence.SeverityWarning, "go.mod", req.Line, 0, "",
+			"change adds a direct requirement on "+req.Path+" "+req.Version)
+		// The requirement is the identity: the version it was added at and the
+		// line it landed on both move while the decision stays the same.
+		e.Identity = policy.RuleNewDependency + " " + req.Path
+		out = append(out, c.engine.Policy.Decorate(e))
+	}
+	return checkResult{evidence: out}, nil
 }

@@ -101,6 +101,7 @@ const (
 	KindAllocDelta        EvidenceKind = "alloc-delta"
 	KindMaintainDelta     EvidenceKind = "maintainability-delta"
 	KindVulnerabilityScan EvidenceKind = "vulnerability-scan"
+	KindDependencyDelta   EvidenceKind = "dependency-delta"
 )
 
 // RequiredEvidence is one obligation the plan commits to producing. An

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -55,6 +56,11 @@ type baseCacheInput struct {
 	base         string
 	packages     []string
 	testPackages []string
+	// raceTests and leakCheck decide how the test packages were run, and a
+	// leak the detector was not injected to find is not the same evidence as
+	// one it looked for and did not find.
+	raceTests    bool
+	leakCheck    bool
 	judged       []string
 	exempt       []string
 	checks       []string
@@ -83,6 +89,8 @@ func (e *Engine) baseCacheKey(in baseCacheInput) string {
 		"analyze=" + in.analyzeOpts,
 		"packages=" + strings.Join(in.packages, ","),
 		"tests=" + strings.Join(in.testPackages, ","),
+		"race=" + strconv.FormatBool(in.raceTests),
+		"leak=" + strconv.FormatBool(in.leakCheck),
 		"judged=" + strings.Join(in.judged, ","),
 		"exempt=" + strings.Join(in.exempt, ","),
 		"checks=" + strings.Join(in.checks, ","),

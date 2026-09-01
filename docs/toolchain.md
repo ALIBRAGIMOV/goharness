@@ -1,4 +1,4 @@
-# goharness Toolchain Provisioning (v0.5)
+# goharness Toolchain Provisioning (v0.9)
 
 Status: accepted. Extends `docs/architecture.md` and `docs/admission-model.md`.
 Where documents conflict, the newest wins.
@@ -185,6 +185,14 @@ real scan against a snapshot in an integration test.
 If no snapshot exists, the vulnerability-scan obligation is INCONCLUSIVE
 with the hint `run goharness setup`; a stale snapshot still scans (the
 report and doctor surface its age). Missing evidence is never a pass.
+
+`audit` plans the scan on every run. `verify` plans it when the change touches
+a dependency file (`go.mod`, `go.sum`, `go.work`, `go.work.sum`,
+`vendor/modules.txt`), which activates the `dependency` risk domain; the base
+revision is scanned too, so a vulnerability the base already carried is
+pre-existing debt and one the change brought in blocks. A code-only change
+plans no scan and needs no snapshot: reachability that changes without the
+module set changing is the audit's business, and the plan says so.
 
 ## Reporting and doctor
 

@@ -28,6 +28,7 @@ const (
 	RuleToleranceWidened  = "GH-WEAK-004"
 	RuleMutantsSurvived   = "GH-MUT-001"
 	RuleAPIBreak          = "GH-API-001"
+	RuleNewDependency     = "GH-DEP-001"
 	RuleBenchTimeDelta    = "GH-PERF-001"
 	RuleBenchAllocDelta   = "GH-PERF-002"
 	RuleScopeViolation    = "GH-SCOPE-001"
@@ -342,6 +343,17 @@ func diffEvidenceRules() []Rule {
 			Consequence:    ConsequenceStructural,
 			Rationale:      "A loosened bound can be a correct recalibration or a way to hide a regression; the diff cannot tell which, so a human must.",
 			Enforcement:    "anti-weakening diff, base against head (internal/analyze)",
+			DocURL:         modelDoc,
+		},
+		{
+			ID:             RuleNewDependency,
+			Title:          "Change adds a direct module requirement",
+			Pack:           PackDiffEvidence,
+			Classification: ClassAdvisory,
+			Lifecycle:      LifecycleExperimental,
+			Consequence:    ConsequenceStructural,
+			Rationale:      "A new dependency is an architecture decision that outlives the change that made it: it widens the attack surface, the build, and the set of people whose releases the project now waits on. The diff shows a line in go.mod; the decision deserves to be seen as one.",
+			Enforcement:    "go.mod require directives, base against head (internal/repo)",
 			DocURL:         modelDoc,
 		},
 		{

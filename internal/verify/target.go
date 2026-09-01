@@ -808,8 +808,13 @@ func (t *target) runTests(ctx context.Context) (checkResult, error) {
 	return t.runTestsWith(ctx, nil)
 }
 
+// runRaceTests runs the race suite, with the leak detector injected wherever
+// the run asked for it. That includes the base revision: a leak the base
+// never looked for cannot be pre-existing, so until the base ran the detector
+// every leak in the closure was new and blocked, including one in a package
+// the change never opened.
 func (t *target) runRaceTests(ctx context.Context) (checkResult, error) {
-	if !t.leakCheck || t.isBase {
+	if !t.leakCheck {
 		return t.runTestsWith(ctx, []string{"-race"})
 	}
 	return t.runLeakRaceTests(ctx)

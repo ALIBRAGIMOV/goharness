@@ -410,12 +410,18 @@ func TestRepeatedRunsProduceIdenticalReports(t *testing.T) {
 
 func TestRepositoryWithoutCommitsUsesFullScope(t *testing.T) {
 	useGolangci(t)
+	// With no base, every file is the change's, go.mod included, so the
+	// dependency domain is active and the scan needs a snapshot to answer.
+	provisionSnapshot(t)
 	f := newFixture(t)
 	f.write("lib/lib.go", cleanLibrary)
 	f.write("lib/lib_test.go", cleanLibraryTest)
 
 	result := run(t, f, verify.ModeVerify)
 	requireVerdict(t, result, admission.VerdictAdmitted)
+	if !result.Risks.Has(admission.RiskDependency) {
+		t.Fatalf("a full-scope change did not activate the dependency domain: %+v", result.Risks)
+	}
 	if !result.Change.FullScope {
 		t.Fatal("a repository with no commits did not fall back to full scope")
 	}
@@ -820,6 +826,17 @@ func TestTimeoutIsInconclusiveNeverRejected(t *testing.T) {
 	}
 	if !result.TimedOut {
 		t.Fatalf("the result does not record the timeout: %+v", result.Failures)
+	}
+	// The clock is goharness's own. A deadline that surfaced as "go test -race:
+	// context deadline exceeded" with no hint read as a broken toolchain, and
+	// two releases' worth of CI reports were misdiagnosed on it.
+	for _, failure := range result.Failures {
+		if failure.Tool != "goharness" {
+			t.Fatalf("a run deadline was attributed to %q: %+v", failure.Tool, failure)
+		}
+		if !strings.Contains(failure.Hint, "--timeout") {
+			t.Fatalf("the failure does not say what to raise: %+v", failure)
+		}
 	}
 }
 

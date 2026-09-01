@@ -16,15 +16,14 @@ import (
 	"github.com/ALIBRAGIMOV/goharness/internal/verify"
 )
 
-// vulnerableFixture is a repository whose module calls a symbol the fixture
-// database marks as vulnerable.
-func vulnerableFixture(t *testing.T) *fixture {
-	t.Helper()
-	f := newFixture(t)
-	f.write("go.mod", "module example.com/fixture\n\ngo 1.26\n\nrequire "+
-		toolcachetest.FixtureModulePath+" "+toolcachetest.FixtureVersion+"\n")
-	f.write("go.sum", toolcachetest.FixtureSums())
-	f.write("lib/lib.go", `package lib
+// The module, source and test of a repository that calls a symbol the fixture
+// database marks as vulnerable. Held as constants so that a case can put the
+// same module at the base revision, or introduce it as the change.
+const (
+	vulnerableGoMod = "module example.com/fixture\n\ngo 1.26\n\nrequire " +
+		toolcachetest.FixtureModulePath + " " + toolcachetest.FixtureVersion + "\n"
+
+	vulnerableLibrary = `package lib
 
 import (
 	"context"
@@ -41,8 +40,9 @@ func Answer(ctx context.Context) int {
 	}
 	return 42
 }
-`)
-	f.write("lib/lib_test.go", `package lib
+`
+
+	vulnerableLibraryTest = `package lib
 
 import (
 	"context"
@@ -54,9 +54,26 @@ func TestAnswer(t *testing.T) {
 		t.Fatalf("Answer() = %d, want 42", got)
 	}
 }
-`)
+`
+)
+
+// vulnerableFixture is a repository whose module calls a symbol the fixture
+// database marks as vulnerable.
+func vulnerableFixture(t *testing.T) *fixture {
+	t.Helper()
+	f := newFixture(t)
+	writeVulnerableModule(f)
 	f.commit("module that calls the affected symbol")
 	return f
+}
+
+// writeVulnerableModule puts the vulnerable module into a fixture's working
+// tree, whichever layout it was built in.
+func writeVulnerableModule(f *fixture) {
+	f.write("go.mod", vulnerableGoMod)
+	f.write("go.sum", toolcachetest.FixtureSums())
+	f.write("lib/lib.go", vulnerableLibrary)
+	f.write("lib/lib_test.go", vulnerableLibraryTest)
 }
 
 // provisionSnapshot mirrors the fixture database into a cache the run will use.

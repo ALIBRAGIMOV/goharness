@@ -1,6 +1,7 @@
 package report
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"slices"
@@ -196,7 +197,42 @@ func writeCounts(b *strings.Builder, p Palette, r verify.Result, scope Scope) {
 	newFindings, preexisting, fixed, advisory := EvidenceCounts(r.Evidence)
 	fmt.Fprintf(b, "\nevidence: %d new, %d pre-existing, %d fixed, %d advisory; %d tool failure(s); %s\n",
 		newFindings, preexisting, fixed, advisory, len(r.Failures), r.Duration.Round(1e6))
+	writeSlowestChecks(b, p, r)
 	writeScopeNote(b, p, r, scope)
+}
+
+// Past slowCheckThreshold the report says where the time went. Below it the
+// total is enough; above it, a reader who wants to make the next run cheaper
+// had to dig timing.checksMs out of the JSON to learn that benchmarks were
+// seventy percent of a six-minute run.
+const (
+	slowCheckThreshold = time.Minute
+	slowChecksShown    = 3
+)
+
+func writeSlowestChecks(b *strings.Builder, p Palette, r verify.Result) {
+	if r.Duration < slowCheckThreshold || len(r.CheckTimings) == 0 {
+		return
+	}
+	type timing struct {
+		id      string
+		elapsed time.Duration
+	}
+	items := make([]timing, 0, len(r.CheckTimings))
+	for id, elapsed := range r.CheckTimings {
+		items = append(items, timing{id: id, elapsed: elapsed})
+	}
+	slices.SortFunc(items, func(x, y timing) int {
+		if c := cmp.Compare(y.elapsed, x.elapsed); c != 0 {
+			return c
+		}
+		return strings.Compare(x.id, y.id)
+	})
+	parts := make([]string, 0, slowChecksShown)
+	for _, item := range items[:min(len(items), slowChecksShown)] {
+		parts = append(parts, item.id+" "+item.elapsed.Round(time.Second).String())
+	}
+	fmt.Fprintf(b, "%s\n", p.dim("slowest checks: "+strings.Join(parts, ", ")))
 }
 
 // writeScopeNote says how much of the run the printed list leaves out.

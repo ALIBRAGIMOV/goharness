@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/admission"
@@ -466,3 +467,84 @@ func Tripled() int {
 	return 126
 }
 `
+
+// scoreLibrary is a function whose only mutable construct is a returned
+// value named err, which is not an error: rewriting it to nil produces a
+// mutant that does not compile.
+const scoreLibrary = `package lib
+
+// Code is the bucket a score falls into.
+type Code struct{ n int }
+
+// Classify buckets a score.
+func Classify(score int) Code {
+	err := Code{n: score}
+	return err
+}
+`
+
+// scoreLibraryTest executes Classify without observing anything a mutant could
+// change, so the only way a mutant of it can be "killed" is by not building.
+const scoreLibraryTest = `package lib
+
+import "testing"
+
+func TestClassifyKeepsAScore(t *testing.T) {
+	if got := Classify(3); got.n < 0 {
+		t.Fatalf("Classify(3) = %+v", got)
+	}
+}
+`
+
+// TestBypassUncompilableMutantIsNotAKill closes the route by which a compiler
+// error stood in for a test. go test exits 1 whether a test failed or the
+// mutant never built, and the near pass stops at the first kill, so one mutant
+// that did not compile discharged the whole test-effectiveness claim.
+func TestBypassUncompilableMutantIsNotAKill(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("lib/classify.go", scoreLibrary)
+		f.write("lib/classify_test.go", scoreLibraryTest)
+
+		result := run(t, f, verify.ModeVerify)
+		if result.Decision.Verdict == admission.VerdictAdmitted {
+			t.Fatal("a mutant that did not compile was accepted as evidence that the tests observe the change")
+		}
+		gap := slices.IndexFunc(result.Unproducible, func(u admission.Unproducible) bool {
+			return u.Kind == admission.KindMutationSignal
+		})
+		if gap < 0 {
+			t.Fatalf("mutation-signal is not reported as unproducible: %+v\nblocking: %v",
+				result.Unproducible, blockingRules(result.Evidence))
+		}
+		if reason := result.Unproducible[gap].Reason; !strings.Contains(reason, "did not compile") {
+			t.Fatalf("the gap does not say the mutants did not build: %q", reason)
+		}
+	})
+}
+
+// TestBypassVulnerableDependencyIsNotAdmittedByVerify closes the route by which
+// the command an agent finishes with never scanned for known vulnerabilities.
+// Only an audit planned the scan, so a change that pulled a vulnerable module
+// into the build was admitted on the strength of a scan that never ran.
+func TestBypassVulnerableDependencyIsNotAdmittedByVerify(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		provisionSnapshot(t)
+		f := baseline(t, lay)
+		writeVulnerableModule(f)
+
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictRejected)
+		if !slices.Contains(blockingRules(result.Evidence), policy.RuleGovulncheck) {
+			t.Fatalf("blocking rules = %v, want %s", blockingRules(result.Evidence), policy.RuleGovulncheck)
+		}
+		if !result.Risks.Has(admission.RiskDependency) {
+			t.Fatalf("a go.mod edit did not activate the dependency domain: %+v", result.Risks)
+		}
+		if result.VulnDB == nil {
+			t.Fatal("the result does not record which snapshot produced the evidence")
+		}
+	})
+}

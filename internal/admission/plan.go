@@ -19,6 +19,7 @@ const (
 	ProducerTest         = "test"
 	ProducerRaceTest     = "race-test"
 	ProducerVulnScan     = "vuln-scan"
+	ProducerDependency   = "dependency-delta"
 	ProducerMetrics      = "metrics"
 	ProducerClone        = "clone-scan"
 	ProducerScope        = "scope-scan"
@@ -125,9 +126,18 @@ func BuildPlan(in PlanInput) VerificationPlan {
 		add(KindMaintainDelta, ProducerMaintainable, DimMaintainability,
 			"a base revision exists, so maintainability can be compared")
 	}
-	if in.RepositoryWide {
+	switch {
+	case in.RepositoryWide:
 		add(KindVulnerabilityScan, ProducerVulnScan, DimSecurity,
 			"repository audit scans for known vulnerabilities")
+	case in.Risks.Has(RiskDependency):
+		// Reachability can also change without a dependency change, when new
+		// code calls an already-vulnerable function; that is the audit's job.
+		// The gate scans where the module set itself moved, because a bumped
+		// or added requirement can bring a known vulnerability into the build
+		// without a Go line changing, and no other check would notice.
+		add(KindVulnerabilityScan, ProducerVulnScan, DimSecurity,
+			"the change touches dependencies")
 	}
 
 	addRiskObligations(&plan, in, add)
@@ -172,6 +182,9 @@ func addRiskObligations(plan *VerificationPlan, in PlanInput, add addFunc) {
 		add(KindBenchDelta, ProducerBenchmark, DimPerformance, "the change touches a benchmarked path")
 		add(KindAllocDelta, ProducerBenchmark, DimPerformance, "the change touches a benchmarked path")
 	}
+	if risks.Has(RiskDependency) && in.BaseAvailable {
+		add(KindDependencyDelta, ProducerDependency, DimArchitecture, "the change touches dependencies")
+	}
 }
 
 func checksFor(obligations []RequiredEvidence) []PlannedCheck {
@@ -193,6 +206,7 @@ func checksFor(obligations []RequiredEvidence) []PlannedCheck {
 		ProducerPolicyGuard:  {ID: ProducerPolicyGuard, Tool: "goharness"},
 		ProducerVisibility:   {ID: ProducerVisibility, Tool: "go/build"},
 		ProducerMigration:    {ID: ProducerMigration, Tool: "goharness"},
+		ProducerDependency:   {ID: ProducerDependency, Tool: "goharness", NeedsBase: true},
 		ProducerWorktree:     {ID: ProducerWorktree, Tool: "git"},
 		ProducerVet:          {ID: ProducerVet, Tool: "go vet", DependsOn: []string{ProducerCompile}},
 		ProducerGoFix:        {ID: ProducerGoFix, Tool: "go fix", DependsOn: []string{ProducerCompile}},

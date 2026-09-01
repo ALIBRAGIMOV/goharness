@@ -335,6 +335,70 @@ makes the security claim INCONCLUSIVE naming both versions
 
 ---
 
+## 12. A compiler error standing in for a test
+
+**The route.** Mutation evidence asks whether any test notices a deliberate
+defect in the changed code. `go test` exits 1 whether a test failed or the
+mutated package never compiled, and the near pass stops at the first kill. A
+change whose only mutable construct is a `return err` on a value that is not
+an error therefore produced one mutant, which did not build, which counted as
+killed, which discharged the test-effectiveness claim for the whole change.
+The tests never ran.
+
+**The mechanism.** The overlaid run reads the `-json` event stream. A
+`build-fail` event and the package-level `fail` that echoes it are a third
+outcome, not built, beside passed and failed; a mutant that did not build is
+counted and is neither a kill nor a survivor, and a change where no mutant
+compiled reports `mutation-signal` unproducible with that reason, so the claim
+is INCONCLUSIVE rather than PASS. A test that fails in a package that did build
+is still a kill whatever happened to an importer that never compiled against
+the mutant.
+
+**Pinned by.** `TestBypassUncompilableMutantIsNotAKill`, with
+`TestMutationEvidencePassesWhenTestsKillMutants` as the guard and
+`TestOverlayOutcomeTellsAFailedBuildFromAFailedTest` on the decoder.
+
+**Residual risk.** The mutation operators are few, and a function none of them
+apply to produces no mutant at all; that case was always reported as
+unproducible. A richer operator set is a precision item, gated on corpus
+evidence like every rule.
+
+---
+
+## 13. A dependency the gate never scanned
+
+**The route.** Only `audit` planned the vulnerability scan. `verify`, the
+command an agent finishes with, admitted a change that added a requirement on
+a module with a known reachable vulnerability, or bumped one onto a vulnerable
+version, because no obligation asked for the scan. The documentation described
+the scan without saying which command ran it.
+
+**The mechanism.** A seventh risk domain, `dependency`, is activated by the
+files that fix which module versions a build resolves to: `go.mod`, `go.sum`,
+`go.work`, `go.work.sum`, `vendor/modules.txt`. Risk detection now reads every
+changed file rather than only the Go ones, which is also what makes a rewritten
+`.sql` migration activate `persistence` as documented. The domain adds the
+vulnerability-scan obligation to the security claim in `verify`; the base
+revision is scanned too, so a vulnerability the base already carried compares
+as pre-existing debt and one the change brought in blocks. A code-only change
+plans no scan and needs no snapshot. Beside the scan, `GH-DEP-001` reports
+every direct requirement head's `go.mod` carries that base's did not, advisory,
+so the decision is seen as one.
+
+**Pinned by.** `TestBypassVulnerableDependencyIsNotAdmittedByVerify`, with
+`TestVerifyWithoutADependencyChangeDoesNotScan` and
+`TestPreexistingVulnerabilityIsDebtInVerify` as the guards,
+`TestSQLMigrationRewriteIsRejected` for the path-based activation, and
+`TestNewDirectRequirementIsReported` for the advisory companion.
+
+**Residual risk.** Reachability can change without the module set changing:
+new code that calls an already-vulnerable function in an unchanged dependency
+is found by `audit`, not by `verify`. The plan says so in its coverage rather
+than scanning every change, because the scan loads and type-checks the whole
+module and a monorepo pays minutes for it.
+
+---
+
 ## Future work
 
 Runtime probes beyond goroutine leaks (file-descriptor and socket leaks,

@@ -71,6 +71,7 @@ type mutationOutcome struct {
 	survived []analyze.Mutant
 	ran      int
 	timedOut int
+	unbuilt  int
 	// unconfirmed counts mutants that survived the tests nearest them and whose
 	// wider search did not finish, so neither answer was established.
 	unconfirmed int
@@ -143,6 +144,8 @@ func (c *comparison) runNearPass(
 		switch {
 		case attempt.timedOut:
 			outcome.timedOut++
+		case attempt.unbuilt:
+			outcome.unbuilt++
 		case attempt.killed:
 			outcome.ran++
 			outcome.killed++
@@ -203,6 +206,10 @@ type mutantResult struct {
 	killed   bool
 	ran      bool
 	timedOut bool
+	// unbuilt means the mutant did not compile, so no test saw it. It is not
+	// a kill: go test exits 1 either way, and a compiler error standing in
+	// for a test once discharged the whole test-effectiveness claim.
+	unbuilt bool
 }
 
 // runOneMutant applies one mutant through a build overlay and runs one scope of
@@ -229,7 +236,7 @@ func (c *comparison) runOneMutant(
 	attempt, cancel := context.WithTimeout(ctx, MutantTimeout)
 	defer cancel()
 
-	failed, err := tool.RunTestsWithOverlay(attempt, c.engine.Runner, c.head.root, overlay, patterns)
+	outcome, err := tool.RunTestsWithOverlay(attempt, c.engine.Runner, c.head.root, overlay, patterns)
 	if err != nil {
 		// A mutant that runs out of time is not evidence either way; it simply
 		// did not run, and the budget accounting treats it as such. The mutation
@@ -240,7 +247,14 @@ func (c *comparison) runOneMutant(
 		}
 		return mutantResult{}, err
 	}
-	return mutantResult{killed: failed, ran: true}, nil
+	switch outcome {
+	case tool.OverlayNotBuilt:
+		return mutantResult{unbuilt: true}, nil
+	case tool.OverlayFailed:
+		return mutantResult{killed: true, ran: true}, nil
+	default:
+		return mutantResult{ran: true}, nil
+	}
 }
 
 // nearScope is the mutated package itself, or its importers when it carries no
@@ -285,6 +299,11 @@ func (c *comparison) mutationResult(outcome mutationOutcome) checkResult {
 			fmt.Sprintf("%d mutant run(s) exceeded the %s budget before any test could report",
 				outcome.timedOut, MutantTimeout),
 			"shorten the tests covering the changed functions, or make the change smaller")}
+	case outcome.ran == 0 && outcome.unbuilt > 0:
+		return checkResult{unproducible: mutationUnproducible(
+			fmt.Sprintf("%d mutant(s) did not compile, so no test could observe them", outcome.unbuilt),
+			"give the changed functions a comparison, boolean or error return that a test observes; "+
+				"a mutant that does not build is not evidence either way")}
 	case outcome.ran == 0:
 		return checkResult{unproducible: mutationUnproducible(
 			"no test covered the mutated packages within the mutation budget",

@@ -735,6 +735,8 @@ func flagValue(t *testing.T, placeholder, dir string) string {
 		return "1s"
 	case "MODE":
 		return "full"
+	case "N":
+		return "2"
 	default:
 		t.Fatalf("no test value for the usage placeholder %q", placeholder)
 		return ""

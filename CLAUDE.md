@@ -22,6 +22,13 @@ go build -o /tmp/gh ./cmd/goharness && /tmp/gh verify --agent
 
 The task is complete only when the verdict is `ADMITTED`. Resolve every `FAIL` and `INCONCLUSIVE` claim in the JSON output. `goharness fast` is a development aid; it is never sufficient to finish. Use `goharness explain RULE-ID` to understand any finding.
 
+What this run costs, and how to spend it:
+
+- On this repository it takes about nine minutes, and eight of them are `go test -race ./internal/verify`, the harness's own integration suite. The gate's overhead on top is about a minute. The default `--timeout` of 20m fits.
+- It already runs gofmt, goimports, vet, `go fix`, `go mod tidy -diff`, golangci-lint, the tests under the race detector, benchmarks and mutation. Nothing in the list below needs to be run in full before it.
+- Run it **once, at the end**, detached (`nohup ... > /tmp/verify.json 2> /tmp/verify.err &`), because interactive shell tools cap a command at ten minutes and a run that is killed reports nothing. Do not rerun it after every edit; rerun it after the last edit.
+- Two runs for a byte-identical report are required only when you changed how findings are identified or compared (`internal/evidence`, an `Identity` assignment, `Realign`, `Compare`, the report renderers). CI performs that comparison on every push regardless, so it is not a local ritual.
+
 ## Self-admissibility: this code must pass its own gate
 
 goharness enforces rules on other codebases, so its own code holds to every one of them:
@@ -35,21 +42,22 @@ goharness enforces rules on other codebases, so its own code holds to every one 
 - A deprecation this repository introduces carries `//go:fix inline` when its replacement is a single call or value, so callers migrate with one command instead of by hand. The harness reports the omission as `GH-DEPRECATE-001`, and a gate that asks other people for this has to hold itself to it.
 - If one of the harness's own checks fires on your new code, fix the code. Never soften a check to make your own code pass. If a check is genuinely too imprecise to block, classify it advisory in the registry with an honest written rationale.
 
-## Verification matrix (run before claiming anything works)
+## Narrow checks while you work
+
+These exist to get a fast answer about the thing you touched. They are not a list to run end to end before the gate; the gate runs all of them.
 
 ```bash
-gofmt -l .                                                        # must print nothing
-go build ./...
-go vet ./...
-go mod tidy -diff                                                 # must be empty
-go fix -diff ./...                                                # must print nothing
-.tools/golangci-lint run --config internal/tool/golangci_strict.yaml ./...
-go test ./...
-go test -race ./...
-/tmp/gh verify --agent                                            # must be ADMITTED
+gofmt -l .                                                        # seconds; must print nothing
+go build ./... && go vet ./...                                    # seconds
+go mod tidy -diff                                                 # seconds; when go.mod moved
+go fix -diff ./...                                                # seconds; when you touched a deprecated API
+.tools/golangci-lint run --config internal/tool/golangci_strict.yaml ./internal/<pkg>/...
+go test ./internal/<pkg> -run 'TestName' -count=1                 # the test you wrote and its neighbours
 ```
 
-Determinism check when you touched evidence, fingerprints, or reporting: run `verify --agent` twice and compare the JSON byte for byte after removing the `timing` block.
+`go test ./internal/verify` as a whole is six minutes and under `-race` eight; run named tests while iterating, and let `verify --agent` run the suite. Never run `go test ./...` and `go test -race ./...` back to back by hand: the second contains the first, and the gate contains both.
+
+Every integration test in `internal/verify` builds a git repository and runs the whole pipeline, and costs every future gate run one to three seconds under the race detector. When one producer is under test, write a unit test of that producer; add an integration test for a property of the verdict.
 
 ## Hard pins (never change casually)
 
@@ -59,7 +67,7 @@ Determinism check when you touched evidence, fingerprints, or reporting: run `ve
 - Uber Go Style Guide: commit `1d60a91aa5e87d443002e23c21903c49489dbde5`, never fetched at runtime.
 - Allowed dependencies: `golang.org/x/tools`, `golang.org/x/sync`, `golang.org/x/vuln`, `go.uber.org/zap`. Everything else is the standard library. Adding a dependency is an architecture decision, not a convenience.
 
-Changing any pin requires updating `docs/architecture.md` or `docs/toolchain.md` in the same change, revalidating the embedded lint config against the new binary, and rerunning the full matrix.
+Changing any pin requires updating `docs/architecture.md` or `docs/toolchain.md` in the same change, revalidating the embedded lint config against the new binary, and rerunning the gate.
 
 ## Architecture in one minute
 

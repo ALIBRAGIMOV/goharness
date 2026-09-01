@@ -16,7 +16,7 @@ import (
 // RiskDomain is a class of change that carries its own evidence obligations.
 type RiskDomain string
 
-// The six risk domains.
+// The seven risk domains.
 const (
 	RiskConcurrency RiskDomain = "concurrency"
 	RiskNetwork     RiskDomain = "network"
@@ -24,13 +24,14 @@ const (
 	RiskPublicAPI   RiskDomain = "public-api"
 	RiskTests       RiskDomain = "tests"
 	RiskHotPath     RiskDomain = "hot-path"
+	RiskDependency  RiskDomain = "dependency"
 )
 
 // RiskDomains returns every domain in report order.
 func RiskDomains() []RiskDomain {
 	return []RiskDomain{
 		RiskConcurrency, RiskNetwork, RiskPersistence,
-		RiskPublicAPI, RiskTests, RiskHotPath,
+		RiskPublicAPI, RiskTests, RiskHotPath, RiskDependency,
 	}
 }
 
@@ -109,6 +110,9 @@ func DetectRisks(ctx context.Context, in DetectionInput) (RiskProfile, error) {
 		if isMigrationPath(rel) {
 			profile.activate(RiskPersistence, "migration file changed: "+rel)
 		}
+		if isDependencyFile(rel) {
+			profile.activate(RiskDependency, "dependency file changed: "+rel)
+		}
 		if !strings.HasSuffix(rel, ".go") {
 			continue
 		}
@@ -121,6 +125,18 @@ func DetectRisks(ctx context.Context, in DetectionInput) (RiskProfile, error) {
 	}
 	profile.normalize()
 	return profile, nil
+}
+
+// isDependencyFile recognises the files that fix which module versions a build
+// resolves to. A change to one of them can bring a known vulnerability into
+// the build without a single Go line changing, so the scan that would notice
+// has to be planned from the file list rather than from the code.
+func isDependencyFile(rel string) bool {
+	switch path.Base(rel) {
+	case "go.mod", "go.sum", "go.work", "go.work.sum":
+		return true
+	}
+	return rel == "vendor/modules.txt" || strings.HasSuffix(rel, "/vendor/modules.txt")
 }
 
 func isMigrationPath(rel string) bool {

@@ -170,6 +170,12 @@ type Coverage struct {
 	// change in one package can create a genuine new finding in another.
 	LocalScanNarrowed bool     `json:"localScanNarrowed"`
 	LocalScanPackages []string `json:"localScanPackages"`
+	// BaseTestPackages names the test packages the base revision ran. The base
+	// runs a test package only where head's own run of it produced a failure or
+	// a leak, because those are the only rows a base result can reclassify;
+	// on a change whose suite passed the list is empty and the base ran no
+	// tests at all. Absent when no base comparison happened.
+	BaseTestPackages []string `json:"baseTestPackages"`
 }
 
 // Baseline is the burn-down of an acknowledged-debt ledger.
@@ -533,6 +539,7 @@ func buildCoverage(r verify.Result) Coverage {
 		LeakInjectionBlocked: nonNil(r.LeakBlockedPackages),
 		LocalScanNarrowed:    r.Execution.LocalScope != nil,
 		LocalScanPackages:    nonNil(r.Execution.LocalScope),
+		BaseTestPackages:     nonNil(r.BaseTestPackages),
 	}
 }
 

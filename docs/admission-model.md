@@ -1,4 +1,4 @@
-# goharness Admission Model (v0.5)
+# goharness Admission Model (v0.9)
 
 Status: accepted. Extends `docs/architecture.md`. Where the two conflict,
 this document wins.
@@ -100,9 +100,12 @@ domain):
 | public-api | exported declarations added, removed, or signature-changed in non-internal, non-main packages |
 | tests | any `_test.go` changed |
 | hot-path | benchmarks exist in affected packages, or the contract declares hot-path |
+| dependency | `go.mod`, `go.sum`, `go.work`, `go.work.sum` or `vendor/modules.txt` changed |
 
-Detection is AST-based on head, restricted to changed files and their
-enclosing declarations. False activation costs extra checks; false
+Detection is AST-based on head for the Go files, restricted to changed files
+and their enclosing declarations, and path-based for everything else: every
+changed file reaches detection, so a migration or a lockfile activates its
+domain without a Go line changing. False activation costs extra checks; false
 non-activation costs trust, so detection errs toward activation.
 
 ### MaintainabilityDelta
@@ -124,7 +127,12 @@ the runnable DAG inside it). Built by the risk-aware planner:
 2. for each active risk domain, add its RequiredEvidence obligations;
 3. map every obligation to a Check;
 4. emit the deterministic DAG (compile precedes everything that needs a
-   built package; base snapshot checks mirror head checks).
+   built package; base snapshot checks mirror head checks, with one narrowing:
+   the base runs a test package only where head's own run of it produced a
+   `GH-TEST-FAIL` or `GH-LEAK-001` row, because those are the only rows a base
+   test result can reclassify, and it runs them the way head did, leak detector
+   included. On a change whose suite passed the base runs no tests at all, and
+   `coverage.baseTestPackages` says so).
 
 The plan is printed with `--explain-plan` and embedded in the JSON report
 so a reviewer can see why each check ran.
@@ -176,7 +184,12 @@ claims that own them.
 - test changes require anti-weakening and mutation evidence;
 - public API changes require compatibility evidence (native export-surface
   diff via go/types between base and head; removals or incompatible
-  signature changes fail unless the contract sets AllowAPIBreak).
+  signature changes fail unless the contract sets AllowAPIBreak);
+- dependency changes require vulnerability-scan evidence in `verify` as well
+  as in `audit` (the embedded scanner against the local snapshot, at base and
+  at head, so a vulnerability the base already carried is debt and one the
+  change brought in blocks), and produce `GH-DEP-001`, advisory, for every
+  direct requirement head's `go.mod` carries that base's did not.
 
 If an obligation's producer cannot run or cannot find a measurable subject
 (no benchmark covers a declared hot path, no test exercises a mutated
@@ -488,9 +501,11 @@ Every consumer recomputed these by hand before they were emitted.
 their count, `filesJudged`, `generatedExempt` with their count, `testPackages`,
 `leakInjectionBlocked`, the test packages whose own `TestMain` kept the
 goroutine-leak detector out and which are a gap in the repository rather than
-work for this change unless the change touched them, and `localScanNarrowed` with `localScanPackages`,
+work for this change unless the change touched them, `localScanNarrowed` with `localScanPackages`,
 the directories the file-local scanners examined when they examined fewer than
-all of them. The harness already refuses to claim what it did
+all of them, and `baseTestPackages`, the test packages the base revision ran,
+which are exactly the ones whose head evidence a base result could reclassify
+and are empty when head's suite passed. The harness already refuses to claim what it did
 not prove; this is the other half of that discipline, which is stating what it
 did not look at. An ADMITTED whose scope is invisible is not auditable.
 
@@ -849,9 +864,13 @@ interrupt-safe and leak-free:
 - a second signal aborts immediately with exit 130; cleanup for that case
   is a best-effort deferred pass plus stale-worktree detection on the next
   run (`goharness doctor` reports and offers the removal command);
-- a global `--timeout` flag (default 10m for verify, unlimited for audit)
+- a global `--timeout` flag (default 20m for verify, unlimited for audit)
   and per-check deadlines map `context.DeadlineExceeded` to INCONCLUSIVE
-  for the owning claim, never to REJECTED;
+  for the owning claim, never to REJECTED; a check the deadline cut short is
+  attributed to goharness, names the check, and says what to raise, because
+  the clock is the run's own and not the tool's;
+- a global `--jobs N` flag bounds how many checks run at once (default one
+  per CPU), for CI runners and shared machines;
 - every check goroutine runs under a recover guard: a panicking check is
   converted to a CheckFailure (INCONCLUSIVE), never a harness crash.
 

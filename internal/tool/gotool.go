@@ -176,6 +176,11 @@ type testEvent struct {
 	Package string `json:"Package"`
 	Test    string `json:"Test"`
 	Output  string `json:"Output"`
+	// FailedBuild names the build whose failure this package-level fail event
+	// reports, so a package that never compiled is told apart from one whose
+	// tests ran and failed. The build itself is announced by a build-fail
+	// event keyed by ImportPath, and only the two together tell the story.
+	FailedBuild string `json:"FailedBuild"`
 }
 
 // RunTests runs go test over the given patterns and returns failures. Extra

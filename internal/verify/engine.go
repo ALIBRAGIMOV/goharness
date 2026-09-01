@@ -294,15 +294,14 @@ func collect(checks []Check, outcomes []checkOutcome) runOutput {
 		out.Timings[o.id] = o.elapsed
 		switch {
 		case o.failure != nil:
-			attributed, reason := attribute(o.tool, o.id, o.failure)
+			who := attribute(o.tool, o.id, o.failure)
 			out.Failures = append(out.Failures, CheckFailure{
-				CheckID: o.id, Tool: attributed,
-				Reason: o.failure.Error(), Hint: hintFor(o.id),
+				CheckID: o.id, Tool: who.tool, Reason: who.detail, Hint: who.remedy,
 			})
 			for _, kind := range checks[i].Produces {
 				unproduced[kind] = true
 				out.Unproducible = append(out.Unproducible, admission.Unproducible{
-					Kind: kind, Reason: reason, Remedy: hintFor(o.id),
+					Kind: kind, Reason: who.reason, Remedy: who.remedy,
 				})
 			}
 		case o.skipped:
@@ -343,19 +342,53 @@ func firstLine(s string) string {
 	return first
 }
 
+// blame is who a failed check is attributed to and what a reader is told.
+type blame struct {
+	tool   string
+	reason string
+	detail string
+	remedy string
+}
+
 // attribute names who failed and phrases the gap the failure leaves.
 //
 // A reason is the sentence a reader acts on, so it has to say which side the
 // fault fell on. Anything else would let a harness defect read as a defect in
 // the repository, which is how an audit sends its operator hunting for a
 // build-constraint problem that does not exist.
-func attribute(checkTool, checkID string, failure error) (tool, reason string) {
+//
+// A run that outlived its own --timeout, or was interrupted, is the run's
+// fault and nobody else's. Reporting "go test -race: context deadline
+// exceeded" as a tool failure with no hint sent two releases' worth of CI
+// reports to a reader with nothing to act on; the deadline is goharness's.
+func attribute(checkTool, checkID string, failure error) blame {
 	var fault harnessError
-	if errors.As(failure, &fault) {
-		return "goharness", "goharness itself failed while producing this evidence, so the " +
-			"repository was not judged on it; see failures[] for the fault: " + firstLine(failure.Error())
+	switch {
+	case errors.Is(failure, context.DeadlineExceeded):
+		reason := "the run's --timeout expired while " + checkID + " was still running, so it produced no answer"
+		return blame{
+			tool: "goharness", reason: reason, detail: reason,
+			remedy: "rerun with a larger --timeout, or narrow the change",
+		}
+	case errors.Is(failure, context.Canceled):
+		reason := "the run was interrupted while " + checkID + " was still running, so it produced no answer"
+		return blame{
+			tool: "goharness", reason: reason, detail: reason,
+			remedy: "rerun without interrupting",
+		}
+	case errors.As(failure, &fault):
+		return blame{
+			tool: "goharness",
+			reason: "goharness itself failed while producing this evidence, so the " +
+				"repository was not judged on it; see failures[] for the fault: " + firstLine(failure.Error()),
+			detail: failure.Error(), remedy: hintFor(checkID),
+		}
+	default:
+		return blame{
+			tool: checkTool, reason: checkID + " failed: " + firstLine(failure.Error()),
+			detail: failure.Error(), remedy: hintFor(checkID),
+		}
 	}
-	return checkTool, checkID + " failed: " + firstLine(failure.Error())
 }
 
 func hintFor(checkID string) string {
@@ -455,6 +488,11 @@ type Result struct {
 	// LeakBlockedPackages names the test packages where goroutine-leak
 	// verification could not be injected because a TestMain already exists.
 	LeakBlockedPackages []string
+	// BaseTestPackages names the test packages the base revision ran, which are
+	// exactly the ones whose head evidence a base result can reclassify, and
+	// empty when head's suite passed. A base that ran less than head has to say
+	// so, or the comparison cannot be audited.
+	BaseTestPackages []string
 	// Debt is the acknowledged-debt ledger this audit was judged against, nil
 	// when there was none and in every mode but audit.
 	Debt *policy.DebtLedger
@@ -507,6 +545,14 @@ func Run(ctx context.Context, version string, opts Options) (result Result, err 
 			filterOut(run.Failures, admission.ProducerGolangci)...)
 		run.Unproducible = append(run.Unproducible,
 			golangciUnproducible(setup.discoveryFailure.Reason)...)
+	}
+	// A deadline that expires while the checks are running is absorbed by the
+	// scheduler as per-check failures, so the run returns normally with what it
+	// had gathered. The result still has to say that the clock, not a tool,
+	// ended it.
+	if runCtx.Err() != nil {
+		result.TimedOut = ctx.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded)
+		result.Interrupted = !result.TimedOut
 	}
 
 	result.Evidence = run.Evidence
@@ -787,12 +833,19 @@ func golangciUnproducible(reason string) []admission.Unproducible {
 	return out
 }
 
+// applyWorktreeGuard re-reads the worktree after the run and reports any
+// difference. It runs on a context detached from the run's, like every
+// cleanup: a run that hit its deadline still has to state the true worktree
+// state, and asking git on an expired context reported "could not be re-read"
+// as a policy-integrity gap the repository did not have.
 func (e *Engine) applyWorktreeGuard(ctx context.Context, r repo.Repository, before repo.Snapshot, run *runOutput, result *Result) {
 	if !r.HasGit {
 		run.Produced = append(run.Produced, admission.KindWorktreeReadOnly)
 		return
 	}
-	after, err := repo.CaptureSnapshot(ctx, e.Git, r.Root)
+	guardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), repo.CleanupTimeout)
+	defer cancel()
+	after, err := repo.CaptureSnapshot(guardCtx, e.Git, r.Root)
 	if err != nil {
 		run.Unproducible = append(run.Unproducible, admission.Unproducible{
 			Kind: admission.KindWorktreeReadOnly, Reason: "the worktree state could not be re-read: " + err.Error(),
@@ -843,7 +896,7 @@ func (e *Engine) execute(ctx context.Context, in executeInput) (runOutput, error
 
 	risks, err := admission.DetectRisks(ctx, admission.DetectionInput{
 		Root:         in.repository.Root,
-		ChangedFiles: in.change.GoFiles(),
+		ChangedFiles: in.change.Files, // every file: a migration or a go.mod edit activates a domain by its path
 		ScopeFiles:   headTarget.files,
 		Contract:     in.contract,
 		AllActive:    in.mode == ModeAudit,
@@ -922,6 +975,7 @@ func (e *Engine) compareWithBase(
 	}()
 
 	baseChange := change.ChangeSet{FullScope: true, BaseOrigin: change.BaseUnavailable}
+	baseTests, baseTestsRenamedFrom := baseTestScope(out.Evidence, in.change, headTarget)
 	// A worktree materializes the whole repository, so the module sits at the
 	// same prefix below it that it occupies below the git root. Taking the
 	// worktree root as the module root builds every base check outside the
@@ -931,9 +985,9 @@ func (e *Engine) compareWithBase(
 		root: baseRoot, modulePath: in.repository.ModulePath,
 		change: baseChange, mode: in.mode, contract: in.contract,
 		config: in.config, restrict: &scopeRestriction{
-			lint: headTarget.packages, tests: headTarget.testPackages,
+			lint: headTarget.packages, tests: baseTests,
 			local: headTarget.localScope, moduleChanged: headTarget.moduleChanged,
-			renamedFrom: renamedGoFiles(in.change),
+			renamedFrom: renamedGoFiles(in.change), testsRenamedFrom: baseTestsRenamedFrom,
 		},
 		isBase: true,
 	})
@@ -941,6 +995,12 @@ func (e *Engine) compareWithBase(
 		return err
 	}
 	baseTarget.analyzeOpts = headTarget.analyzeOpts
+	// The base runs its tests the way head ran them, leak detector included:
+	// a leak head found in a package the base also leaks in is pre-existing
+	// debt, and it can only be recognised as such if the base looked for it.
+	baseTarget.raceTests = headTarget.raceTests
+	baseTarget.leakCheck = headTarget.leakCheck
+	in.result.BaseTestPackages = baseTarget.testPackages
 	basePlan.Checks = baseTarget.checksFor(plan.Checks)
 
 	e.phase = "base"
@@ -975,6 +1035,43 @@ func (e *Engine) compareWithBase(
 	return nil
 }
 
+// baseTestScope names the test packages the base revision has to run.
+//
+// A base test result is consumed by exactly one thing: the comparison that
+// decides whether a head test failure or goroutine leak already existed. A
+// test that passes at head produces no row, so its base result cannot move a
+// verdict, and a failure only the base had would be credit rather than a
+// block. Running the whole closure at base therefore paid for the most
+// expensive check in the run twice to learn nothing the verdict uses; on this
+// repository the second race run was six minutes of thirteen, and the reason
+// two releases failed their own gate on a ten-minute budget.
+//
+// The returned paths are head import paths. The second list names the base
+// paths of moved Go files whose head package is among them, because a renamed
+// package has no import path at base to mirror and would otherwise resolve to
+// nothing there.
+func baseTestScope(items []evidence.Evidence, cs change.ChangeSet, head *target) (pkgs, renamedFrom []string) {
+	set := map[string]bool{}
+	for _, e := range items {
+		if e.Package == "" {
+			continue
+		}
+		if e.RuleID == policy.RuleTestFailure || e.RuleID == policy.RuleGoroutineLeak {
+			set[e.Package] = true
+		}
+	}
+	for _, entry := range cs.Entries {
+		if entry.OldPath == "" || !strings.HasSuffix(entry.Path, ".go") {
+			continue
+		}
+		if pkg, ok := head.graph.PackageForFile(entry.Path); ok && set[pkg] {
+			renamedFrom = append(renamedFrom, entry.OldPath)
+		}
+	}
+	slices.Sort(renamedFrom)
+	return slices.Sorted(maps.Keys(set)), renamedFrom
+}
+
 // baseRun produces the base snapshot's evidence, from the cache when one
 // matches this exact revision, scope, policy and toolchain, and by running the
 // checks otherwise.
@@ -983,6 +1080,8 @@ func (e *Engine) baseRun(ctx context.Context, base string, t *target, checks []C
 		base:         base,
 		packages:     t.packages,
 		testPackages: t.testPackages,
+		raceTests:    t.raceTests,
+		leakCheck:    t.leakCheck,
 		judged:       t.judged,
 		exempt:       slices.Sorted(maps.Keys(t.exemptFiles)),
 		checks:       checkIDs(checks),
@@ -1150,6 +1249,10 @@ type scopeRestriction struct {
 	// every finding in the moved code reads as introduced by the move. These paths
 	// are resolved against the base graph, where they still exist.
 	renamedFrom []string
+	// testsRenamedFrom is the same repair for the test scope, which is narrower
+	// than the lint scope (see baseTestScope) and so needs its own list: only
+	// the moved files whose head package produced test evidence belong in it.
+	testsRenamedFrom []string
 }
 
 type targetInput struct {
@@ -1180,9 +1283,8 @@ func (e *Engine) buildTarget(ctx context.Context, in targetInput) (*target, Exec
 	var lintPkgs, testPkgs []string
 	switch {
 	case in.restrict != nil:
-		moved := graph.SeedPackages(in.restrict.renamedFrom)
-		lintPkgs = withPackages(graph.PatternsFor(in.restrict.lint), moved)
-		testPkgs = withPackages(graph.PatternsFor(in.restrict.tests), moved)
+		lintPkgs = withPackages(graph.PatternsFor(in.restrict.lint), graph.SeedPackages(in.restrict.renamedFrom))
+		testPkgs = withPackages(graph.PatternsFor(in.restrict.tests), graph.SeedPackages(in.restrict.testsRenamedFrom))
 	case in.mode == ModeAudit || in.change.FullScope:
 		lintPkgs = graph.Packages()
 		testPkgs = graph.Packages()

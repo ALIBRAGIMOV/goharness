@@ -33,14 +33,14 @@ Flags for verify, audit, fast and deep
   --dir DIR           directory inside the module to verify (default ".")
   --base REV          explicit base revision (verify only)
   --contract FILE     task contract (default: goharness.task.yaml, else implicit)
-  --timeout DURATION  wall-clock budget (default 10m; audit is unlimited)
+  --timeout DURATION  wall-clock budget (default 20m; audit is unlimited)
+  --jobs N            checks to run at once (default: one per CPU)
   --explain-plan      print the obligation set and exit
   --no-cache          recompute the base snapshot instead of reusing evidence
   --evidence MODE     full, diff, new or top (verify defaults to diff)
   --quiet             reduce output to the verdict line
   --no-color          never colourise (NO_COLOR is honoured too)
-  -v, -vv             INFO, then DEBUG diagnostics on stderr
-  --log-json          structured log lines instead of console format
+  -v, -vv, --log-json INFO, then DEBUG diagnostics on stderr, JSON with --log-json
 
 The other commands take their own flags; "goharness help <command>" lists them.
 
@@ -117,7 +117,7 @@ func perCommandUsage() map[string]string {
 // verification topic too large to read.
 const verifyUsage = `usage: goharness verify [--agent] [--json] [--report FILE]
                         [--dir DIR] [--base REV] [--contract FILE]
-                        [--evidence MODE] [--timeout D] [--explain-plan]
+                        [--evidence MODE] [--timeout D] [--jobs N] [--explain-plan]
                         [--no-cache] [--quiet] [--no-color] [-v|-vv] [--log-json]
 
 Admission gate. Verifies the diff plus its reverse dependency closure,
@@ -171,7 +171,7 @@ Examples
 func verificationUsage() map[string]string {
 	return map[string]string{
 		"verify": verifyUsage,
-		"audit": `usage: goharness audit [--agent] [--json] [--dir DIR] [--timeout D]
+		"audit": `usage: goharness audit [--agent] [--json] [--dir DIR] [--timeout D] [--jobs N]
                        [--baseline] [--quiet] [--no-color] [-v|-vv] [--log-json]
 
 Repository audit. Evaluates the whole codebase at head with every risk
@@ -209,7 +209,7 @@ Examples
   goharness audit --json > audit.json
   goharness audit --baseline && git add goharness.debt.yaml
 `,
-		"fast": `usage: goharness fast [--agent] [--json] [--dir DIR] [--timeout D]
+		"fast": `usage: goharness fast [--agent] [--json] [--dir DIR] [--timeout D] [--jobs N]
                       [--quiet] [--no-color] [-v|-vv] [--log-json]
 
 Developer loop aid over changed packages and their direct dependents.
@@ -370,7 +370,7 @@ Every key is optional.
                    file outside it is GH-SCOPE-001
   risks            domains to activate even where detection would not:
                    concurrency, network, persistence, public-api, tests,
-                   hot-path
+                   hot-path, dependency
   allowApiBreak    admit a removed or re-signed exported symbol
   allowPolicyEdit  admit a change to goharness.yaml
   budgets          per-benchmark limits for the base/head comparison

@@ -1,7 +1,9 @@
-# goharness Architecture Decisions (v0.5)
+# goharness Architecture Decisions (v0.9)
 
 Status: accepted. This document records the pinned tool versions and the
-architecture decisions made before implementing the v0.1 vertical slice.
+architecture decisions the code holds to. It began before the v0.1 vertical
+slice and is kept current with each release; where it and the code disagree,
+the code is wrong or this document is stale, and either is a defect.
 
 ## Pinned versions
 
@@ -10,7 +12,7 @@ architecture decisions made before implementing the v0.1 vertical slice.
 | Go toolchain | go 1.26 (module directive `go 1.26`) | Current stable; loop-variable semantics of Go 1.22+ assumed. |
 | golangci-lint | `v2.12.2` (exact, never `latest`) | Latest stable v2 release at time of pinning. Run as an external executable only; its GPL-licensed internals are never imported or linked. |
 | Uber Go Style Guide | commit `1d60a91aa5e87d443002e23c21903c49489dbde5` of `github.com/uber-go/guide` | Versioned policy source. The guide is never fetched at verification runtime; a checked-in rule registry references this SHA. |
-| JSON report schema | `goharness.report/v1` | Versioned so consumers can detect breaking changes. |
+| JSON report schema | `goharness.report/v2` | Versioned so consumers can detect breaking changes. |
 
 The pinned golangci-lint version is recorded in `internal/tool/golangci.go` as a
 constant, embedded in every JSON report, and enforced at runtime: a version
@@ -25,27 +27,37 @@ mismatch yields INCONCLUSIVE with a `doctor` hint, never a silent fallback.
   - `golang.org/x/tools` (`go/packages` for package graph loading,
     `imports` for goimports verification in-process);
   - `golang.org/x/sync` (`errgroup` and `semaphore` for bounded concurrency);
+  - `golang.org/x/vuln` (the vulnerability scanner, in-process, against a
+    local database snapshot; see `docs/toolchain.md`);
   - `go.uber.org/zap` (structured diagnostic logging; injected explicitly,
-    never through a package-level global, always writing to stderr).
+    never through a package-level global, always writing to stderr);
+  - `go.uber.org/goleak`, vendored verbatim under `internal/leakcheck/goleaksrc`
+    and injected into race runs through a build overlay, never imported.
 - Everything else is standard library. `gofmt` verification uses `go/format`
   in-process; both formatters run check-only and never write files.
 
 ## Package layout
 
 ```
-cmd/goharness        main; wiring only
-internal/cli         subcommand dispatch, flags, exit-code mapping
+cmd/goharness        main; signal handling and exit codes only
+internal/cli         subcommand dispatch, flags, help, colours, progress
+internal/admission   TaskContract, QualityClaim, RiskProfile, VerificationPlan, Decide
 internal/repo        workspace discovery, git snapshot capture, worktree guard
-internal/change      base/head resolution, ChangeSet, affected-package calc
-internal/policy      embedded policy packs, Uber rule registry, exceptions
-internal/verify      pipeline: ExecutionPlan, scheduler, Decision
-internal/tool        external tool runners (go, golangci-lint) + version pins
-internal/analyze     native AST checks: suppressions, comments, test quality
-internal/evidence    Evidence model, fingerprinting, base/head comparison
-internal/report      text and JSON (goharness.report/v1) renderers
+internal/change      base/head resolution, ChangeSet, package graph, affected scope
+internal/policy      rule registry (GH-*, GCL-*, UBER-*, GO-*), packs, exceptions
+internal/verify      pipeline engine, check scheduling, base/head orchestration
+internal/tool        external process runners (go, golangci-lint) + version pins
+internal/toolcache   content-addressed cache, checksummed downloads, vuln DB snapshots
+internal/leakcheck   the vendored goleak source and the overlay that injects it
+internal/analyze     native AST checks: suppressions, comments, tests, concurrency
+internal/evidence    Evidence model, stable fingerprints, base/head comparison
+internal/report      text and JSON (goharness.report/v2) renderers
 ```
 
-`internal/cache` is deferred past v0.1; the layout reserves the name.
+`internal/toolcache` is the one place verification may write outside a
+temporary directory, and only derived base evidence keyed by content; tool
+payloads and the vulnerability database are provisioned by `setup` and
+`tools update` alone.
 No `util`, `common`, `manager`, or `service` packages. Interfaces live at
 consumer boundaries and are introduced only where a test seam requires one
 (external process execution and git access are the two seams).
@@ -176,12 +188,21 @@ explicit dependencies (compile precedes vet, lint, and tests). The scheduler:
   Output is JSON, normalized into Evidence.
 - `nolintlint` stays off; the native suppression scanner in
   `internal/analyze` is authoritative and rejects every suppression directive.
-- `go mod tidy -diff` runs check-only. `go test` uses `-json`; `deep` adds
-  `-race` and repository-wide scope. govulncheck and fuzzing are `deep`-only
-  and tolerate absence of the tool by reporting INCONCLUSIVE for that check
-  only when the policy marks it required.
+- `go mod tidy -diff` runs check-only. `go test` uses `-json`, including the
+  overlaid runs that judge mutants, so a package that failed to build is told
+  apart from a test that failed: the first is no evidence, the second is a kill.
+  `-race` runs where the change touches concurrency, and repository-wide in
+  `audit`.
+- Vulnerability scanning is the embedded `golang.org/x/vuln` against a local
+  snapshot, never a govulncheck binary. `audit` always plans it; `verify` plans
+  it when the change touches a dependency file (`go.mod`, `go.sum`, `go.work`,
+  `go.work.sum`, `vendor/modules.txt`), because that is the change that can
+  bring a known vulnerability into the build without a Go line moving. No
+  snapshot means INCONCLUSIVE for that obligation, never a pass.
 - Binary discovery: `GOHARNESS_GOLANGCI_LINT` env var, then `./.tools/`, then
-  `PATH`. `doctor` reports what was found and whether versions match the pin.
+  the content-addressed cache, then `PATH`; every candidate is verified against
+  the pinned per-platform sha256. `doctor` reports what was found and whether
+  versions and hashes match the pin.
 
 ## Native checks (agent hygiene)
 

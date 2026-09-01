@@ -68,6 +68,7 @@ func nativeDimensions() map[string]Dimension {
 		policy.RuleBannedPackageName:   DimArchitecture,
 		policy.RuleForbiddenImport:     DimArchitecture,
 		policy.RuleAPIBreak:            DimArchitecture,
+		policy.RuleNewDependency:       DimArchitecture,
 		policy.RuleComplexity:          DimSimplicity,
 		policy.RuleForwardingLayer:     DimSimplicity,
 		policy.RuleSoleImplementation:  DimSimplicity,

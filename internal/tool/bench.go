@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -179,6 +180,21 @@ func OverlayPath(dir string, replacements map[string]string) (string, error) {
 	return path, nil
 }
 
+// OverlayOutcome is what one overlaid test run established.
+type OverlayOutcome int
+
+const (
+	// OverlayPassed means every package built and no test failed.
+	OverlayPassed OverlayOutcome = iota
+	// OverlayFailed means a test in a package that built failed.
+	OverlayFailed
+	// OverlayNotBuilt means a package did not compile, so none of its tests
+	// ran. go test exits 1 here exactly as it does for a failing test, and only
+	// the event stream tells the two apart; read as a kill, a compiler error
+	// once discharged the test-effectiveness claim for a whole change.
+	OverlayNotBuilt
+)
+
 // RunTestsWithOverlay runs the test binary for the given packages against an
 // overlay, so a mutated source file is compiled without the worktree ever being
 // modified.
@@ -186,14 +202,52 @@ func OverlayPath(dir string, replacements map[string]string) (string, error) {
 // Vet is off here for a reason beyond speed: a mutated expression can trip a vet
 // analyzer, and a non-zero exit from vet would be read as a test noticing the
 // mutant when no test ran at all.
-func RunTestsWithOverlay(ctx context.Context, runner Runner, dir, overlay string, patterns []string) (failed bool, err error) {
-	args := []string{"test", "-count=1", "-vet=off", "-overlay", overlay}
+func RunTestsWithOverlay(ctx context.Context, runner Runner, dir, overlay string, patterns []string) (OverlayOutcome, error) {
+	args := []string{"test", "-count=1", "-vet=off", "-json", "-overlay", overlay}
 	args = append(args, patterns...)
 	res, runErr := runner.Run(ctx, Command{Dir: dir, Name: "go", Args: args})
 	if runErr != nil {
-		return false, runErr
+		return OverlayPassed, runErr
 	}
-	return res.ExitCode != 0, nil
+	outcome, err := overlayOutcome(res.Stdout)
+	if err != nil {
+		return OverlayPassed, fmt.Errorf("%w (go test exit %d, stderr: %s)",
+			err, res.ExitCode, strings.TrimSpace(firstLines(res.Stderr, 10)))
+	}
+	if res.ExitCode != 0 && outcome == OverlayPassed {
+		return OverlayPassed, fmt.Errorf("go test exited %d without a failing test or a failed build: %s",
+			res.ExitCode, strings.TrimSpace(firstLines(res.Stderr+res.Stdout, 20)))
+	}
+	return outcome, nil
+}
+
+// overlayOutcome reads the event stream for the two facts a mutant run needs:
+// whether a test failed in a package that built, and whether any package
+// failed to build. A failure in a built package wins, because a test that
+// noticed the mutant is the evidence the run was after, whatever happened to
+// packages further away that never compiled against it.
+func overlayOutcome(stdout string) (OverlayOutcome, error) {
+	dec := json.NewDecoder(strings.NewReader(stdout))
+	outcome := OverlayPassed
+	for {
+		var ev testEvent
+		if err := dec.Decode(&ev); err != nil {
+			if err == io.EOF {
+				return outcome, nil
+			}
+			return OverlayPassed, fmt.Errorf("decoding go test JSON: %w", err)
+		}
+		switch {
+		case ev.Action == "build-fail":
+			if outcome == OverlayPassed {
+				outcome = OverlayNotBuilt
+			}
+		case ev.Action == "fail" && ev.FailedBuild != "":
+			// The package-level echo of a build-fail event, already counted.
+		case ev.Action == "fail":
+			outcome = OverlayFailed
+		}
+	}
 }
 
 // MergeBenchResults appends one run's samples onto the results collected so far.

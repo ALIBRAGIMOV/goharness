@@ -24,7 +24,7 @@ import (
 )
 
 // Version is the harness version recorded in every report.
-const Version = "0.8.0"
+const Version = "0.9.0"
 
 // Exit codes. They are the harness's contract with any caller.
 const (
@@ -36,7 +36,13 @@ const (
 
 // DefaultVerifyTimeout bounds a change admission run. Repository audits are
 // unbounded by default because their cost scales with the codebase.
-const DefaultVerifyTimeout = 10 * time.Minute
+//
+// Twenty minutes because ten was not enough for this harness to judge its own
+// release commit on a CI runner: the race suite of a repository whose tests
+// build git fixtures and run the full pipeline is six minutes on its own. A
+// timeout bounds cost and never quality, so the budget is set where a real
+// change on a real repository fits, and the report says where the time went.
+const DefaultVerifyTimeout = 20 * time.Minute
 
 // Streams are the output sinks a command writes to.
 type Streams struct {
@@ -145,6 +151,7 @@ type verifyFlags struct {
 	evidence    string
 	reportPath  string
 	limit       int
+	jobs        int
 	timeout     time.Duration
 }
 
@@ -219,6 +226,7 @@ func bindVerifyFlags(fs *flag.FlagSet, mode verify.Mode) *verifyFlags {
 		"which findings the report carries: "+strings.Join(evidenceModes(), ", "))
 	fs.IntVar(&f.limit, "evidence-limit", DefaultEvidenceLimit,
 		"how many findings `--evidence top` keeps, in consequence order")
+	fs.IntVar(&f.jobs, "jobs", 0, "checks to run at once; zero means one per CPU")
 	fs.BoolFunc("v", "enable INFO diagnostics", func(string) error { f.verbosity = max(f.verbosity, 1); return nil })
 	fs.BoolFunc("vv", "enable DEBUG diagnostics", func(string) error { f.verbosity = 2; return nil })
 
@@ -254,6 +262,10 @@ func runVerification(ctx context.Context, command string, args []string, streams
 		errOut.line("try: goharness verify --base %s", flags.base)
 		return ExitInconclusive
 	}
+	if flags.jobs < 0 {
+		errOut.line("--jobs must be zero or a positive count, got %d", flags.jobs)
+		return ExitInconclusive
+	}
 	if command == "deep" {
 		errOut.line("note: `deep` is deprecated and now runs `audit`; use `goharness audit`")
 	}
@@ -269,7 +281,7 @@ func runVerification(ctx context.Context, command string, args []string, streams
 
 	result, err := verify.Run(ctx, Version, verify.Options{
 		Mode: mode, Dir: flags.dir, Base: flags.base, ContractPath: flags.contract,
-		Timeout: flags.timeout, Logger: logger, Progress: bar.Handle,
+		Timeout: flags.timeout, Limit: int64(flags.jobs), Logger: logger, Progress: bar.Handle,
 		PlanOnly: flags.explainPlan, NoCache: flags.noCache,
 	})
 	bar.Clear()

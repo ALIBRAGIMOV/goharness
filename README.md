@@ -14,7 +14,7 @@ most code is written by AI coding agents and "done" stopped meaning anything.
 ```console
 $ goharness verify
 REJECTED  failing claims: test-effectiveness
-goharness 0.8.0  mode=verify  module github.com/acme/billing (go 1.26)
+goharness 0.9.0  mode=verify  module github.com/acme/billing (go 1.26)
 tools: go go1.26.6, golangci-lint 2.12.2 (pin 2.12.2), x/vuln v1.7.0
 scope: 7 changed files against 4f2ab1c9d3e5 (merge-base with default branch), 12 packages, 9 test packages
 risk domains: concurrency, tests
@@ -141,7 +141,9 @@ coordinates before the two are compared.
 - **Offline vulnerability scanning** with the embedded `golang.org/x/vuln`
   against a local database snapshot, with call graph reachability: depending on
   a vulnerable module and reaching the vulnerable function are different
-  verdicts.
+  verdicts. `audit` scans every time; `verify` scans when the change touches
+  `go.mod`, `go.sum` or another dependency file, and a vulnerability the base
+  already carried is debt rather than a rejection.
 - **Goroutine leak evidence with zero setup.** When a change touches
   concurrency, a pinned goleak is injected into the affected test packages
   through a build overlay. Your tests, unchanged, now also prove that no
@@ -295,7 +297,12 @@ a performance regression and several complexity violations in its own code.
 - [docs/adopting-alongside-golangci.md](docs/adopting-alongside-golangci.md): adopting the gate in a repository that already runs golangci-lint
 - [docs/agent-contract.md](docs/agent-contract.md): a copy-pasteable CLAUDE.md/AGENTS.md fragment for repositories that adopt goharness
 - [docs/threat-model.md](docs/threat-model.md): the routes to an unearned ADMITTED, the mechanism closing each, and the test that pins it
+- [docs/releases/0.9.md](docs/releases/0.9.md): what 0.9 changed
 - [docs/releases/0.8.md](docs/releases/0.8.md): what 0.8 changed
 - [docs/releases/0.7.md](docs/releases/0.7.md): what 0.7 changed
 - [docs/releases/0.6.md](docs/releases/0.6.md): what 0.6 changed
 
+## License
+
+[MIT](LICENSE). The vendored goleak source under `internal/leakcheck/goleaksrc`
+keeps its own MIT notice.
