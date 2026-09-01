@@ -1,35 +1,39 @@
-# goharness Toolchain Provisioning (v0.9)
+# Toolchain provisioning
 
-Status: accepted. Extends `docs/architecture.md` and `docs/admission-model.md`.
-Where documents conflict, the newest wins.
+This document states how goharness obtains, verifies and caches the tools it
+runs, and what verification is allowed to write. `docs/architecture.md`
+holds the pins; where the two disagree, either is a defect.
 
 ## Principles
 
 - Verification commands (`fast`, `verify`, `audit`, `doctor`, `explain`,
-  `version`) never install tools and never touch the network. Provisioning is
-  the exclusive job of `goharness setup` and `goharness tools update`.
+  `diff`, `version`) never install tools and never touch the network.
+  Provisioning is the job of `goharness setup` and `goharness tools update`.
 - Verification writes nothing inside the worktree, and outside it only one
-  thing: derived evidence, under `derived/` in the cache. That carve-out is
-  narrow on purpose (see "Derived evidence" below), and `--no-cache` disables
-  it; a run with the flag must reach the same verdict as a run without it.
-- Every tool the harness executes is identified by the sha256 of its bytes, not
-  by what it prints when asked its version.
+  thing: derived base evidence, under `derived/` in the cache. `--no-cache`
+  disables it, and a run with the flag must reach the same verdict as a run
+  without it.
+- Every tool the harness executes is identified by the sha256 of its bytes,
+  never by what it prints when asked its version.
 - Every downloaded artifact is verified against a checksum pinned in source
-  before it is trusted, extracted, or cached. A mismatch aborts the install
+  before it is trusted, extracted or cached. A mismatch aborts the install
   and leaves the cache untouched.
-- The vulnerability scanner is embedded; there is no govulncheck executable
-  dependency and no PATH lookup for it anywhere in the codebase.
+- The vulnerability scanner is embedded; no govulncheck executable, no PATH
+  lookup for it anywhere in the code.
+- Goroutine-leak evidence needs no tool at all: the Go runtime's
+  `goroutineleak` profile is read by a `TestMain` the harness generates.
 
-## Pinned versions (additions)
+## Pins
 
 | Component | Pin |
 |---|---|
-| golang.org/x/vuln (embedded scanner, module dependency) | `v1.7.0` exact in go.mod |
-| go.uber.org/goleak (embedded goroutine-leak detector) | `v1.3.0`, sources vendored verbatim under `internal/leakcheck/goleaksrc` (MIT, license included); injected into race runs through a `go test -overlay` virtual package, never installed and never on the network |
-| golangci-lint v2.13.2 release archive sha256 | pinned per platform, from the official `golangci-lint-2.13.2-checksums.txt` |
+| Go, on the host | `go1.27.0` or later (`go/version` decides; a release candidate is below its release, and the bare language version is below both) |
+| golangci-lint | `2.13.2`, release archive sha256 per platform from the official checksums file, and the sha256 of the executable inside it |
+| `golang.org/x/vuln` | `v1.7.0` exact in `go.mod` |
+| goroutine-leak detection | `runtime/pprof` profile `goroutineleak`, Go 1.27 or later on the host |
 
-Pinned archive checksums (source: official release checksums file). The archive
-sums authorise a download; the binary sums below authorise an execution:
+Pinned archive checksums. The archive sums authorise a download; the binary
+sums authorise an execution:
 
 ```
 a9c54498731b3128f79e090be6110f3e5fffccc617b08142ed244d4126c73f29  darwin-arm64.tar.gz
@@ -39,7 +43,7 @@ f6f06d94b6241521c53d15450c5209b028270bf966f842afb11c030c79f5bc16  darwin-amd64.t
 bd42e3ebc8cb4ececb86941983baaf1dc221bbb04d838e94ce63b49cc91e02bb  windows-amd64.zip
 ```
 
-Pinned binary checksums (the executable inside each verified archive):
+Pinned binary checksums:
 
 ```
 691b9100ce968ff0009b6b7757ef6a585e31ae9ab11dfe0340ebb6e8e21fdc3d  darwin-arm64
@@ -52,57 +56,52 @@ bed205a512d6ce48a6cce052878fcceb06591bd72d7e6b5e138204ef720eef66  windows-amd64
 Download URL template:
 `https://github.com/golangci/golangci-lint/releases/download/v<ver>/golangci-lint-<ver>-<os>-<arch>.<ext>`
 
-## Binary identity (normative)
+## Binary identity
 
-Discovery order is unchanged (env override, repository `.tools/`, the cache,
-then PATH), but no source is trusted on its word. Every candidate is hashed and
-must equal the pinned sum for the platform; a candidate that does not match is
-passed over with the reason recorded on the result, and doctor prints it.
+Discovery order is `GOHARNESS_GOLANGCI_LINT`, the repository's `.tools/`,
+the cache, then `PATH`, and no source is trusted on its word. Every
+candidate is hashed and must equal the pinned sum for the platform; one that
+does not match is passed over with the reason recorded, and `doctor` prints
+it.
 
-The reason is the threat model. `.tools/` lives inside the repository the change
-under verification can write to, `GOHARNESS_GOLANGCI_LINT` is one line of shell
-away, and a program that prints `golangci-lint has version 2.13.2` and an empty
-JSON report takes three lines to write. A version self-report proves nothing;
-the bytes do. When nothing trustworthy is found, the linter's obligations are
-unproducible and the run is INCONCLUSIVE with `goharness setup` as the remedy;
-the harness never falls back to an unverified binary.
-
-A locally built linter is not the pinned release. `go install
-github.com/golangci/golangci-lint/...` produces a binary that reports the right
-version and hashes to something else, so it is refused: `goharness setup` is the
-only supported route.
+The reason is the threat model. `.tools/` lives inside the repository the
+change under verification can write to, the environment variable is one
+line of shell away, and a program that prints `golangci-lint has version
+2.13.2` and an empty JSON report takes three lines to write. A version
+self-report proves nothing; the bytes do. When nothing trustworthy is found,
+the linter's obligations are unproducible and the run is INCONCLUSIVE with
+`goharness setup` as the remedy. The harness never falls back to an
+unverified binary, and a locally built one (`go install`) reports the right
+version, hashes to something else, and is refused.
 
 The sha256 of the binary that produced a verdict is recorded in the report's
-versions block.
+`versions` block.
 
-## Subprocess environment (normative)
+## Subprocess environment
 
 Every process the harness starts inherits a sanitised environment:
 
 - `GOFLAGS` is removed. It is spliced into every go invocation, so a single
-  `-run` pattern would turn an empty test run into a passing one, and `-tags`
-  would change which files exist as far as the toolchain is concerned.
+  `-run` pattern would turn an empty test run into a passing one, and
+  `-tags` would change which files exist as far as the toolchain is
+  concerned.
 - `GOTOOLCHAIN` is forced to `local`. Verification downloads nothing, and a
-  module requiring a toolchain this machine lacks has to fail loudly rather than
-  quietly fetching one over the network.
+  module requiring a toolchain this machine lacks has to fail loudly rather
+  than fetch one. When the installed toolchain is older than the module's
+  `toolchain` directive, the vulnerability obligation goes unproducible
+  naming both versions, and `doctor` reports the gap first.
 - `GOHARNESS_*` are removed, so code under test cannot read or redirect the
   cache its own verdict depends on.
 
-The same environment is what makes `go fix` safe to run: it is invoked with
-`-json`, which reports edits instead of applying them, and with `GOTOOLCHAIN=local`,
-so the analyzer set that produced a verdict is the one installed on the machine
-and recorded in the report.
+Everything else is inherited untouched, `GOPRIVATE`, `GOPROXY`, `GOMODCACHE`
+and `GONOSUMDB` among them: module resolution in a real repository depends on
+them, and a gate that silently rewrote them would report failures its user
+cannot reproduce. The package loader and the vulnerability scanner get the
+same environment. `doctor` prints what is taken away.
 
-Everything else is inherited untouched, `GOPRIVATE`, `GOPROXY`, `GOMODCACHE` and
-`GONOSUMDB` among them: module resolution in a real repository depends on them,
-and a gate that silently rewrote them would report failures its user cannot
-reproduce. The same sanitised environment is given to the package loader and to
-the vulnerability scanner, which run the go command too. `doctor` prints what it
-takes away, and names the variables your shell sets that will not apply.
+## The content-addressed cache
 
-## Content-addressed tool cache
-
-Package: `internal/toolcache`. Root: `GOHARNESS_CACHE` env override, else
+Package `internal/toolcache`. Root: `GOHARNESS_CACHE`, else
 `os.UserCacheDir()/goharness`. Layout:
 
 ```
@@ -115,96 +114,90 @@ vulndb/current/manifest.json
 derived/base-evidence/<key>.json  cached base-revision results
 ```
 
-Rules:
+- Payloads land in `blobs/` under the hex of their own sha256, written to a
+  temporary file and renamed into place.
+- A cached binary is re-hashed at use and rejected on manifest mismatch.
+- All network fetches go through one injected fetcher, so tests substitute
+  `httptest` servers and the verification-command tests prove zero network
+  use.
 
-- payloads land in `blobs/` under the hex of their own sha256; a blob is
-  written to a temp file first and renamed into place (atomic, idempotent);
-- the golangci-lint binary is used through its manifest: discovery order
-  becomes env override, repository `.tools/`, cache manifest, PATH; a cached
-  binary is re-hashed at use and rejected on manifest mismatch;
-- the version-pin check applies to every discovery source, unchanged;
-- all network fetches go through one injected fetcher (base URL + HTTP
-  client) so tests substitute `httptest` servers and verification-command
-  tests can prove zero network use.
+## Derived evidence
 
-## Derived evidence (normative)
-
-`verify` re-examines the base revision on every run, and in an agent's repair
-loop that is the same untouched commit ten times over. The result is cached
-under `derived/base-evidence/`, keyed by a sha256 over everything that could
-change it: the goharness version, the go toolchain, the linter version and
-binary hash, the x/vuln and goleak versions, the digest of `goharness.yaml`, the
-base commit, the native scanner options, the lint and test scope, the exact file
+`verify` re-examines the base revision on every run, and in an agent's
+repair loop that is the same untouched commit ten times over. The result is
+cached under `derived/base-evidence/`, keyed by a sha256 over everything
+that could change it: the goharness version, the go toolchain and the
+standard library it judges, the linter version and binary hash, the scanner
+version, the leak-check method, the digest of `goharness.yaml`, the base
+commit, the native scanner options, the lint and test scope, the exact file
 set examined, the generated files exempted, and the planned check IDs.
 
-Rules:
+- Only derived evidence is cached this way. Tool payloads and snapshots are
+  the business of `setup` and `tools update`, and nothing here reaches the
+  network.
+- An entry is written only when the base run had no check failures, so a
+  broken environment is never remembered as a result.
+- An unreadable or unwritable cache costs time and nothing else; a verdict
+  never depends on the cache being healthy.
+- `--no-cache` recomputes, and a test asserts the two reports are
+  byte-identical.
+- The directory is bounded, oldest entries first.
 
-- only derived evidence is cached this way. Tool payloads and vulnerability
-  database snapshots remain the exclusive business of `setup` and
-  `tools update`, and nothing here ever reaches the network;
-- a cache entry is written only when the base run had no check failures, so a
-  broken environment is never remembered as a result;
-- an unreadable or unwritable cache costs time and nothing else: the run
-  recomputes and says so in the log. A verdict never depends on a cache being
-  healthy;
-- `--no-cache` recomputes. A run with it and a run without it must produce
-  byte-identical reports, and a test in `internal/verify` asserts exactly that;
-- the directory is bounded (`MaxDerivedEntries`), oldest first, because a cache
-  the harness itself would call unbounded has no business shipping in it.
+Anyone who can write the cache directory can replace an entry together with
+its integrity hash; the hash detects corruption and drift, not a determined
+local writer. The root is a per-user directory outside the repository, so
+this needs write access to the operator's own machine. CI runs with
+`--no-cache`.
 
-## setup and tools update
+## setup, tools update, skill install
 
-- `goharness setup`: provisions everything missing for this machine - the
-  pinned golangci-lint for the current platform (download, verify pinned
-  sha256, extract, blob, manifest) and an initial vulnerability database
-  snapshot. Idempotent: reports what already exists, installs only gaps.
-- `goharness tools update`: refreshes the vulnerability database snapshot
-  and re-provisions any tool whose pin changed. Snapshot replacement is
-  atomic: download into a temp directory, verify, then rename-swap; a
-  failed update leaves the previous snapshot in service.
-- Both commands print exactly what they downloaded, verified, and wrote,
-  with checksums. They are the only commands allowed network access or
-  cache writes.
+- `goharness setup` provisions everything this machine is missing: the
+  pinned golangci-lint for the platform (download, verify, extract, blob,
+  manifest), an initial vulnerability database snapshot, and the agent skill
+  for the current user (`--no-skill` leaves it out). Idempotent: it reports
+  what exists and installs only gaps.
+- `goharness tools update` refreshes the snapshot and re-provisions any tool
+  whose pin moved. Replacement is atomic: download into a temporary
+  directory, verify, rename-swap; a failed update leaves the previous
+  snapshot in service.
+- `goharness skill install` writes the skill for the current user, or with
+  `--project` into a repository. A file goharness did not write is left
+  alone and named; `--force` replaces it.
+
+These three are the only commands that reach the network or write outside a
+repository, and each prints exactly what it downloaded, verified and wrote.
 
 ## Embedded vulnerability scanning
 
-`golang.org/x/vuln/scan` replaces the external govulncheck binary. The
-scanner runs in-process with `-format json -mode source` against the module
-patterns, with `-db file://<cache>/vulndb/current` so scans are strictly
-offline. JSON parsing and evidence mapping are unchanged (`GO-VULN`).
+`golang.org/x/vuln/scan` runs in-process, in source mode, against the module
+patterns, with `-db file://<cache>/vulndb/current`, so scans are strictly
+offline. The snapshot mirrors `https://vuln.go.dev` in its v1 layout:
+`index/db.json`, `index/modules.json`, `index/vulns.json`, and every entry
+file the index lists. Its manifest records the database `modified` time, the
+fetch time, an entry count and a tree checksum over the sorted
+`path:sha256` lines of every file. An integration test runs a real scan
+against a snapshot served from `httptest`, so the `file://` layout is
+verified rather than assumed.
 
-The vulnerability database snapshot mirrors https://vuln.go.dev in its v1
-layout: `index/db.json`, `index/modules.json`, `index/vulns.json`, and every
-entry file the index lists, fetched with bounded concurrency. The snapshot
-manifest records the database `modified` timestamp from `index/db.json`, the
-fetch time, an entry count, and a tree checksum (sha256 over the sorted
-`path:sha256` lines of every file). The implementation must verify
-empirically that the x/vuln client accepts the `file://` layout by running a
-real scan against a snapshot in an integration test.
-
-If no snapshot exists, the vulnerability-scan obligation is INCONCLUSIVE
-with the hint `run goharness setup`; a stale snapshot still scans (the
-report and doctor surface its age). Missing evidence is never a pass.
-
-`audit` plans the scan on every run. `verify` plans it when the change touches
-a dependency file (`go.mod`, `go.sum`, `go.work`, `go.work.sum`,
-`vendor/modules.txt`), which activates the `dependency` risk domain; the base
-revision is scanned too, so a vulnerability the base already carried is
-pre-existing debt and one the change brought in blocks. A code-only change
-plans no scan and needs no snapshot: reachability that changes without the
-module set changing is the audit's business, and the plan says so.
+No snapshot means the vulnerability obligation is INCONCLUSIVE with
+`goharness setup` as the hint; a stale snapshot still scans, and the report
+and `doctor` say how old it is. `audit` plans the scan on every run;
+`verify` plans it when the change touches `go.mod`, `go.sum`, `go.work`,
+`go.work.sum` or `vendor/modules.txt`, at base as well as head, so a
+vulnerability the base already carried is debt and one the change brought in
+blocks.
 
 ## Reporting and doctor
 
-- The report's versions block gains the x/vuln module version (from build
-  info). When the scanner runs, a `vulnDB` block records `source`,
-  `modified`, `fetchedAt`, `treeChecksum`, and `entryCount` - all stable per
-  snapshot, so byte-determinism of repeated runs is preserved. Volatile
-  derived values (age in days) appear only in the human text report and in
-  doctor, never in the deterministic JSON portion.
-- `doctor` replaces the govulncheck PATH probe with: embedded scanner
-  version, snapshot presence, manifest checksum re-verification, and
-  freshness (warn when `modified` is older than 7 days, with the exact fix
-  command `goharness tools update`). It also reports the cache root, its
-  size, and per-tool manifest status. Doctor reads the cache; it never
-  writes it.
+- The report's `versions` block carries the go toolchain, the standard
+  library judged, the linter version, pin, match and sha256, the scanner
+  version, the leak-check method and the Uber guide commit. When the scanner
+  ran, a `vulnDb` block records the snapshot's source, modified time, fetch
+  time, checksum and entry count, all stable per snapshot. Volatile values
+  such as an age in days appear only in the human report and in `doctor`.
+- `doctor` reports the toolchain, git, the module and its toolchain floor,
+  golangci-lint discovery and pin match, the `go fix` analyzer set, stale
+  worktrees, the sanitised environment, the scanner and its snapshot with
+  freshness, the cache root and size, and the agent skill copies for each
+  supported agent, with the exact command that fixes each problem. Doctor
+  reads the cache; it never writes it.

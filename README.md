@@ -1,76 +1,88 @@
 # goharness
 
-**A deterministic admission gate for Go. A change gets in only when every quality claim has evidence.**
+**A deterministic admission gate for Go. A change gets in only when every
+quality claim has evidence.**
 
 goharness answers one question about a Go change: is it admissible?
 
 Not "did the linter pass". Not "are the tests green". Admissible means every
-applicable quality dimension holds with proof, and whatever could not be proved
-is reported as unproven instead of waved through.
+applicable quality dimension holds with proof, and whatever could not be
+proved is reported as unproven instead of waved through.
 
 One binary. Zero configuration. Three exit codes. Built for the moment when
-most code is written by AI coding agents and "done" stopped meaning anything.
+most code is written by coding agents and "done" stopped meaning anything.
 
 ```console
 $ goharness verify
-REJECTED  failing claims: test-effectiveness
-goharness 0.9.0  mode=verify  module github.com/acme/billing (go 1.27)
-tools: go go1.27.0, golangci-lint 2.13.2 (pin 2.13.2), x/vuln v1.7.0
-scope: 7 changed files against 4f2ab1c9d3e5 (merge-base with default branch), 12 packages, 9 test packages
-risk domains: concurrency, tests
+REJECTED  failing claims: maintainability, architecture, reliability, operability
+goharness 0.10.0  mode=verify  module github.com/caddyserver/caddy/v2 (go 1.25.1)
+tools: go go1.27.0, golangci-lint 2.13.2 (pin 2.13.2), x/vuln v1.7.0, uber guide 1d60a91aa5e8
+contract: implicit default
+scope: 3 changed files against 62a72977e58c (HEAD, judging uncommitted work), 29 packages, 29 test packages
+risk domains: concurrency, network, public-api, tests, hot-path
 
 quality claims:
   PASS           correctness            5 obligation(s) discharged with no required violation
-  FAIL           test-effectiveness     2 required violation(s): GH-MUT-001, GH-TEST-001
-  INCONCLUSIVE   concurrency-safety     required evidence was not produced: goroutine-leak-clean
-  PASS           simplicity             3 obligation(s) discharged with no required violation; 1 advisory finding(s) recorded
+  FAIL           maintainability        1 required violation(s): GCL-predeclared
+  FAIL           architecture           1 required violation(s): GCL-gochecknoinits
+  PASS           concurrency-safety     3 obligation(s) discharged with no required violation
+  FAIL           reliability            1 required violation(s): GCL-errorlint
+  PASS           test-effectiveness     3 obligation(s) discharged with no required violation
+  PASS           performance            2 obligation(s) discharged with no required violation
+  FAIL           operability            3 required violation(s): GCL-noctx
   ...            14 dimensions in total
 
-test-effectiveness:
-  BLOCK  GH-TEST-001 billing/refund_test.go:41:2
-      test TestRefundApplies contains no assertion, error check, state observation, or panic expectation
-  BLOCK  GH-MUT-001 billing/refund.go:88:9
-      tests still pass with relational operator >= replaced with <, so they execute this code without observing it
-  run: goharness explain GH-MUT-001
-  run: goharness explain GH-TEST-001
+evidence: 6 new, 1396 pre-existing, 0 fixed, 251 advisory; 0 tool failure(s); 1m29s
+mutation: 14 mutant(s) over 11 changed function(s); 1 ran, 1 killed, 0 survived
+--evidence diff: 1643 of 1653 finding(s) not shown; rerun with --evidence full to read them
+debt in edited files, pre-existing and not shown: modules/caddyhttp/server.go 22; an audit judges it
 
-simplicity:
-  advise GO-FIX-rangeint billing/ledger.go:24:2 [new, added-line]
-      for loop can be modernized using range over int
-      fix: go fix -rangeint ./billing
+reliability:
+  BLOCK  GCL-errorlint modules/caddyhttp/concurrencylimit_test.go:119:12 [new, added-line]
+      type assertion on error will fail on wrapped errors. Use errors.As to check for specific errors
+  run: goharness explain GCL-errorlint
+
+operability:
+  BLOCK  GCL-noctx modules/caddyhttp/concurrencylimit_test.go:43:30 [new, added-line]
+      net/http/httptest.NewRequest must not be called. use net/http/httptest.NewRequestWithContext
+  run: goharness explain GCL-noctx
 
 next steps (smallest set of actions that would flip each failing claim):
-  test-effectiveness: 2 required violation(s): GH-MUT-001, GH-TEST-001
-      fix every GH-TEST-001 finding above, then rerun; `goharness explain GH-TEST-001` says why it blocks
-  concurrency-safety: goroutine-leak-clean
-      a TestMain already exists in billing/worker, so leak verification cannot be injected there
+  reliability: 1 required violation(s): GCL-errorlint
+      fix every GCL-errorlint finding above, then rerun; `goharness explain GCL-errorlint` says why it blocks
 ```
+
+That is a real run: a 300-line feature added to a 105,000-line repository
+with 1,396 findings of its own. The change is judged on the ten rows it
+wrote. The rest is counted, named per file, and left for the audit.
 
 ## Install
 
-```bash
+```sh
 go install github.com/ALIBRAGIMOV/goharness/cmd/goharness@latest
 
-goharness setup     # one time: pinned tools and the offline vulnerability database
-goharness verify    # the admission gate for your current change
+goharness setup     # once: pinned tools, the offline vulnerability database, the agent skill
+goharness verify    # the admission gate for the change in your working tree
 ```
 
-That is the whole setup. Zero configuration gives you the full strict policy.
-Requires Go 1.27 or later.
+Zero configuration gives you the full strict policy. Requires Go 1.27 or
+later on the machine; the repository under test may declare any Go version.
 
 ## Why it exists
 
 Real Go repositories fail in ways no single tool catches:
 
-- An agent reports "done" while its new tests assert nothing.
-- One `//nolint` buries a real finding forever, and nobody reads the diff line it sits on.
+- An agent reports "done" while its new tests assert nothing, or while the
+  gate it ran saw no change at all.
+- One `//nolint` buries a real finding forever, and nobody reads the diff
+  line it sits on.
 - A goroutine with no termination path ships to production.
-- A strict linter is unusable on a legacy repo because it drowns you in old debt.
+- A strict linter is unusable on a legacy repository because it drowns you
+  in old debt.
 - "The check could not run" quietly becomes "the check passed".
 - A CVE lands in a dependency you use and nothing tells you.
 
-goharness has one job: refuse to admit a change unless the evidence is
-actually there.
+goharness has one job: refuse to admit a change unless the evidence is there.
 
 ## Three verdicts, no scores
 
@@ -81,152 +93,143 @@ actually there.
 | `INCONCLUSIVE` | 2 | Evidence could not be produced. The change is **not** declared safe |
 
 There is no aggregate score. A critical failure cannot be bought back by
-excellence elsewhere. A tool that crashes is never reported as a code defect;
-it is an honest `INCONCLUSIVE` with the command that fixes it.
+excellence elsewhere. A tool that crashes is never reported as a code
+defect; it is an honest `INCONCLUSIVE` with the command that fixes it. A
+diff that holds nothing is `INCONCLUSIVE` too: an empty change is not a
+clean one, and the gate never certifies work it did not see.
 
-## New debt blocks, old debt does not
+## The change is judged, not the repository
 
-Every finding gets a fingerprint that ignores line numbers, and every run
+Every finding carries a fingerprint that ignores line numbers, and every run
 compares your change against its base revision:
 
 - present only at head: **new**, and it blocks;
-- present at both: **pre-existing debt**, reported and never blocking;
+- present at both: **pre-existing debt**, reported and not blocking;
 - present only at base: **fixed**, and the report credits you.
 
-That is why the strict policy is adoptable on a legacy repository on day one.
-The exception is suppression directives, which are forbidden outright and never
-grandfathered. Exceptions live in one reviewed file with a rule ID, scope,
-reason, owner and expiry date.
+Every finding also says how close it sits to what you wrote: `added-line`,
+`changed-file`, `changed-package`, `untouched`. `new` plus `untouched` is a
+package your change broke without editing, and it blocks. `preexisting` plus
+`changed-file` is debt in a file you happen to be in: counted per file in
+`summary.debtInChangedFiles`, printed on one line, and not something this
+change has to fix.
 
-## A report about your branch, not about your repository
+The exception is the ungrandfatherable core: inline suppressions and the
+policy guards. Those block on the lines you wrote, however old the directive
+you rewrote or moved, and they can never be excepted, baselined or
+configured away. One that predates your change on a line you did not touch
+is reported as debt and rejects an `audit` instead, because a change gate
+that demanded the cleanup of every legacy file an agent opened was a gate
+nobody could pass.
 
-`verify` scopes evidence to the diff and its reverse dependencies, so on a large
-repository one edited file used to drag most of the codebase into the report as
-non-blocking debt. Every finding now carries two axes, and they answer different
-questions:
+`verify` renders the diff view by default: everything blocking, everything
+new or fixed, everything on a line you wrote. `--evidence full` prints the
+rest. **No view ever drops a finding that blocks**, and `evidenceOmitted`
+counts what a view withheld, so a short list is never mistaken for a clean
+run.
 
-- `state`: did the base revision already have this? `new`, `preexisting`, `fixed`
-- `origin`: how close is it to what you wrote? `added-line`, `changed-file`,
-  `changed-package`, `untouched`
+The base is the merge-base with the default branch. On the default branch
+itself it is `HEAD` while you have uncommitted work, and the parent commit
+once everything is committed; `--base REV` names it explicitly, and the
+report records which applied.
 
-Read together they are what a merge request review actually needs. `new` +
-`untouched` is a package your change broke without editing, and it blocks.
-`preexisting` + `changed-file` is debt in a file you are already in, worth seeing
-and never blocking. `preexisting` + `changed-package` is a sibling file you never
-opened, and `verify` no longer prints it.
-
-```console
-$ goharness verify
-REJECTED  failing claims: reliability
-...
-evidence: 2 new, 431 pre-existing, 0 fixed, 27 advisory; 0 tool failure(s); 51s
---evidence diff: 452 of 460 finding(s) not shown; rerun with --evidence full to read them
-```
-
-`--evidence full` prints everything, `--evidence new` prints only what you moved.
-**No view ever drops a finding that blocks**, so a narrower report can change how
-much you read and never what you have to fix, and `summary` keeps counting the
-whole run either way. Moving a file no longer introduces the findings it already
-carried: git's rename is followed, and the base snapshot is read in your branch's
-coordinates before the two are compared.
-
-## What it actually runs
+## What it runs
 
 - **The Go toolchain as the semantic authority:** compilation, `go vet`,
-  `go test`, the race detector, `gofmt`, `goimports`, `go mod tidy -diff`, and
-  Go 1.26 `go fix`.
-- **golangci-lint at an exact pin (2.13.2)** with an embedded strict config.
-  Your `.golangci.yml` is not trusted by default. Every candidate binary is
-  verified against a pinned sha256.
+  `go test`, the race detector, `gofmt`, `goimports`, `go mod tidy -diff`,
+  and the `go fix` analyzer suite, which reports a finding only when the
+  toolchain produced the exact edit that closes it.
+- **golangci-lint at an exact pin (2.13.2)** with an embedded strict
+  configuration. Your `.golangci.yml` is not read. Every candidate binary is
+  verified against a pinned sha256; a locally built one is refused.
+- **Goroutine-leak evidence with zero setup.** When a change touches
+  concurrency, goharness injects a `TestMain` into the affected test
+  packages through a build overlay and reads the Go runtime's own
+  `goroutineleak` profile after the tests finish. A goroutine blocked on
+  something that can never wake it is a leak, named by the site that started
+  it. Nothing is vendored, nothing is installed.
+- **Mutation evidence.** goharness mutates the functions you changed in an
+  overlay and checks that a test notices. Tests that execute code without
+  observing it fail the gate. A change with nothing to mutate is discharged
+  with the count that says so, never left INCONCLUSIVE with no remedy.
+- **Benchmark evidence** in the packages you edited, at base and head,
+  interleaved so the machine's load cannot masquerade as a regression. A
+  benchmark that fails at both revisions is skipped and reported; one your
+  change broke makes the claim unmeasurable and says which.
 - **Offline vulnerability scanning** with the embedded `golang.org/x/vuln`
-  against a local database snapshot, with call graph reachability: depending on
-  a vulnerable module and reaching the vulnerable function are different
-  verdicts. `audit` scans every time; `verify` scans when the change touches
-  `go.mod`, `go.sum` or another dependency file, and a vulnerability the base
-  already carried is debt rather than a rejection.
-- **Goroutine leak evidence with zero setup.** When a change touches
-  concurrency, a pinned goleak is injected into the affected test packages
-  through a build overlay. Your tests, unchanged, now also prove that no
-  goroutine outlives them.
-- **Mutation evidence.** goharness mutates your changed functions in an overlay
-  and checks that a test notices. Tests that execute code without observing it
-  fail the gate.
-- **Machine-applicable fixes.** A `go fix` finding is reported only when the
-  toolchain produced the exact edit that closes it, and the report hands you
-  that command. Both directions of `//go:fix inline` are covered: calls that
-  have not migrated, and deprecations you shipped without a directive.
-- **Native analyzers nothing else provides:** the suppression ban across every
-  dialect, comment hygiene (including the em dash U+2014, an agent artifact),
-  test-effectiveness checks, goroutine lifecycle and bounded resource scans,
-  `sql.Tx` pairing, architecture rules, and a policy guard.
+  against a local database snapshot, with call-graph reachability. `audit`
+  scans every time; `verify` scans when `go.mod`, `go.sum`, `go.work` or
+  `vendor/modules.txt` changed, at base as well as head.
+- **Native analyzers nothing else provides:** the suppression ban across
+  every dialect, comment hygiene, test-effectiveness and test-weakening
+  checks (assertions removed, skips added, tolerances widened, a test file
+  excluded by a build constraint), goroutine lifecycle and bounded-resource
+  scans, `sql.Tx` pairing, an exported-API diff, architecture rules, a
+  policy guard.
 - **The Uber Go Style Guide** as a versioned registry pinned to an upstream
   commit, each rule classified honestly: required only where analysis is
   reliable.
 
-## For AI coding agents
+## For coding agents
 
-goharness is designed as the completion protocol for coding agents, and works
-with any of them: Claude Code, Cursor, Codex, Copilot, or your own harness.
+goharness is the completion protocol for coding agents, and it ships as an
+agent skill. `goharness setup` installs it for Claude Code
+(`~/.claude/skills/goharness/SKILL.md`) and Codex
+(`~/.agents/skills/goharness/SKILL.md`); `goharness skill install --project`
+writes the same two files into a repository so a commit carries the protocol
+to every checkout and cloud session. The skill holds the completion
+protocol, the order to read the report in, what each INCONCLUSIVE remedy
+means, and the routes an agent must never take.
 
-Add one line to your agent instructions:
+If your agent reads none of those locations, one line in its instruction
+file is enough:
 
 ```
 Finish every task by running `goharness verify --agent` and resolving every FAIL
 and INCONCLUSIVE claim until the verdict is ADMITTED.
 ```
 
-[docs/agent-contract.md](docs/agent-contract.md) is the longer fragment: the
-completion protocol, the order to read the report in, the two things never to
-do, and where the on-ramps are for a repository that does not pass yet.
-
 In `--agent` mode stdout is exactly one `goharness.report/v2` JSON document:
-the verdict, the claim table, every finding with `blocking` and, where a tool
-can state the fix rather than guess it, `fix.command`, plus every obligation
-the run could not discharge with the action that would produce it. Run
-`goharness help` and the whole protocol is on one screen.
+the verdict, `sufficientForCompletion`, the claim table, every finding with
+`blocking`, `state`, `origin` and, where a tool can state the fix, the
+`fix.command` that closes it, plus every obligation the run could not
+discharge with the action that would produce it. `evidence[]` is ordered by
+consequence: silent data loss first, then unsafe behaviour, structural,
+hygiene. `goharness explain` prints any rule, or any finding by fingerprint.
+`goharness diff before.json after.json` states what was fixed, introduced
+and remains, which is progress accounting a reviewer can check without
+trusting the agent's account of its own work.
 
-The document is ordered so that working it top down is the right order to work
-it. Every finding carries a consequence class, and `evidence[]` is sorted by it:
-silent data loss first, then unsafe behaviour, then structural, then hygiene. A
-`summary` block carries the counts every consumer used to recompute, a
-`coverage` block says what the run judged and what it left out, and
-`--evidence top` trims a large report to the findings that matter while
-declaring exactly how many it omitted; `goharness explain <fingerprint>
---report r.json` resolves any of the rest. Where a rule's fix is mechanical,
-`goharness fix --rule <ID>` performs it, so a thousand of them are one command
-rather than an argument about the rule.
-
-In `--agent` mode `verify` renders the diff view by default and declares in
-`evidenceScope` and `evidenceOmitted` exactly what it withheld, which keeps the
-document inside a context window without the agent having to trust that a short
-list means a clean run.
-
-`goharness diff before.json after.json` compares two reports on fingerprint
-identity and states what was fixed, what was introduced and what remains. It is
-progress accounting a supervisor can check without trusting the agent's account
-of its own work.
+[docs/agent-contract.md](docs/agent-contract.md) has the details.
 
 ## What a change cannot do to the gate
 
 An agent that can edit the repository can edit anything in it, so the gate
 takes nothing in the tree at its word:
 
-- **It cannot grant itself permissions.** Contract grants count only from the
-  copy committed at the base revision.
-- **It cannot hide code behind a header.** A `Code generated` comment exempts
-  nothing the change wrote.
-- **It cannot hide code from the build.** A changed file that nothing compiles
-  leaves correctness `INCONCLUSIVE`, naming the file.
-- **It cannot swap the linter.** Every binary is checked against a pinned
-  sha256. A locally built golangci-lint reports the right version, hashes to
-  something else, and is refused.
-- **It cannot silence tests through the environment.** Subprocesses run without
-  `GOFLAGS`, with `GOTOOLCHAIN=local`, and without the harness's own settings.
+- **It cannot grant itself permissions.** Contract grants count only from
+  the copy committed at the base revision.
+- **It cannot write off its own findings.** Only the debt ledger committed at
+  `HEAD` counts, and the suppression rules can never be in it.
+- **It cannot hide code behind a header, a build tag or a directory.** A
+  `Code generated` comment exempts nothing the change wrote; a changed file
+  that nothing compiles leaves correctness `INCONCLUSIVE`; a test file a
+  build constraint excludes counts its tests as deleted.
+- **It cannot shrink the change.** An empty diff is `INCONCLUSIVE`, the
+  report records how the base was chosen, and no view drops a blocking row.
+- **It cannot swap the linter or silence the tests through the
+  environment.** Binaries are checked against a pinned sha256; subprocesses
+  run without `GOFLAGS`, with `GOTOOLCHAIN=local`, and without the
+  harness's own settings.
+- **It cannot read outside the tree.** Every file the scanners judge is
+  opened through an `os.Root` at the module; a symlink that escapes it
+  aborts the run naming the path.
 
 Each route has a case in `internal/verify/bypass_test.go` asserting it stays
-closed. A bypass found in the field becomes a test before it becomes a fix. The
-full reasoning, route by route with its residual risk, is in
-[docs/threat-model.md](docs/threat-model.md).
+closed, paired with a guard that the legitimate shape still passes. A bypass
+found in the field becomes a test before it becomes a fix.
+[docs/threat-model.md](docs/threat-model.md) has the reasoning, route by
+route, with its residual risk.
 
 ## What it will not blame you for
 
@@ -237,8 +240,12 @@ A gate that rejects changes for things they did not cause gets switched off:
   verdict is `INCONCLUSIVE`, never a rejection;
 - a module the machine cannot download is an environment failure, not a
   compile error in your code;
-- a benchmark is slower only when every head sample is slower than every base
-  sample, because nanosecond benchmarks swing on a busy machine.
+- a benchmark is slower only when every head sample is slower than every
+  base sample, because nanosecond benchmarks swing on a busy machine;
+- a `TestMain` in a package you never opened is a gap in the repository's
+  coverage, reported as such, not a task for your change;
+- on the default branch, the last commit is somebody else's work, not
+  yours: uncommitted work is judged against `HEAD`.
 
 ## In CI
 
@@ -246,63 +253,66 @@ A gate that rejects changes for things they did not cause gets switched off:
 - uses: actions/checkout@v4
   with: { fetch-depth: 0 }        # the gate needs the base revision
 - uses: actions/setup-go@v5
-  with: { go-version-file: go.mod }
-- run: go run github.com/ALIBRAGIMOV/goharness/cmd/goharness@latest setup
-- run: go run github.com/ALIBRAGIMOV/goharness/cmd/goharness@latest verify
+  with: { go-version: '1.27' }
+- run: go run github.com/ALIBRAGIMOV/goharness/cmd/goharness@latest setup --no-skill
+- run: go run github.com/ALIBRAGIMOV/goharness/cmd/goharness@latest verify --base origin/main --no-cache
 ```
+
+A shallow clone has no base revision to compare against, and a run that
+sees no change is `INCONCLUSIVE` rather than green. `--no-cache` keeps a CI
+runner from trusting a cache it did not write.
 
 ## Questions people ask
 
 **How is this different from golangci-lint?**
 golangci-lint reports findings. goharness decides admission. It runs
 golangci-lint as one evidence producer among many, adds runtime evidence
-(race, leaks, mutation, benchmarks) that static analysis cannot give, compares
-head against base so old debt does not block you, and refuses to call a change
-safe when a check could not run.
+(race, leaks, mutation, benchmarks) that static analysis cannot give,
+compares head against base so old debt does not block you, and refuses to
+call a change safe when a check could not run.
 
 **Will it bury my legacy repository in findings?**
-No. Only findings your change introduces can block, and `verify` reports only
-what your change is answerable for: what it introduced, what it fixed, what it
-broke elsewhere, and the debt in the files it touched. `--evidence full` has the
-rest whenever you want it. Even the rules that block on old findings, inline
-suppressions above all, do so where your change wrote or edited the code: one you
-leave in a file you are editing rejects the change, one in a package you never
-opened is reported as debt and rejects an `audit` instead.
+No. Only findings your change introduces can block, and `verify` prints what
+your change is answerable for: what it introduced, what it fixed, what it
+broke elsewhere, and what sits on the lines it wrote. Debt in the files it
+edited is one line with a count per file; `--evidence full` has the rest.
 
 **Does it send my code anywhere?**
-No. Verification never touches the network and never writes in your worktree.
-`setup` and `tools update` are the only commands that download anything, and
-every download is checksum verified.
+No. Verification never touches the network and never writes in your
+worktree. `setup`, `tools update` and `skill install` are the only commands
+that write outside the repository, and every download is checksum verified.
 
 **Is it deterministic?**
 Two runs over one tree produce byte-identical reports, and CI asserts it on
 every push. Fingerprints exclude line numbers and everything else volatile.
 
 **Does it pass its own gate?**
-Yes, and that is the point. Its own admission run has caught a real data race,
-a performance regression and several complexity violations in its own code.
+Yes, and that is the point. Its own admission run has caught a real data
+race, an allocation regression from a logging change, and several complexity
+violations in its own code.
 
 ## Configuration, optional
 
-- `goharness.yaml`: extra rules, and centralized expiring exceptions with an
-  owner and a reason. Mandatory rules cannot be disabled.
+- `goharness.yaml`: extra rules, architecture rules, and centralised
+  expiring exceptions with an owner and a reason. Mandatory rules cannot be
+  disabled or excepted.
 - `goharness.task.yaml`, or `--contract FILE`: the task goal, its allowed
-  scope, known risks and benchmark budgets. Run `goharness help contract`.
+  scope, declared risks, benchmark budgets, and the two grants a person can
+  commit ahead of a change. Run `goharness help contract`.
+- `goharness.debt.yaml`: the acknowledged-debt ledger `goharness audit
+  --baseline` records, a ratchet for legacy repositories.
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md): pinned versions and architecture decisions
-- [docs/admission-model.md](docs/admission-model.md): claims model, risk planner, CLI and agent contract
-- [docs/toolchain.md](docs/toolchain.md): provisioning, checksums, offline vulnerability database
+- [docs/philosophy.md](docs/philosophy.md): the bet, the three layers, the six principles, and the ideology the code holds to
+- [docs/architecture.md](docs/architecture.md): pinned versions, dependencies, package layout, the decisions the code holds to
+- [docs/admission-model.md](docs/admission-model.md): claims, obligations, risk domains, the comparison, the report, the ledger, the CLI
+- [docs/toolchain.md](docs/toolchain.md): provisioning, checksums, the cache, the offline vulnerability database
+- [docs/agent-contract.md](docs/agent-contract.md): the agent skill and the instruction-file fragment
 - [docs/adopting-alongside-golangci.md](docs/adopting-alongside-golangci.md): adopting the gate in a repository that already runs golangci-lint
-- [docs/agent-contract.md](docs/agent-contract.md): a copy-pasteable CLAUDE.md/AGENTS.md fragment for repositories that adopt goharness
 - [docs/threat-model.md](docs/threat-model.md): the routes to an unearned ADMITTED, the mechanism closing each, and the test that pins it
-- [docs/releases/0.9.md](docs/releases/0.9.md): what 0.9 changed
-- [docs/releases/0.8.md](docs/releases/0.8.md): what 0.8 changed
-- [docs/releases/0.7.md](docs/releases/0.7.md): what 0.7 changed
-- [docs/releases/0.6.md](docs/releases/0.6.md): what 0.6 changed
+- [docs/releases/](docs/releases/): what each release changed
 
 ## License
 
-[MIT](LICENSE). The vendored goleak source under `internal/leakcheck/goleaksrc`
-keeps its own MIT notice.
+[MIT](LICENSE).

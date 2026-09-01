@@ -1,329 +1,305 @@
-# goharness Architecture Decisions (v0.9)
+# Architecture
 
-Status: accepted. This document records the pinned tool versions and the
-architecture decisions the code holds to. It began before the v0.1 vertical
-slice and is kept current with each release; where it and the code disagree,
-the code is wrong or this document is stale, and either is a defect.
+This document records the pinned versions and the architecture decisions the
+code holds to. Where it and the code disagree, one of them is wrong and
+either is a defect. `docs/admission-model.md` holds the claims model and the
+report; `docs/toolchain.md` holds provisioning; `docs/philosophy.md` holds
+the reasons.
 
 ## Pinned versions
 
 | Component | Pin | Rationale |
 |---|---|---|
-| Go toolchain | go 1.27 (module directive `go 1.27`, `toolchain go1.27.0`) | Current stable; loop-variable semantics of Go 1.22+ assumed. |
-| golangci-lint | `v2.13.2` (exact, never `latest`) | Latest stable v2 release at time of pinning. Run as an external executable only; its GPL-licensed internals are never imported or linked. |
-| Uber Go Style Guide | commit `1d60a91aa5e87d443002e23c21903c49489dbde5` of `github.com/uber-go/guide` | Versioned policy source. The guide is never fetched at verification runtime; a checked-in rule registry references this SHA. |
-| JSON report schema | `goharness.report/v2` | Versioned so consumers can detect breaking changes. |
+| Go toolchain | `go 1.27` in `go.mod`, `toolchain go1.27.0` | The harness needs `encoding/json/v2`, `os.Root`, `go/version`, the `goroutineleak` runtime profile, and the `go fix` analyzer suite. The repository under test may declare any Go version; the host must run the harness's. |
+| golangci-lint | `2.13.2`, exact, never `latest` | Run as an external executable only; its GPL-licensed internals are never imported or linked. Every candidate binary is verified against a pinned per-platform sha256. |
+| `golang.org/x/vuln` | `v1.7.0`, exact, in `go.mod` | The vulnerability scanner, in-process, against a local database snapshot. No govulncheck binary, no PATH probe. |
+| Goroutine-leak evidence | the Go runtime's `goroutineleak` profile, from the toolchain above | Read by a `TestMain` the harness injects into race runs through a build overlay. Nothing is vendored for it and nothing is installed. |
+| Uber Go Style Guide | commit `1d60a91aa5e87d443002e23c21903c49489dbde5` of `github.com/uber-go/guide` | Versioned policy source. Never fetched at runtime; a checked-in registry references this commit. |
+| JSON report schema | `goharness.report/v2` | Versioned so consumers can detect breaking changes. Fields are added, never renamed or removed, within a schema version. |
 
-The pinned golangci-lint version is recorded in `internal/tool/golangci.go` as a
-constant, embedded in every JSON report, and enforced at runtime: a version
-mismatch yields INCONCLUSIVE with a `doctor` hint, never a silent fallback.
+Every pin is a constant in the code, embedded in every JSON report, and
+enforced at runtime: a linter that does not match is refused, and the
+obligations it owned go INCONCLUSIVE with `goharness setup` as the remedy.
+Changing a pin changes this document in the same commit.
 
 ## Module and dependencies
 
 - Module path: `github.com/ALIBRAGIMOV/goharness`.
-- CLI: standard library `flag` with hand-rolled subcommand dispatch. No cobra;
-  minimal dependencies is a stated constraint and the surface is small.
-- Allowed third-party dependencies:
-  - `golang.org/x/tools` (`go/packages` for package graph loading,
-    `imports` for goimports verification in-process);
-  - `golang.org/x/sync` (`errgroup` and `semaphore` for bounded concurrency);
-  - `golang.org/x/vuln` (the vulnerability scanner, in-process, against a
-    local database snapshot; see `docs/toolchain.md`);
-  - `go.uber.org/zap` (structured diagnostic logging; injected explicitly,
-    never through a package-level global, always writing to stderr);
-  - `go.uber.org/goleak`, vendored verbatim under `internal/leakcheck/goleaksrc`
-    and injected into race runs through a build overlay, never imported.
-- Everything else is standard library. `gofmt` verification uses `go/format`
-  in-process; both formatters run check-only and never write files.
+- CLI: standard library `flag` with hand-rolled subcommand dispatch. The
+  surface is small and stays that way.
+- Third-party dependencies, all three of them:
+  - `golang.org/x/tools`: `go/packages` for the package graph, `imports` for
+    the goimports check in-process;
+  - `golang.org/x/sync`: `errgroup` and `semaphore` for bounded concurrency;
+  - `golang.org/x/vuln`: the vulnerability scanner.
+- Everything else is the standard library. Diagnostics use `log/slog`; JSON
+  is read and written through `encoding/json/v2`, which rejects duplicate
+  names and invalid UTF-8 on the way in and writes deterministic, unescaped
+  documents on the way out; every read inside a tree goes through an
+  `os.Root` opened at the module.
+
+Adding a dependency is an architecture decision, recorded here, never a
+convenience.
 
 ## Package layout
 
 ```
-cmd/goharness        main; signal handling and exit codes only
+cmd/goharness        main: signal handling and exit codes only
 internal/cli         subcommand dispatch, flags, help, colours, progress
 internal/admission   TaskContract, QualityClaim, RiskProfile, VerificationPlan, Decide
-internal/repo        workspace discovery, git snapshot capture, worktree guard
-internal/change      base/head resolution, ChangeSet, package graph, affected scope
-internal/policy      rule registry (GH-*, GCL-*, UBER-*, GO-*), packs, exceptions
+internal/repo        repository discovery, git, worktree snapshots
+internal/change      base resolution, ChangeSet, hunks, package graph, affected scope
+internal/policy      rule registry (GH-*, GCL-*, UBER-*, GO-*), packs, exceptions, ledger
 internal/verify      pipeline engine, check scheduling, base/head orchestration
-internal/tool        external process runners (go, golangci-lint) + version pins
+internal/tool        external process runners: go, golangci-lint, the scanner
 internal/toolcache   content-addressed cache, checksummed downloads, vuln DB snapshots
-internal/leakcheck   the vendored goleak source and the overlay that injects it
-internal/analyze     native AST checks: suppressions, comments, tests, concurrency
-internal/evidence    Evidence model, stable fingerprints, base/head comparison
-internal/report      text and JSON (goharness.report/v2) renderers
+internal/leakcheck   the injected TestMain and the overlay that carries it
+internal/analyze     native AST checks: suppressions, comments, tests, concurrency, metrics, mutants
+internal/evidence    the Evidence model, stable fingerprints, base/head comparison
+internal/report      text and JSON (goharness.report/v2) renderers, report diff
+internal/skill       the agent skill the binary ships and installs
 ```
 
-`internal/toolcache` is the one place verification may write outside a
-temporary directory, and only derived base evidence keyed by content; tool
-payloads and the vulnerability database are provisioned by `setup` and
-`tools update` alone.
-No `util`, `common`, `manager`, or `service` packages. Interfaces live at
-consumer boundaries and are introduced only where a test seam requires one
-(external process execution and git access are the two seams).
+No `util`, `common`, `manager` or `service` packages. Interfaces exist only
+at the two test seams, process execution (`tool.Runner`) and git
+(`repo.Git`), and nowhere else.
 
 ## Verdict and exit codes
 
-- ADMITTED = 0: all required checks completed and passed.
+- ADMITTED = 0: every applicable claim has sufficient evidence.
 - REJECTED = 1: at least one required rule failed on evidence.
-- INCONCLUSIVE = 2: a tool, environment, or infrastructure failure prevented a
-  trustworthy answer. A tool crash is never reported as a code violation:
-  runner errors flow through a distinct `CheckFailure` channel, not Evidence.
+- INCONCLUSIVE = 2: evidence was missing, a tool could not be trusted, or
+  the run saw no change. A tool crash is never a code finding: runner errors
+  flow through a distinct `CheckFailure` channel, not through evidence.
+- 130: a second interrupt stopped the run.
 
 ## Change model and scope
 
-- Base resolution order: explicit `--base` flag; else merge-base with the
-  default branch; else the parent commit; in a repo with no commits, diff mode
-  degrades to full-scope on tracked files.
-- ChangeSet = committed diff (base..HEAD) plus staged and unstaged changes.
-- Affected packages: changed files map to packages via `go/packages`; `fast`
-  extends to direct reverse dependents; `verify` uses the full reverse
-  dependency closure. Changed-line filtering alone is explicitly rejected;
-  scoping is package-aware and dependency-aware.
-- A rename keeps its source path. Git reports one, a file's path is part of a
-  finding's identity, and discarding the source made a change that moved a file
-  introduce every finding that file already carried.
+- Base resolution order: an explicit `--base`; else the merge-base with the
+  default branch; else, when HEAD is on the default branch and the working
+  tree carries uncommitted work, HEAD itself; else the parent commit. A
+  repository with no commits degrades to full scope over tracked files. The
+  report records which applied.
+- ChangeSet = the committed diff from base to HEAD plus staged, unstaged and
+  untracked files. A diff that holds nothing, in this module or outside it,
+  is an empty change, and an empty change is INCONCLUSIVE: there is nothing
+  to admit, and a document that said otherwise would certify work the gate
+  never saw.
+- Affected packages: changed files map to packages through `go/packages`;
+  `fast` extends to direct reverse dependents; `verify` uses the full
+  reverse-dependency closure. Changed-line filtering alone is rejected:
+  scoping is package-aware and dependency-aware, because a change in one
+  package can break another it never opened.
+- A rename keeps its source path. A file's path is part of a finding's
+  identity, and discarding the source made a change that moved a file
+  introduce every finding the file already carried.
 - What is judged and what is reported are separate decisions. Scope decides
-  what the run looks at; `origin` on each finding records how close it sits to
-  the code the change wrote (`added-line`, `changed-file`, `changed-package`,
-  `untouched`), and `--evidence` selects which of them the report carries. No
-  selection ever drops a finding that blocks.
+  what the run looks at; `origin` records how close each finding sits to
+  the code the change wrote; `--evidence` selects which rows the report
+  carries. No selection drops a row that blocks.
 - Line attribution comes from one `git diff -U0` against the base with no
   second revision, so the line numbers are the verified tree's.
 
+## The read boundary
+
+Every file a scanner judges is opened through an `os.Root` at the module
+root, at head and in the base worktree alike. A symlink that points outside
+the tree, or a path that escapes it, is not read and not judged: the run
+ends with an error naming the path, because code the module does not
+contain is not evidence about the module and a scanner that followed the
+link could be pointed at anything on the machine. A symlink inside the tree
+reads normally. Process runners keep the root as a directory string, since
+the go command resolves its own paths.
+
 ## Base/head comparison
 
-`verify` materializes the base snapshot with `git worktree add --detach` in a
-symlink-resolved temporary directory (an unresolved one puts every path a tool
-reports outside the tree, and a path outside its tree is an identity the other
-revision can never match), runs the same normalized checks there, and compares
-evidence sets by stable fingerprint:
+`verify` materialises the base snapshot with `git worktree add --detach` in
+a symlink-resolved temporary directory, runs the same checks there, and
+compares evidence sets by stable fingerprint:
 
-- fingerprints exclude line numbers, and exclude the numbers a message carries
-  (rule ID, module-relative file path, package path, message with every number
-  masked, occurrence index) so unrelated edits do not churn identity. Masking
-  measurements matters as much as masking positions: a function still over the
-  complexity budget at 27 instead of 30 is the same finding, and without the
-  mask a change that partly repaired old debt would be rejected for creating a
-  new one;
-- evidence present at head but not at base is new and blocks;
-- evidence present in both is pre-existing debt: reported, never blocking in
-  diff modes;
-- suppression directives and agent-hygiene violations are exempt from debt
-  grandfathering: a pre-existing one still blocks, in a change gate wherever the
-  change wrote or edited the code it sits in, and in an audit everywhere;
-- the base evidence set is realigned into head's coordinates first, so a moved
-  file's findings pair with themselves rather than splitting into a new one and
-  a fixed one;
-- a check that reads one package directory and owns no ungrandfatherable rule
-  examines only the directories the change touched, on both sides. A directory
-  identical at base and head produces identical findings at both, which pair on
-  fingerprint and can be neither new nor fixed, so this removes pre-existing
-  rows and nothing else. Compilation, vet, `go fix`, golangci-lint, the tests,
-  the vulnerability scan and clone detection are not narrowed, and neither is
-  the native scan, which owns the rules that block while pre-existing.
+- a fingerprint is the rule ID, the module-relative file path, the package
+  path, the message with every number masked, and an occurrence index. It
+  excludes line numbers and the numbers a message carries, so unrelated
+  edits do not churn identity and a function still over the complexity
+  budget at 27 instead of 30 is the same finding. A producer that knows its
+  own identity states it (`identity`): a test failure is its package and
+  top-level test, a leak is its site, an API break is its symbol;
+- evidence at head and not at base is new and blocks;
+- evidence at both is pre-existing debt: reported, not blocking;
+- the ungrandfatherable core, the suppression rules and the policy guards,
+  blocks on a pre-existing finding too, but only on a line the change wrote.
+  One the change left as it found it, in a file it edited or anywhere else,
+  is debt for the audit, where every one of them blocks and no ledger may
+  acknowledge them;
+- the base evidence set is realigned into head's coordinates first, so a
+  moved file's findings pair with themselves rather than splitting into a
+  new one and a fixed one;
+- a check that reads one package directory and owns no ungrandfatherable
+  rule examines only the directories the change touched, on both sides. A
+  directory identical at both revisions produces identical findings at
+  both, which pair and can be neither new nor fixed; the narrowing removes
+  pre-existing rows and nothing else. Compilation, vet, `go fix`,
+  golangci-lint, the tests, the vulnerability scan, clone detection and the
+  native scan are never narrowed;
+- the base runs a test package only where head's own run of it produced a
+  test failure or a leak, because those are the only rows a base result can
+  reclassify.
 
-The temporary base worktree is always removed; `deep` skips base comparison
-and evaluates the whole repository at head.
+The temporary base worktree is always removed, on a context that
+cancellation cannot reach. `audit` performs no comparison and evaluates the
+whole repository at head.
 
 ## Execution plan and concurrency
 
-The pipeline builds a deterministic ExecutionPlan: a DAG of Check nodes with
-explicit dependencies (compile precedes vet, lint, and tests). The scheduler:
+The pipeline builds a deterministic plan: a DAG of checks with explicit
+dependencies (compile precedes vet, lint and tests). The scheduler:
 
 - runs independent checks concurrently under `errgroup` with a
-  `semaphore.Weighted` bounded by `runtime.GOMAXPROCS(0)`;
-- propagates a single cancellable `context.Context` through every runner;
-- collects evidence per check, then sorts globally by (rule ID, file, line,
-  fingerprint) so repeated runs emit byte-identical reports;
-- never mutates shared state from check goroutines; each check returns a
-  value, and the coordinator owns aggregation.
+  `semaphore.Weighted` bounded by `runtime.GOMAXPROCS(0)`, or `--jobs`;
+- propagates one cancellable `context.Context` through every runner;
+- collects evidence per check, then sorts globally so repeated runs emit
+  byte-identical reports;
+- never mutates shared state from check goroutines: each check returns a
+  value, and the coordinator owns aggregation;
+- runs every check under a recover guard, so a panicking check is a
+  `CheckFailure` and an INCONCLUSIVE claim, never a crash.
 
 ## Tool integration decisions
 
-- `go vet` runs explicitly as the official Go check with `-json`; the `govet`
-  linter is disabled in the embedded golangci-lint config so diagnostics are
-  never duplicated.
+- `go vet` runs explicitly with `-json`; the `govet` linter is disabled in
+  the embedded configuration so a diagnostic never arrives twice.
 - `go fix` runs with `-json` and never with anything else. The go command
-  applies fixes to the source tree unless it is asked for JSON or a diff, so a
-  single function builds the argument vector, always passes `-json`, and never
-  passes `-fix` or `-diff`; a test asserts exactly that, because the failure
-  mode is not a wrong verdict but a rewritten worktree. The output is the same
-  go/analysis JSON tree `go vet -json` prints, so one decoder serves both, and
-  an analyzer that reports an error instead of diagnostics becomes a
-  `CheckFailure` rather than a statement about the code.
-- The enabled fix analyzers are checked-in policy data (`internal/policy/
-  rules_gofix.go`), the same way the strict linter set is: project
-  configuration cannot widen or narrow it. Two of the suite's analyzers are
-  deliberately off. `buildtag` is the same analyzer `go vet` already runs, and
-  one defect must not arrive under two rule IDs. `omitzero` changes what
-  `json.Marshal` emits, by its own documentation, and a gate may report a
-  defect but may not push a semantic change. Because the set is a function of
-  the toolchain, the check compares it against `go tool fix -flags` before
-  running: an enabled analyzer this toolchain lacks fails the check, and an
-  analyzer the toolchain has added that the registry never classified is
-  reported by `doctor` rather than run.
-- Only fix diagnostics that carry an edit become evidence. The suite earns the
-  right to report by producing the replacement; a diagnostic with no edit is
-  the analyzer declining, most visibly on a call inside a generated file, where
-  the inliner reports that it will not rewrite the file. The consequence is a
-  known limit: a `Code generated` header hides `go fix` findings in a file its
-  author wrote. Nothing can be admitted through that gap while every `GO-FIX`
-  rule is advisory; closing it is part of promoting the first one to required,
-  and `internal/verify/gofix_test.go` holds the case that records it.
-- The linter's own generated-file exclusion is off (`generated: disable`); the
-  harness decides what is exempt. A `Code generated ... DO NOT EDIT.` header is
-  a claim its author writes, so a file the change added or rewrote is judged in
-  full whatever it says about itself, and only generated files the change leaves
-  alone are dropped from scope. The decision reads the head diff in both trees,
-  so a regenerated file is examined at base and at head alike and its unchanged
-  findings stay pre-existing debt rather than arriving as new ones.
-- A package the go command could not list at all (an unobtainable module, a
-  proxy that is off, a missing sum) is not a compile finding. It says nothing
-  about the change, so it ends the compile check as a failure and leaves the
-  claim INCONCLUSIVE. Parse and type errors remain evidence.
-- golangci-lint runs on package patterns, never on isolated files, with the
-  embedded strict config written to a temp file and passed via `--config`;
-  the target repository's `.golangci.yml` is never trusted by default.
-  Output is JSON, normalized into Evidence.
-- `nolintlint` stays off; the native suppression scanner in
-  `internal/analyze` is authoritative and rejects every suppression directive.
+  applies fixes to the tree unless asked for JSON or a diff, so one function
+  builds the argument vector and a test asserts it never passes `-fix` or
+  `-diff`. Only diagnostics that carry an edit become evidence: the suite
+  earns the right to report by producing the replacement. The enabled
+  analyzers are checked-in policy data (`internal/policy/rules_gofix.go`),
+  compared against `go tool fix -flags` before every run; an analyzer the
+  toolchain lacks fails the check, and one the registry never classified is
+  reported by `doctor` rather than run. `buildtag` is off because `go vet`
+  already runs it; `omitzero` is off because it changes what `json.Marshal`
+  emits, and a gate may report a defect but may not push a semantic change.
+- The linter's own generated-file exclusion is off; the harness decides
+  what is exempt. A `Code generated` header is a claim its author writes, so
+  a file the change added or rewrote is judged in full, and only generated
+  files the change leaves alone are dropped from scope.
+- A package the go command could not list (an unobtainable module, a proxy
+  that is off, a missing sum) is not a compile finding. It ends the compile
+  check as a failure and leaves the claim INCONCLUSIVE.
+- golangci-lint runs on package patterns with the embedded strict
+  configuration written to a temporary file; the repository's own
+  `.golangci.yml` is never read. `nolintlint` stays off: the native
+  suppression scanner is authoritative.
 - `go mod tidy -diff` runs check-only. `go test` uses `-json`, including the
-  overlaid runs that judge mutants, so a package that failed to build is told
-  apart from a test that failed: the first is no evidence, the second is a kill.
-  `-race` runs where the change touches concurrency, and repository-wide in
-  `audit`.
-- Vulnerability scanning is the embedded `golang.org/x/vuln` against a local
-  snapshot, never a govulncheck binary. `audit` always plans it; `verify` plans
-  it when the change touches a dependency file (`go.mod`, `go.sum`, `go.work`,
-  `go.work.sum`, `vendor/modules.txt`), because that is the change that can
-  bring a known vulnerability into the build without a Go line moving. No
-  snapshot means INCONCLUSIVE for that obligation, never a pass.
-- Binary discovery: `GOHARNESS_GOLANGCI_LINT` env var, then `./.tools/`, then
-  the content-addressed cache, then `PATH`; every candidate is verified against
-  the pinned per-platform sha256. `doctor` reports what was found and whether
-  versions and hashes match the pin.
+  overlaid runs that judge mutants, so a package that failed to build is
+  told apart from a test that failed. `-race` runs where the change touches
+  concurrency, and repository-wide in `audit`.
+- Goroutine-leak evidence comes from the runtime. The injected `TestMain`
+  runs the package's tests, then looks up the `goroutineleak` profile; a
+  goroutine blocked on a primitive nothing can ever unblock is a leak, and
+  the package fails naming the site that started it and the functions it is
+  parked in. A package that declares its own `TestMain` cannot be injected:
+  in the change it makes the leak obligation INCONCLUSIVE with the remedy
+  spelled out, elsewhere in the closure it is a coverage gap the report
+  names.
+- Benchmarks run with `-json` too. A benchmark that panics or fails is
+  named from the event stream, skipped with `-skip`, and the package is run
+  again, so one broken benchmark costs its own measurement rather than every
+  measurement of its package.
+- Vulnerability scanning is the embedded `golang.org/x/vuln` against a
+  local snapshot. `audit` always plans it; `verify` plans it when the
+  change touches a dependency file. No snapshot means INCONCLUSIVE for that
+  obligation, never a pass.
+- Binary discovery for golangci-lint: `GOHARNESS_GOLANGCI_LINT`, then
+  `./.tools/`, then the content-addressed cache, then `PATH`; every
+  candidate is hashed against the pinned per-platform sha256.
 
-## Native checks (agent hygiene)
+## Native checks
 
-AST- and token-based scans over in-scope Go files:
+The native scanners in `internal/analyze` cover what no external tool
+provides: every dialect of inline suppression, comment hygiene, test
+effectiveness and test weakening, goroutine lifecycle and bounded
+resources, transaction pairing, the exported-API diff, maintainability
+deltas, clone detection, forwarding layers and sole implementations,
+deprecations without a `//go:fix inline` directive, architecture rules and
+the policy guards. `goharness explain RULE-ID` prints any rule's rationale,
+remedy and compliant pattern; the registry in `internal/policy` is the
+source.
 
-- `GH-SUPPRESS-001`: any `//nolint` directive;
-- `GH-SUPPRESS-002`: any `//lint:ignore` directive;
-- `GH-COMMENT-001`: Unicode em dash U+2014 inside Go comments (string
-  literals are exempt by construction: the scan walks comment groups only);
-- `GH-COMMENT-002`: comment size budget (function doc comments over 15 lines
-  are advisory; over 30 required);
-- `GH-COMMENT-003`: comments that restate the code (heuristic: comment token
-  overlap with the immediately following statement), advisory;
-- `GH-POLICY-003`: a working-tree contract asking for a grant the base revision
-  does not give it (see the contract model in `docs/admission-model.md`);
-- `GH-SIMP-001`: a function whose whole body forwards its own parameters to
-  another function, advisory and experimental;
-- `GH-DEPRECATE-001`: a deprecated function or constant whose replacement is a
-  single call or value, carrying no `//go:fix inline` directive, so every
-  caller has to migrate by hand and the shim outlives the release it was
-  written for. Advisory and experimental: a scanner cannot see whether the
-  author means the substitution to be automatic;
-- `GH-SIMP-002`: an unexported interface exactly one type in its package
-  satisfies, advisory and experimental. Exported interfaces are excluded: those
-  are a package's contract with the outside, and a test seam is a legitimate
-  reason for one;
-- test effectiveness (`GH-TEST-*`): tests with no assertion, error check,
-  state observation, or panic expectation; unconditional `t.Skip`; empty test
-  bodies; assertions comparing identical constants; ignored errors in tests. A
-  test that hands its `*testing.T` to a helper is not reported: table-driven
-  tests with a shared assertion helper are the idiomatic Go form, and a
-  required rule must stay silent where the scan cannot see;
-- the network family (`GH-NET-*`) does not run on `_test.go` files. Those rules
-  protect a production request path, and a test calling `http.Get(server.URL)`
-  against a local server has no caller deadline to propagate.
-
-Rule precision is measured, not asserted. The exclusions above each replaced a
-class of finding the corpus run produced on healthy published repositories: 34
-network findings that were all in tests, 19 no-assertion findings that were all
-table-driven tests with helpers, and a package documentation comment blocking
-for the sin of documenting a package. `GH-DEPRECATE-001` was narrowed the same
-way: its first corpus run produced one hit, a deprecated exported function whose
-single call went to an unexported constructor, where a directive would have
-offered callers outside the package a replacement they cannot name. Requiring
-both ends to be exported took the rule to zero hits on the corpus, which is
-where an experimental rule with fixtures that prove it fires should sit.
-
-The `go fix` suite was calibrated in the same run. Across the four corpus
-repositories it produced 223 findings: `any` 147, `rangeint` 33, `fmtappendf`
-25, `plusbuild` 10, `forvar` 3, `inline` 2, `slicescontains` 2,
-`reflecttypefor` 1. `GCL-modernize` produced 211 in the same run, so the
-modernizer families overlap heavily and the two sources currently report the
-same defects under different rule IDs. Both stay on for now: deciding which one
-owns modernization is a separate change, and the case for `go fix` owning it is
-that it is pinned by the toolchain the module already declares and it carries
-the edit. `inline` and `plusbuild` overlap with nothing.
+Rule precision is measured, not asserted. Every exclusion in a scanner
+replaced a class of finding the corpus run produced on healthy published
+repositories: network rules do not run on test files, a test that hands its
+`*testing.T` to a helper is not an assertion-free test, a package comment is
+not a comment that restates code. A rule enters advisory and experimental
+and is promoted on corpus evidence, never on a fixture written to make it
+fire.
 
 ## Policy model
 
-The default strict policy composes `go/core`, `golangci/strict`,
-`uber/guide`, `agent/hygiene`, and `tests/effectiveness`. Zero configuration
-yields strict behavior. Project configuration (`goharness.yaml` at repo root,
-parsed with a minimal decoder) may add rules and centralized exceptions with
-rule ID, scope, reason, owner, and expiration; it cannot disable mandatory
-rules. Every rule carries a lifecycle (experimental, advisory, required,
+The default strict policy composes the Go core, the strict linter pack, the
+`go fix` suite, the Uber guide, agent hygiene, test effectiveness,
+architecture, maintainability and the diff-evidence rules. Zero
+configuration yields strict behaviour. `goharness.yaml` may add rules,
+declare architecture rules, raise a rule's classification, and record
+scoped exceptions with a rule, a scope, a reason, an owner and an expiry.
+It cannot lower a classification, disable a mandatory rule, or except one.
+Every rule carries a lifecycle (experimental, advisory, required,
 deprecated); modes never change thresholds, only scope and depth.
-
-The Uber registry maps guide sections to rule IDs (`UBER-*`) with source
-anchors into the pinned commit, classification (required, advisory, manual,
-not-applicable, superseded), enforcement mechanism (which linter or native
-check), and Go version constraints (loop variables are superseded as of Go
-1.22; typed `sync/atomic` is preferred over `go.uber.org/atomic`).
 
 ## Change visibility
 
-Compiling, vetting, linting and testing all reach code through the package
-graph, so a changed Go file the build configuration excludes is a part of the
-change nothing examined. That is missing evidence rather than a defect: the file
-may be perfectly good on another platform or under another tag. The
-`change-visible` obligation names those files and leaves the correctness claim
-INCONCLUSIVE, which is the honest answer and still stops an agent from calling
-the task finished. Deleted files, `testdata`, `vendor`, and directories the go
-command never builds from (a leading dot or underscore) are out of the question
-by convention and never reported.
+Compiling, vetting, linting and testing reach code through the package
+graph, so a changed Go file the build configuration excludes is a part of
+the change nothing examined. That is missing evidence rather than a defect:
+the `change-visible` obligation names those files and leaves the
+correctness claim INCONCLUSIVE. Deleted files, `testdata`, `vendor` and
+directories the go command never builds from are out of the question by
+convention. A test file a build constraint excludes is a different case: its
+tests are gone from the suite whatever the file says, and the test-shape
+comparison counts them as deleted.
 
 ## Read-only guarantee
 
-Verification commands never write inside the worktree. Enforcement:
+Verification commands never write inside the worktree:
 
-- all formatter and tidy checks run in diff/check mode, and `go fix` runs in
-  `-json` mode, which reports its edits instead of applying them;
-- temp files (embedded config, base worktree) live under `os.MkdirTemp`;
-- the pipeline captures `git status --porcelain` before and after and fails
-  INCONCLUSIVE if the two differ, as a last-line guard;
-- integration tests assert an unchanged porcelain status for every command, and
-  the corpus run asserts the same against real repositories;
+- every formatter and tidy check runs in diff or check mode, and `go fix`
+  runs in `-json` mode;
+- temporary state (the embedded configuration, the base worktree, overlays)
+  lives under `os.MkdirTemp` and is removed on a context that cancellation
+  cannot reach;
+- the pipeline captures `git status --porcelain` before and after and goes
+  INCONCLUSIVE if the two differ;
+- integration tests assert an unchanged status for every command, and the
+  corpus run asserts the same against real repositories;
 - outside the worktree, verification writes exactly one thing: derived base
-  evidence in the cache, under the rules in `docs/toolchain.md`. `--no-cache`
-  disables it and must not change a verdict.
+  evidence in the cache, keyed by content. `--no-cache` disables it and must
+  not change a verdict.
+
+`setup`, `tools update` and `skill install` are the only commands that reach
+the network or write outside a repository, and every download is checksum
+verified before it is trusted.
 
 ## Self-admissibility
 
-goharness must pass its own `verify`. The codebase contains no `nolint` or
-`lint:ignore` directives, no U+2014 in comments, is gofmt- and
-goimports-clean, and passes go vet plus the embedded strict golangci-lint
-configuration.
+goharness passes its own `verify`. The code carries no inline suppression,
+no em dash in a comment, no package-level mutable state, no `init`, no
+`panic` outside `main`, and no `TestMain`, because a `TestMain` would block
+the leak injection into its own suite.
 
-`.github/workflows/verify.yml` runs the full matrix on Linux and macOS, ends
-each job by running the harness against itself, and then runs it a second time
-to prove the two reports are identical outside the timing block. The linter it
-uses comes from `goharness setup`, not from a third-party install action, so CI
-exercises the same checksum-verified provisioning path a user does.
+`.github/workflows/verify.yml` runs the suite on Linux and macOS, ends each
+job by running the harness against itself, and runs it a second time to
+prove the two reports are identical outside the timing block. The linter it
+uses comes from `goharness setup`, so CI exercises the same checksum-verified
+provisioning a user does.
 
-Two test suites exist for properties that only hold if someone keeps checking:
+Two suites exist for properties that only hold while someone keeps checking:
 
-- `internal/verify/bypass_test.go` holds one case per route by which a change
-  could once have been admitted without the evidence to justify it. Every case
-  asserts a verdict that is not ADMITTED, or asserts that a grant had no effect.
-  A bypass found in the field becomes a case here before it is fixed.
-- `internal/verify/corpus_test.go` runs the harness over published repositories
-  at pinned commits, gated behind `GOHARNESS_CORPUS`. It asserts only what must
-  always hold (the harness does not fail on real code, and does not modify the
-  tree it was pointed at) and prints what every rule fired on, which is the
-  evidence a rule is precise enough to move from advisory to required.
+- `internal/verify/bypass_test.go` holds one case per route by which a
+  change could once have been admitted without the evidence to justify it.
+  Every case asserts a verdict that is not ADMITTED, or that a grant had no
+  effect, and is paired with a false-positive guard. A bypass found in the
+  field becomes a case here before it is fixed.
+- `internal/verify/corpus_test.go` runs the harness over published
+  repositories at pinned commits, gated behind `GOHARNESS_CORPUS=1`. It
+  asserts only what must always hold and prints what every rule fired on,
+  which is the evidence a rule is precise enough to be promoted.

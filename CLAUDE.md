@@ -4,13 +4,16 @@ Instructions for coding agents working in this repository.
 
 ## What this project is
 
-goharness is a deterministic admission gate for Go changes. It decides ADMITTED (exit 0), REJECTED (exit 1), or INCONCLUSIVE (exit 2) based on evidence across fourteen quality dimensions. Read `README.md` for the product, and the three documents under `docs/` for the normative design:
+goharness is a deterministic admission gate for Go changes. It decides ADMITTED (exit 0), REJECTED (exit 1), or INCONCLUSIVE (exit 2) based on evidence across fourteen quality dimensions. Read `README.md` for the product, `docs/philosophy.md` for the bet and the principles every proposal is held to, and the normative design under `docs/`:
 
-- `docs/architecture.md`: pinned versions, package layout, core decisions
-- `docs/admission-model.md`: claims model, risk planner, CLI and agent contract
-- `docs/toolchain.md`: tool provisioning, checksums, offline vulnerability database
+- `docs/architecture.md`: pinned versions, dependencies, package layout, core decisions
+- `docs/admission-model.md`: claims, obligations, risk domains, the comparison, the report, the ledger, the CLI
+- `docs/toolchain.md`: tool provisioning, checksums, the cache, the offline vulnerability database
+- `docs/threat-model.md`: every route to an unearned ADMITTED and the test that keeps it closed
 
 Where documents conflict, the newest wins. Do not contradict them in code.
+
+The completion protocol below also ships as the agent skill in `internal/skill/SKILL.md`, committed under `.claude/skills/goharness/` and `.agents/skills/goharness/`; a test keeps the copies identical, and `goharness skill install --project` refreshes them after an edit.
 
 ## The completion protocol (non-negotiable)
 
@@ -63,9 +66,9 @@ Every integration test in `internal/verify` builds a git repository and runs the
 
 - golangci-lint: exactly `2.13.2`, external executable, discovered via `GOHARNESS_GOLANGCI_LINT`, then `.tools/`, then the content-addressed cache, then PATH. Every candidate is verified against a pinned per-platform binary sha256; a locally built one (`go install`) reports the right version, hashes to something else, and is refused. Provision with `goharness setup`. Never import its packages (GPL).
 - `golang.org/x/vuln`: exactly `v1.7.0` in go.mod, used in-process. No govulncheck binary, no PATH probe.
-- `go.uber.org/goleak`: exactly `v1.3.0`, vendored verbatim under `internal/leakcheck/goleaksrc` and injected into race runs via a build overlay. Never add a TestMain to this repository's packages: it would block the injection and turn the leak obligation INCONCLUSIVE.
+- Goroutine-leak evidence comes from the runtime's own `goroutineleak` profile (Go 1.27), read by a `TestMain` that goharness injects into race runs through a build overlay. Nothing is vendored for it. Never add a TestMain to this repository's packages: it would block the injection and turn the leak obligation INCONCLUSIVE.
 - Uber Go Style Guide: commit `1d60a91aa5e87d443002e23c21903c49489dbde5`, never fetched at runtime.
-- Allowed dependencies: `golang.org/x/tools`, `golang.org/x/sync`, `golang.org/x/vuln`, `go.uber.org/zap`. Everything else is the standard library. Adding a dependency is an architecture decision, not a convenience.
+- Allowed dependencies: `golang.org/x/tools`, `golang.org/x/sync`, `golang.org/x/vuln`. Everything else is the standard library. Adding a dependency is an architecture decision, not a convenience.
 
 Changing any pin requires updating `docs/architecture.md` or `docs/toolchain.md` in the same change, revalidating the embedded lint config against the new binary, and rerunning the gate.
 
@@ -75,14 +78,17 @@ Changing any pin requires updating `docs/architecture.md` or `docs/toolchain.md`
 cmd/goharness        main: signal handling, exit codes only
 internal/cli         subcommand dispatch, flags, help, colors, progress
 internal/admission   TaskContract, QualityClaim, RiskProfile, VerificationPlan, Decide
+internal/repo        repository discovery, git, worktree snapshots
 internal/verify      pipeline engine, check scheduling, base/head orchestration
-internal/change      base resolution, ChangeSet, package graph, affected scope
-internal/policy      rule registry (GH-*, GCL-*, UBER-*, GO-*), packs, exceptions
+internal/change      base resolution, ChangeSet, hunks, package graph, affected scope
+internal/policy      rule registry (GH-*, GCL-*, UBER-*, GO-*), packs, exceptions, ledger
 internal/tool        external process runners, golangci-lint, go toolchain
 internal/toolcache   content-addressed cache, checksummed downloads, vuln DB snapshots
-internal/analyze     native AST checks: suppressions, comments, tests, concurrency
+internal/leakcheck   the injected TestMain that reads the goroutineleak profile
+internal/analyze     native AST checks: suppressions, comments, tests, concurrency, mutants
 internal/evidence    Evidence model, stable fingerprints, base/head comparison
-internal/report      text and JSON renderers (schema goharness.report/v2)
+internal/report      text and JSON renderers (schema goharness.report/v2), report diff
+internal/skill       the agent skill the binary ships and installs
 ```
 
 Rules that keep it healthy:
@@ -91,7 +97,8 @@ Rules that keep it healthy:
 - Evidence fingerprints exclude line numbers and any volatile data. Nothing time-based or random may enter the deterministic report portion.
 - Checks return values; the coordinator owns all aggregation. No shared mutable state across check goroutines. Concurrency is errgroup plus a weighted semaphore bounded by GOMAXPROCS.
 - Interfaces exist only at the two test seams: process execution (`tool.Runner`) and git (`repo.Git`). Do not introduce speculative interfaces.
-- Verification commands are read-only: no network, no installs, no worktree writes. The single exception is derived base evidence under `derived/` in the cache, keyed by content and disabled by `--no-cache`; tool payloads and the vulnerability database remain the exclusive business of `setup` and `tools update`, and every download is checksum-verified before trust.
+- Verification commands are read-only: no network, no installs, no worktree writes. The single exception is derived base evidence under `derived/` in the cache, keyed by content and disabled by `--no-cache`; tool payloads, the vulnerability database and the skill copies remain the exclusive business of `setup`, `tools update` and `skill install`, and every download is checksum-verified before trust.
+- Every read inside a tree goes through the `os.Root` the target holds; a path that escapes it is an error, never a file. JSON is `encoding/json/v2` only: `jsontext` decoders for streams, `Deterministic` plus `Multiline` for documents.
 - Subprocesses run with a sanitised environment: no `GOFLAGS`, no `GOHARNESS_*`, `GOTOOLCHAIN=local`. Anything a real repository needs for module resolution (`GOPRIVATE`, `GOPROXY`, `GOMODCACHE`) is passed through untouched.
 
 ## Adversarial and corpus suites

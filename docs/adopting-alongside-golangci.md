@@ -153,18 +153,21 @@ rather than a discount:
 - only the copy committed at HEAD counts, so a change can never baseline itself;
 - editing the file is an edit to the gate and is reported as `GH-POLICY-001`,
   which is ungrandfatherable, so the recording commit is visible to review;
-- the mandatory core (inline suppressions, the policy guards, em dashes in
-  generated prose) is never recorded and is never silenced by any ledger;
+- the mandatory core (inline suppressions, the policy guards, the em dash in
+  a comment) is never recorded and is never silenced by any ledger;
 - the bar for everything the ledger does not name does not move at all.
 
 `goharness verify`, the admission gate for a change, ignores the ledger
 entirely. It has a real base revision to compare against, and pre-existing debt
-is already what a base comparison means.
+is already what a base comparison means. An old suppression in a file a change
+edits does not reject the change either: it is reported beside it, counted in
+`summary.debtInChangedFiles`, and rejects the next audit, which is where a
+legacy repository works its directives down.
 
 ## What the end state looks like
 
 - Your `.golangci.yml` has converged toward the strict pack: the same linters
-  enabled, `check-blank` on, `_test.go` excluded for at most the three linters
+  enabled, `check-blank` on, `_test.go` excluded for at most the two linters
   the strict pack excludes there.
 - The exceptions that remain live in `goharness.yaml`, each with a rule, a
   narrow scope, a written reason, an owner and an expiry date. The mandatory
