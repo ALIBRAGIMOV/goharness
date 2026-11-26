@@ -244,6 +244,29 @@ func TestBypassGoflagsCannotSilenceTheTestSuite(t *testing.T) {
 	})
 }
 
+// TestBypassALeakNotYetParkedWhenTheTestsReturnIsCaught closes a route through
+// timing. The leak profile was read once, the moment the tests returned, and a
+// goroutine that had not parked by then was not leaked yet: on a loaded
+// machine an unscheduled goroutine, here one that parks after a short pause.
+// The change leaked and was admitted. The guard that a goroutine the package
+// can still wake is never reported is
+// TestInjectedTestMainDoesNotReportAReachableGoroutine.
+func TestBypassALeakNotYetParkedWhenTheTestsReturnIsCaught(t *testing.T) {
+	eachLayout(t, func(t *testing.T, lay layout) {
+		useGolangci(t)
+		f := baseline(t, lay)
+		f.write("worker/worker.go", lateParkingWorker)
+		f.write("worker/worker_test.go", leakingWorkerTest)
+
+		result := run(t, f, verify.ModeVerify)
+		requireVerdict(t, result, admission.VerdictRejected)
+		if !slices.Contains(blockingRules(result.Evidence), policy.RuleGoroutineLeak) {
+			t.Fatalf("a goroutine that parked after the tests returned was not reported: %v",
+				blockingRules(result.Evidence))
+		}
+	})
+}
+
 // isolateLinterSources puts every trusted golangci-lint out of the run's reach,
 // so a test can observe what happens when the only candidate is a forgery. The
 // stub PATH keeps the toolchain and git reachable and nothing else.
@@ -412,7 +435,7 @@ func TestMovingAFileIntroducesNothingByItself(t *testing.T) {
 // rule that scopes the ungrandfatherable core to the lines the change wrote.
 //
 // Those rules stopped blocking across the whole reverse-dependency closure,
-// because 429 historical directives failing every merge request is a repository
+// because hundreds of historical directives failing every change is a repository
 // goal enforced by a change gate and no author clears it inside a branch. They
 // then stopped blocking on the untouched lines of an edited file, because an
 // author who appends one function to a legacy file can neither fix a directive
@@ -468,8 +491,7 @@ func TestAnOldSuppressionInAnEditedFileIsDebtNotRejection(t *testing.T) {
 //
 // The package holding it is in the reverse-dependency closure, so the run does
 // look at it: the suppression is still found, still reported, and still blocks an
-// audit. What it no longer does is reject a merge request that never went near
-// it.
+// audit. What it no longer does is reject a change that never went near it.
 func TestAnOldSuppressionTheChangeNeverOpenedDoesNotReject(t *testing.T) {
 	eachLayout(t, func(t *testing.T, lay layout) {
 		f := newFixtureIn(t, lay)

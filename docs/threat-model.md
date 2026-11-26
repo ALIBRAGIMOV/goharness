@@ -74,7 +74,7 @@ classification.
 **Residual risk.** The path comparison is exact, which is why it had to be made
 robust to a module that is not the git root. The layout matrix in
 `internal/verify/fixture_test.go` keeps that class of defect visible to the
-suite rather than to a field report.
+suite rather than to the first user whose module is not the git root.
 
 ## 3. Suppression laundering: silencing the linter instead of the finding
 
@@ -137,8 +137,8 @@ accident.
 A pre-existing directive the change leaves as it found it, in a file it edited,
 does not block the change. It is reported beside it, counted per file in
 `summary.debtInChangedFiles`, and rejects an audit. The previous rule, that
-any directive in an edited file blocks, made a legacy monorepo unable to admit
-anything: an author who appended one function to a file carrying three old
+any directive in an edited file blocks, made a repository with legacy debt
+unable to admit anything: an author who appended one function to a file carrying three old
 directives could neither fix findings they did not write nor except them,
 because the exception is a policy edit no change may grant itself, and a gate
 nobody can pass is routed around rather than obeyed.
@@ -396,6 +396,32 @@ explicit `--base` is the operator's word. A reviewer checks
 `change.baseOrigin` and `change.base` in the document, which is why both are
 in it; the agent skill says never to choose a base that shrinks the change.
 
+## 17. A leak that had not parked when the tests returned
+
+**The route.** The injected `TestMain` read the `goroutineleak` profile once,
+the moment the package's tests returned. The runtime reports a goroutine as
+leaked only once it is parked on something nothing reachable can wake, and a
+goroutine that has not run yet has not parked. On a loaded machine, or on one
+processor, a test that starts a goroutine and drops the only way to stop it
+returns before that goroutine is scheduled, and the package came out clean.
+The change leaked and was admitted; CI on a shared runner was where it showed.
+
+**The mechanism.** The generated `TestMain` samples the profile again, with
+pauses doubling from one millisecond to 128, while any goroutine other than
+its own remains. A leaked goroutine stays leaked, so waiting can only find
+more, and a package whose goroutines have all exited ends after the first
+sample. The detector's name in the report and in the base-evidence cache key
+changed with it, so evidence from the single-sample detector never answers
+for this one.
+
+**Pinned by.** `TestBypassALeakNotYetParkedWhenTheTestsReturnIsCaught` and
+`TestInjectedTestMainCatchesALeakBeforeItIsScheduled`, with
+`TestInjectedTestMainDoesNotReportAReachableGoroutine` as the guard.
+
+**Residual risk.** A goroutine that parks after the quarter of a second the
+sampling allows is still missed. That is a test that sleeps past its own end,
+and the leak shows on the next change that exercises the same code.
+
 ---
 
 ## Future work
@@ -412,7 +438,7 @@ only on corpus evidence, and that calibration is the gating work.
 could once have been admitted without the evidence to justify it. The
 discipline around it is fixed:
 
-1. **A bypass found in the field becomes a red test before it becomes a fix.**
+1. **A bypass found in use becomes a red test before it becomes a fix.**
    The test is written first, against the shape that actually occurred, and it
    fails. Only then is the mechanism changed.
 2. **Every case asserts a verdict that is not ADMITTED, or asserts that a grant

@@ -120,8 +120,8 @@ func TestDiffScopeKeepsWhatTheChangeIsAnswerableFor(t *testing.T) {
 	for _, unwanted := range []string{
 		"debt in a file nobody touched",
 		"advisory note in a file nobody touched",
-		// A sibling of a file the change wrote is the bucket that produced 846
-		// rows of noise on one merge request; the author never opened it.
+		// A sibling of a file the change wrote is the largest bucket of noise
+		// on a large repository; the author never opened it.
 		"debt beside a file the change wrote",
 		// Debt on a line the change did not write, in a file it did edit, is
 		// the bucket a legacy file produces in the hundreds. It is counted.

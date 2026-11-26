@@ -3,9 +3,9 @@
 goharness is the completion protocol for coding agents. The interface is the
 CLI: documented exit codes and one versioned JSON document. There is no
 server to run and no protocol to speak. What an agent has to know, the
-completion protocol, the order to read the report in, what each INCONCLUSIVE
-remedy means, and the routes it must never take, ships with the binary as an
-agent skill.
+completion protocol, the Go engineering standard the gate enforces, the order
+to read the report in, what each INCONCLUSIVE remedy means, and the routes it
+must never take, ships with the binary as an agent skill.
 
 ## The skill
 
@@ -58,6 +58,14 @@ The task is complete only when the verdict is ADMITTED and
 `sufficientForCompletion` is true. Resolve every FAIL and every INCONCLUSIVE
 claim in the JSON document. `goharness fast` is a loop aid; it is never
 sufficient to finish.
+
+## Write to the standard
+
+Write Go to the standard the gate enforces: Effective Go, Go Code Review
+Comments, Go Test Comments, Go Doc Comments, the Google Go Style Guide, and
+the Uber Go Style Guide at the commit goharness pins. `goharness skill print` prints the full standard,
+each line tied to the rule that checks it; `goharness explain RULE-ID` prints
+what one rule defends and the compliant pattern where one exists.
 
 ## Reading the report
 

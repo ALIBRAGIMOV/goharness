@@ -31,26 +31,26 @@ func runFix(ctx context.Context, args []string, streams Streams) int {
 	}
 	errOut := newPrinter(streams.Err)
 	if *rule == "" {
-		errOut.line("goharness fix: --rule is required")
+		errOut.linef("goharness fix: --rule is required")
 		listFixableRules(errOut)
 		return ExitInconclusive
 	}
 	fixer, ok := analyze.FixerFor(*rule)
 	if !ok {
-		errOut.line("goharness fix: no fixer for rule %q", *rule)
+		errOut.linef("goharness fix: no fixer for rule %q", *rule)
 		listFixableRules(errOut)
-		errOut.line("run `goharness explain %s` for what the rule asks for", *rule)
+		errOut.linef("run `goharness explain %s` for what the rule asks for", *rule)
 		return ExitInconclusive
 	}
 
 	r, err := repo.Discover(ctx, repo.ExecGit{Runner: tool.ExecRunner{}}, *dir)
 	if err != nil {
-		errOut.line("goharness fix: %v", err)
+		errOut.linef("goharness fix: %v", err)
 		return ExitInconclusive
 	}
 	files, err := goFilesUnder(r.Root)
 	if err != nil {
-		errOut.line("goharness fix: %v", err)
+		errOut.linef("goharness fix: %v", err)
 		return ExitInconclusive
 	}
 	return applyFixer(fixOptions{
@@ -74,12 +74,12 @@ func applyFixer(in fixOptions) int {
 		full := filepath.Join(in.root, filepath.FromSlash(rel))
 		info, err := os.Stat(full)
 		if err != nil {
-			in.errOut.line("goharness fix: %v", err)
+			in.errOut.linef("goharness fix: %v", err)
 			return ExitInconclusive
 		}
 		src, err := os.ReadFile(full)
 		if err != nil {
-			in.errOut.line("goharness fix: %v", err)
+			in.errOut.linef("goharness fix: %v", err)
 			return ExitInconclusive
 		}
 		// A file that does not parse is the compile check's finding, not this
@@ -95,26 +95,26 @@ func applyFixer(in fixOptions) int {
 			continue
 		}
 		if err := os.WriteFile(full, rewritten, info.Mode().Perm()); err != nil {
-			in.errOut.line("goharness fix: writing %s: %v", rel, err)
+			in.errOut.linef("goharness fix: writing %s: %v", rel, err)
 			return ExitInconclusive
 		}
-		in.out.line("%s: %d replacement(s)", rel, replaced)
+		in.out.linef("%s: %d replacement(s)", rel, replaced)
 	}
 	verb := "rewrote"
 	if in.dryRun {
 		verb = "would rewrite"
 	}
-	in.out.line("%s %s: %s %d change(s) in %d file(s)", in.fixer.RuleID, in.fixer.Summary, verb, changes, changedFiles)
+	in.out.linef("%s %s: %s %d change(s) in %d file(s)", in.fixer.RuleID, in.fixer.Summary, verb, changes, changedFiles)
 	if !in.dryRun && changedFiles > 0 {
-		in.out.line("re-run `goharness verify --agent`; a fix is not evidence")
+		in.out.linef("re-run `goharness verify --agent`; a fix is not evidence")
 	}
 	return exitFor(in.out, ExitAdmitted)
 }
 
 func listFixableRules(p *printer) {
-	p.line("rules goharness can fix:")
+	p.linef("rules goharness can fix:")
 	for _, f := range analyze.Fixers() {
-		p.line("  %-16s %s", f.RuleID, f.Summary)
+		p.linef("  %-16s %s", f.RuleID, f.Summary)
 	}
 }
 

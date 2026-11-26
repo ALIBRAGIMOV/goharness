@@ -1,14 +1,14 @@
 # Adopting goharness alongside an existing golangci-lint configuration
 
 This page is for a repository that already runs golangci-lint in CI and now
-wants goharness's fixed external bar as well. It is written from one real
-adoption: a 111k-line Go backend whose local gate ran "enable all, disable
-questionable" plus `go test -race` and govulncheck, was green, and produced 1623
-blocking findings on first contact with `goharness audit`.
+wants goharness's fixed external bar as well. A repository whose local gate
+runs "enable all, disable questionable" plus `go test -race` and govulncheck can
+be green and still meet a large number of blocking findings on first contact
+with `goharness audit`.
 
 The friction is not that the two tools disagree about Go. It is that they are
-two gates over one tree, and satisfying one can break the other. Every coupling
-below cost that adoption real time.
+two gates over one tree, and satisfying one can break the other. Each coupling
+below costs time when it is discovered rather than planned for.
 
 ## The shape of the problem
 
@@ -56,10 +56,9 @@ added. It only ever objected to the comment.
 
 The strict pack runs `errcheck` with `check-blank: true`. Most configurations
 leave it at its default, which is false, so `_ = f.Close()` and
-`rows, _ := db.Query(...)` are legal locally and reported by goharness. This was
-461 findings on the adoption above, of which roughly 40 were silent data loss in
-a compliance-bearing flow and the rest were the community's close/rollback
-idiom.
+`rows, _ := db.Query(...)` are legal locally and reported by goharness. On a
+large codebase this can be hundreds of findings, most of them the common
+close/rollback idiom and a few of them silent data loss.
 
 Do not start by turning `check-blank: true` on locally. That reproduces the
 whole cliff inside your own gate on the same afternoon. Instead:
@@ -96,9 +95,9 @@ change nothing in your own configuration; the convention keeps working locally.
 
 ### 4. Wholesale `_test.go` exclusions
 
-Excluding a dozen linters from test files is a very common local choice, and it
-is where the adoption above had 259 unreported errcheck findings: setup failures
-in tests that pass silently. goharness lints test files like any other code, so
+Excluding a dozen linters from test files is a common local choice, and it is
+where unreported errcheck findings collect: setup failures in tests that pass
+silently. goharness lints test files like any other code, so
 these arrive all at once.
 
 The strict pack itself excludes exactly two linters from `_test.go`

@@ -31,24 +31,24 @@ func runDoctor(ctx context.Context, args []string, streams Streams) int {
 	out := newPrinter(streams.Out)
 	healthy := true
 
-	out.line("goharness %s", Version)
-	out.line("%s go toolchain   %s", mark(true), tool.GoVersion())
+	out.linef("goharness %s", Version)
+	out.linef("%s go toolchain   %s", mark(true), tool.GoVersion())
 
 	gitOK := git.Available(ctx)
-	out.line("%s git            %s", mark(gitOK), gitLabel(gitOK))
+	out.linef("%s git            %s", mark(gitOK), gitLabel(gitOK))
 	if !gitOK {
-		out.line("      fix: install git and make sure it is on PATH")
+		out.linef("      fix: install git and make sure it is on PATH")
 	}
 	healthy = healthy && gitOK
 
 	r, err := repo.Discover(ctx, git, *dir)
 	if err != nil {
-		out.line("%s module         %v", mark(false), err)
-		out.line("      fix: run goharness from inside a Go module, or pass --dir")
+		out.linef("%s module         %v", mark(false), err)
+		out.linef("      fix: run goharness from inside a Go module, or pass --dir")
 		healthy = false
 	} else {
-		out.line("%s module         %s (go %s) at %s", mark(true), r.ModulePath, r.GoDirective, r.Root)
-		out.line("%s git repository %s", mark(true), gitStateLabel(r))
+		out.linef("%s module         %s (go %s) at %s", mark(true), r.ModulePath, r.GoDirective, r.Root)
+		out.linef("%s git repository %s", mark(true), gitStateLabel(r))
 		healthy = reportToolchainFloor(ctx, out, runner, r) && healthy
 	}
 
@@ -64,21 +64,21 @@ func runDoctor(ctx context.Context, args []string, streams Streams) int {
 	healthy = reportVulnDB(out, cache, time.Now()) && healthy
 	reportSkill(out)
 
-	out.line("")
-	out.line("uber guide pin: %s", policy.UberGuideCommit)
-	out.line("report schema:  %s", report.SchemaID)
-	out.line("policy packs:   %s", strings.Join([]string{
+	out.linef("")
+	out.linef("uber guide pin: %s", policy.UberGuideCommit)
+	out.linef("report schema:  %s", report.SchemaID)
+	out.linef("policy packs:   %s", strings.Join([]string{
 		policy.PackGoCore, policy.PackGoFix, policy.PackGolangciStrict, policy.PackUberGuide,
 		policy.PackAgentHygiene, policy.PackTestEffectiveness,
 		policy.PackArchitecture, policy.PackMaintainability, policy.PackDiffEvidence,
 	}, ", "))
-	out.line("strict linters: %s", strings.Join(policy.EnabledLinters(), ", "))
+	out.linef("strict linters: %s", strings.Join(policy.EnabledLinters(), ", "))
 
 	if healthy {
-		out.line("\nhealthy: goharness can produce a trustworthy verdict here.")
+		out.linef("\nhealthy: goharness can produce a trustworthy verdict here.")
 		return exitFor(out, ExitAdmitted)
 	}
-	out.line("\nproblems found: apply the fix lines above before trusting a verdict.")
+	out.linef("\nproblems found: apply the fix lines above before trusting a verdict.")
 	return ExitInconclusive
 }
 
@@ -92,10 +92,10 @@ func reportSubprocessEnv(out *printer) {
 			present = append(present, name+"="+value)
 		}
 	}
-	out.line("%s subprocess env GOFLAGS and GOTOOLCHAIN are not inherited; %s",
+	out.linef("%s subprocess env GOFLAGS and GOTOOLCHAIN are not inherited; %s",
 		mark(true), tool.ForcedToolchain)
 	if len(present) > 0 {
-		out.line("      your shell sets %s; verification runs without it", strings.Join(present, ", "))
+		out.linef("      your shell sets %s; verification runs without it", strings.Join(present, ", "))
 	}
 }
 
@@ -114,28 +114,28 @@ func reportGoFix(ctx context.Context, out *printer, runner tool.Runner, dir stri
 	enabled := policy.GoFixAnalyzers()
 	support, err := tool.InspectFixAnalyzers(ctx, runner, dir, enabled, policy.GoFixKnownAnalyzers())
 	if err != nil {
-		out.line("%s go fix         %v", mark(false), err)
-		out.line("      fix: run `go tool fix help` to see what this toolchain provides")
+		out.linef("%s go fix         %v", mark(false), err)
+		out.linef("      fix: run `go tool fix help` to see what this toolchain provides")
 		return false
 	}
 	if len(support.Missing) > 0 {
-		out.line("%s go fix         %s does not register %s", mark(false),
+		out.linef("%s go fix         %s does not register %s", mark(false),
 			tool.GoVersion(), strings.Join(support.Missing, ", "))
-		out.line("      fix: install the pinned Go toolchain, or reclassify those analyzers in the registry")
+		out.linef("      fix: install the pinned Go toolchain, or reclassify those analyzers in the registry")
 		return false
 	}
-	out.line("%s go fix         %d analyzers enabled, read-only (-json)", mark(true), len(enabled))
+	out.linef("%s go fix         %d analyzers enabled, read-only (-json)", mark(true), len(enabled))
 	if len(support.Unregistered) > 0 {
-		out.line("      note: this toolchain also offers %s, which the policy has not classified",
+		out.linef("      note: this toolchain also offers %s, which the policy has not classified",
 			strings.Join(support.Unregistered, ", "))
 	}
 	return true
 }
 
 func reportScanner(out *printer) {
-	out.line("%s vuln scanner   embedded golang.org/x/vuln %s", mark(true),
+	out.linef("%s vuln scanner   embedded golang.org/x/vuln %s", mark(true),
 		orUnknown(tool.XVulnVersion()))
-	out.line("%s leak check     %s profile, read by a TestMain injected into race runs (needs %s or later on PATH)",
+	out.linef("%s leak check     %s profile, read by a TestMain injected into race runs (needs %s or later on PATH)",
 		mark(true), leakcheck.Method, leakcheck.MinimumGoVersion)
 }
 
@@ -144,14 +144,14 @@ func reportScanner(out *printer) {
 func reportCache(out *printer) (*toolcache.Cache, bool) {
 	cache, err := toolcache.Open()
 	if err != nil {
-		out.line("%s cache          %v", mark(false), err)
+		out.linef("%s cache          %v", mark(false), err)
 		return nil, false
 	}
 	size, sizeErr := cache.Size()
 	if sizeErr != nil {
-		out.line("%s cache          %s (size unknown: %v)", mark(true), cache.Root(), sizeErr)
+		out.linef("%s cache          %s (size unknown: %v)", mark(true), cache.Root(), sizeErr)
 	} else {
-		out.line("%s cache          %s (%s)", mark(true), cache.Root(), humanBytes(size))
+		out.linef("%s cache          %s (%s)", mark(true), cache.Root(), humanBytes(size))
 	}
 	return cache, reportToolManifest(out, cache)
 }
@@ -165,19 +165,19 @@ func reportToolManifest(out *printer, cache *toolcache.Cache) bool {
 	manifest, err := cache.ReadToolManifest(toolcache.ToolGolangci, tool.GolangciLintPin)
 	if err != nil {
 		if errors.Is(err, toolcache.ErrNotProvisioned) {
-			out.line("[warn] cached linter  golangci-lint %s is not in the cache", tool.GolangciLintPin)
-			out.line("      fix: goharness setup")
+			out.linef("[warn] cached linter  golangci-lint %s is not in the cache", tool.GolangciLintPin)
+			out.linef("      fix: goharness setup")
 			return true
 		}
-		out.line("%s cached linter  %v", mark(false), err)
+		out.linef("%s cached linter  %v", mark(false), err)
 		return false
 	}
 	if _, err := cache.VerifiedToolBinary(toolcache.ToolGolangci, tool.GolangciLintPin); err != nil {
-		out.line("%s cached linter  %v", mark(false), err)
-		out.line("      fix: goharness setup")
+		out.linef("%s cached linter  %v", mark(false), err)
+		out.linef("      fix: goharness setup")
 		return false
 	}
-	out.line("%s cached linter  golangci-lint %s for %s (binary sha256 %s)",
+	out.linef("%s cached linter  golangci-lint %s for %s (binary sha256 %s)",
 		mark(true), manifest.Version, manifest.Platform, manifest.BinarySHA256[:12])
 	return true
 }
@@ -190,25 +190,25 @@ func reportVulnDB(out *printer, cache *toolcache.Cache, now time.Time) bool {
 		return false
 	}
 	if !cache.HasVulnDB() {
-		out.line("[warn] vuln database  no snapshot; `goharness audit` reports its security claim INCONCLUSIVE")
-		out.line("      fix: goharness setup")
+		out.linef("[warn] vuln database  no snapshot; `goharness audit` reports its security claim INCONCLUSIVE")
+		out.linef("      fix: goharness setup")
 		return true
 	}
 	manifest, err := cache.VerifyVulnDB()
 	if err != nil {
-		out.line("%s vuln database  %v", mark(false), err)
-		out.line("      fix: goharness tools update")
+		out.linef("%s vuln database  %v", mark(false), err)
+		out.linef("      fix: goharness tools update")
 		return false
 	}
 	days := int(manifest.Age(now).Hours() / 24)
 	if manifest.Stale(now) {
-		out.line("[warn] vuln database  %d entries, modified %s (%d days ago, over the %d day budget)",
+		out.linef("[warn] vuln database  %d entries, modified %s (%d days ago, over the %d day budget)",
 			manifest.EntryCount, manifest.Modified.UTC().Format("2006-01-02"),
 			days, int(toolcache.StaleAfter.Hours()/24))
-		out.line("      fix: goharness tools update")
+		out.linef("      fix: goharness tools update")
 		return true
 	}
-	out.line("%s vuln database  %d entries, modified %s (%d day(s) ago, tree sha256 %s)",
+	out.linef("%s vuln database  %d entries, modified %s (%d day(s) ago, tree sha256 %s)",
 		mark(true), manifest.EntryCount, manifest.Modified.UTC().Format("2006-01-02"),
 		days, manifest.TreeChecksum[:12])
 	return true
@@ -257,23 +257,23 @@ func reportStaleWorktrees(ctx context.Context, out *printer, git repo.Git, r rep
 	}
 	stale, err := repo.StaleWorktrees(ctx, git, r.Root)
 	if err != nil {
-		out.line("%s worktrees      could not be listed: %v", mark(false), err)
+		out.linef("%s worktrees      could not be listed: %v", mark(false), err)
 		return false
 	}
 	if len(stale) == 0 {
-		out.line("%s worktrees      no stale goharness worktrees", mark(true))
+		out.linef("%s worktrees      no stale goharness worktrees", mark(true))
 		return true
 	}
-	out.line("%s worktrees      %d stale goharness worktree(s) from an interrupted run", mark(false), len(stale))
+	out.linef("%s worktrees      %d stale goharness worktree(s) from an interrupted run", mark(false), len(stale))
 	for _, path := range stale {
-		out.line("      fix: git worktree remove --force %s", path)
+		out.linef("      fix: git worktree remove --force %s", path)
 	}
 	return false
 }
 
 func reportPath(out *printer) {
 	entries := filepath.SplitList(os.Getenv("PATH"))
-	out.line("%s PATH           %d entries", mark(len(entries) > 0), len(entries))
+	out.linef("%s PATH           %d entries", mark(len(entries) > 0), len(entries))
 }
 
 // golangciInstall is the only route that ends in a trusted binary. A locally
@@ -285,25 +285,25 @@ const golangciInstall = "goharness setup"
 func reportGolangci(ctx context.Context, out *printer, runner tool.Runner, r repo.Repository) bool {
 	g, err := tool.DiscoverGolangci(r.Root)
 	if err != nil {
-		out.line("%s golangci-lint  %v", mark(false), err)
-		out.line("      fix: %s", golangciInstall)
+		out.linef("%s golangci-lint  %v", mark(false), err)
+		out.linef("      fix: %s", golangciInstall)
 		return false
 	}
 	g, err = g.ResolveVersion(ctx, runner)
 	if err != nil {
-		out.line("%s golangci-lint  %s: %v", mark(false), g.Path, err)
-		out.line("      fix: %s", golangciInstall)
+		out.linef("%s golangci-lint  %s: %v", mark(false), g.Path, err)
+		out.linef("      fix: %s", golangciInstall)
 		return false
 	}
 	if !g.MatchesPin() {
-		out.line("%s golangci-lint  %s reports %s, pinned %s", mark(false), g.Path, g.Version, tool.GolangciLintPin)
-		out.line("      fix: %s", golangciInstall)
+		out.linef("%s golangci-lint  %s reports %s, pinned %s", mark(false), g.Path, g.Version, tool.GolangciLintPin)
+		out.linef("      fix: %s", golangciInstall)
 		return false
 	}
-	out.line("%s golangci-lint  %s (%s, sha256 %s, via %s)",
+	out.linef("%s golangci-lint  %s (%s, sha256 %s, via %s)",
 		mark(true), g.Version, g.Path, g.SHA256[:12], g.Source)
 	if g.Note != "" {
-		out.line("      passed over: %s", g.Note)
+		out.linef("      passed over: %s", g.Note)
 	}
 	return true
 }
@@ -330,16 +330,16 @@ func gitStateLabel(r repo.Repository) string {
 func reportToolchainFloor(ctx context.Context, out *printer, runner tool.Runner, r repo.Repository) bool {
 	resolved, err := tool.ResolveGoVersion(ctx, runner, r.Root)
 	if err != nil {
-		out.line("%s checks run on  could not be resolved: %v", mark(false), err)
-		out.line("      fix: make sure the go command runs inside %s", r.Root)
+		out.linef("%s checks run on  could not be resolved: %v", mark(false), err)
+		out.linef("      fix: make sure the go command runs inside %s", r.Root)
 		return false
 	}
 	if r.ToolchainDirective == "" {
-		out.line("%s checks run on  %s, module declares no floor", mark(true), resolved)
+		out.linef("%s checks run on  %s, module declares no floor", mark(true), resolved)
 		return true
 	}
 	if tool.CompareGoVersions(resolved, r.ToolchainDirective) >= 0 {
-		out.line("%s checks run on  %s, at or above the module floor %s",
+		out.linef("%s checks run on  %s, at or above the module floor %s",
 			mark(true), resolved, r.ToolchainDirective)
 		return true
 	}
@@ -349,9 +349,9 @@ func reportToolchainFloor(ctx context.Context, out *printer, runner tool.Runner,
 	// away, by the security claim going INCONCLUSIVE. Everything still compiles;
 	// what is no longer true is that the scan judged the standard library this
 	// module accepts.
-	out.line("[warn] checks run on  %s is below the module floor %s; "+
+	out.linef("[warn] checks run on  %s is below the module floor %s; "+
 		"`goharness audit` reports its security claim INCONCLUSIVE", resolved, r.ToolchainDirective)
-	out.line("      fix: install %s; verification pins GOTOOLCHAIN=local and will not download it",
+	out.linef("      fix: install %s; verification pins GOTOOLCHAIN=local and will not download it",
 		r.ToolchainDirective)
 	return true
 }

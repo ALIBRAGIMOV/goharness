@@ -21,8 +21,8 @@ const (
 // The default is deliberately the frightening one. A call this function does not
 // recognise is presumed to be a domain write whose failure now goes unreported,
 // because that is the case where being wrong is expensive: mistaking a lost
-// audit-trail write for a close is how a compliance defect gets triaged as
-// idiom, and mistaking a close for a domain write costs a reader one glance.
+// domain write for a close is how a data-loss defect gets triaged as idiom, and
+// mistaking a close for a domain write costs a reader one glance.
 //
 // The callee is read from the message rather than from the AST because the
 // linter already resolved it. Rebuilding that with a second type-check would add

@@ -194,8 +194,8 @@ func TestVerificationMakesNoNetworkRequests(t *testing.T) {
 	}
 }
 
-// TestToolchainBelowTheModuleFloorMakesSecurityInconclusive covers the second of
-// the two blockers a production audit exposed.
+// TestToolchainBelowTheModuleFloorMakesSecurityInconclusive covers a host
+// toolchain older than the floor the module declares.
 //
 // Verification pins GOTOOLCHAIN=local so it downloads nothing, and under that
 // setting the go command ignores a module's toolchain directive. A module that

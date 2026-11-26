@@ -81,6 +81,10 @@ func (e *Engine) baseCacheKey(in baseCacheInput) string {
 		"go=" + tool.GoVersion(),
 		"gostdlib=" + e.GoVersion,
 		"golangci=" + e.Golangci.Version + "@" + e.Golangci.SHA256,
+		// The embedded lint configuration moves without the version string, and
+		// base evidence from a different linter set compares as if it were this
+		// one's: every finding a new linter makes would read as introduced.
+		"golangciconfig=" + tool.StrictConfigDigest(),
 		"xvuln=" + tool.XVulnVersion(),
 		"leakcheck=" + leakcheck.Method,
 		"config=" + in.configDigest,

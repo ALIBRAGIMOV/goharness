@@ -24,7 +24,7 @@ import (
 )
 
 // Version is the harness version recorded in every report.
-const Version = "0.10.0"
+const Version = "0.11.0"
 
 // Exit codes. They are the harness's contract with any caller.
 const (
@@ -100,10 +100,10 @@ func runHelp(args []string, streams Streams) int {
 	topic := args[0]
 	if !hasCommandUsage(topic) {
 		p := newPrinter(streams.Err)
-		p.line("no help topic for %q", topic)
+		p.linef("no help topic for %q", topic)
 		if suggestions := nearest(topic, knownCommands(), 3); len(suggestions) > 0 {
-			p.line("did you mean: %s", strings.Join(suggestions, ", "))
-			p.line("try: goharness help %s", suggestions[0])
+			p.linef("did you mean: %s", strings.Join(suggestions, ", "))
+			p.linef("try: goharness help %s", suggestions[0])
 		}
 		return ExitInconclusive
 	}
@@ -118,10 +118,10 @@ func wantsHelp(args []string) bool {
 
 func unknownCommand(command string, streams Streams) int {
 	p := newPrinter(streams.Err)
-	p.line("unknown command %q", command)
+	p.linef("unknown command %q", command)
 	if suggestions := nearest(command, knownCommands(), 3); len(suggestions) > 0 {
-		p.line("did you mean: %s", strings.Join(suggestions, ", "))
-		p.line("try: goharness %s", suggestions[0])
+		p.linef("did you mean: %s", strings.Join(suggestions, ", "))
+		p.linef("try: goharness %s", suggestions[0])
 	} else {
 		p.printf("\n%s", usageText)
 	}
@@ -182,9 +182,9 @@ func defaultEvidence(mode verify.Mode) string {
 	return evidenceFull
 }
 
-// DefaultEvidenceLimit is how many findings "--evidence top" keeps. A report of
-// a well-kept brownfield repository runs past a megabyte of JSON, which is a
-// whole context window for the agents that read it; the ordered top of the set
+// DefaultEvidenceLimit is how many findings "--evidence top" keeps. A full
+// report of a large repository runs past a megabyte of JSON, which is a whole
+// context window for the agents that read it; the ordered top of the set
 // plus the summary is a few tens of kilobytes and every omitted row remains
 // resolvable by fingerprint.
 const DefaultEvidenceLimit = 100
@@ -249,7 +249,7 @@ func runVerification(ctx context.Context, command string, args []string, streams
 	errOut := newPrinter(streams.Err)
 	mode, ok := verify.ParseMode(command)
 	if !ok {
-		errOut.line("unknown mode %q", command)
+		errOut.linef("unknown mode %q", command)
 		return ExitInconclusive
 	}
 	fs := flag.NewFlagSet("goharness "+command, flag.ContinueOnError)
@@ -260,12 +260,12 @@ func runVerification(ctx context.Context, command string, args []string, streams
 		return ExitInconclusive
 	}
 	if flags.base != "" && mode != verify.ModeVerify {
-		errOut.line("--base applies to `verify` only; %s does not compare against a base", command)
-		errOut.line("try: goharness verify --base %s", flags.base)
+		errOut.linef("--base applies to `verify` only; %s does not compare against a base", command)
+		errOut.linef("try: goharness verify --base %s", flags.base)
 		return ExitInconclusive
 	}
 	if flags.jobs < 0 {
-		errOut.line("--jobs must be zero or a positive count, got %d", flags.jobs)
+		errOut.linef("--jobs must be zero or a positive count, got %d", flags.jobs)
 		return ExitInconclusive
 	}
 
@@ -283,9 +283,9 @@ func runVerification(ctx context.Context, command string, args []string, streams
 	})
 	bar.Clear()
 	if err != nil {
-		errOut.line("goharness %s: %v", command, err)
+		errOut.linef("goharness %s: %v", command, err)
 		if errors.Is(err, verify.ErrNotAModule) {
-			errOut.line("run goharness from inside a Go module, or pass --dir")
+			errOut.linef("run goharness from inside a Go module, or pass --dir")
 		}
 		return ExitInconclusive
 	}
@@ -318,7 +318,7 @@ type renderInput struct {
 func renderResult(in renderInput) int {
 	opts, err := in.flags.reportOptions()
 	if err != nil {
-		in.errOut.line("goharness %s: %v", in.command, err)
+		in.errOut.linef("goharness %s: %v", in.command, err)
 		return ExitInconclusive
 	}
 	// --report moves the document off stdout. A run over a large repository takes
@@ -327,12 +327,12 @@ func renderResult(in renderInput) int {
 	// is not available to a caller that is not a shell.
 	jsonOut, closeJSON, err := in.jsonSink()
 	if err != nil {
-		in.errOut.line("goharness %s: %v", in.command, err)
+		in.errOut.linef("goharness %s: %v", in.command, err)
 		return ExitInconclusive
 	}
 	code := in.render(jsonOut, opts)
 	if closeErr := closeJSON(); closeErr != nil {
-		in.errOut.line("goharness %s: %v", in.command, closeErr)
+		in.errOut.linef("goharness %s: %v", in.command, closeErr)
 		return ExitInconclusive
 	}
 	return code
@@ -364,7 +364,7 @@ func (in renderInput) render(jsonOut io.Writer, opts report.Options) int {
 	wantJSON := in.flags.agent || in.flags.asJSON || in.flags.reportPath != ""
 	if wantJSON {
 		if err := report.WriteJSONWithOptions(jsonOut, Version, in.result, opts); err != nil {
-			in.errOut.line("goharness %s: %v", in.command, err)
+			in.errOut.linef("goharness %s: %v", in.command, err)
 			return ExitInconclusive
 		}
 	}
@@ -376,7 +376,7 @@ func (in renderInput) render(jsonOut io.Writer, opts report.Options) int {
 		return in.result.Decision.Verdict.ExitCode()
 	}
 	if err := writeText(textOut, in.result, in.flags, opts.Scope); err != nil {
-		in.errOut.line("goharness %s: %v", in.command, err)
+		in.errOut.linef("goharness %s: %v", in.command, err)
 		return ExitInconclusive
 	}
 	return in.result.Decision.Verdict.ExitCode()
@@ -392,23 +392,23 @@ func writeText(w io.Writer, result verify.Result, flags *verifyFlags, scope repo
 
 func explainPlan(streams Streams, result verify.Result) int {
 	p := newPrinter(streams.Out)
-	p.line("verification plan for mode %s", result.Mode)
-	p.line("contract: %s", result.Contract.Source)
+	p.linef("verification plan for mode %s", result.Mode)
+	p.linef("contract: %s", result.Contract.Source)
 	if len(result.Risks.Active) == 0 {
-		p.line("risk domains: none detected")
+		p.linef("risk domains: none detected")
 	} else {
 		for _, domain := range result.Risks.Active {
-			p.line("risk %s:", domain)
+			p.linef("risk %s:", domain)
 			for _, reason := range result.Risks.ReasonsFor(domain) {
-				p.line("    %s", reason)
+				p.linef("    %s", reason)
 			}
 		}
 	}
-	p.line("\nobligations (%d):", len(result.Plan.Obligations))
+	p.linef("\nobligations (%d):", len(result.Plan.Obligations))
 	for _, o := range result.Plan.Obligations {
-		p.line("  %-22s claim=%-22s producer=%-22s %s", o.Kind, o.Claim, o.Producer, o.Because)
+		p.linef("  %-22s claim=%-22s producer=%-22s %s", o.Kind, o.Claim, o.Producer, o.Because)
 	}
-	p.line("\nchecks: %s", strings.Join(result.Execution.CheckIDs(), ", "))
+	p.linef("\nchecks: %s", strings.Join(result.Execution.CheckIDs(), ", "))
 	return exitFor(p, ExitAdmitted)
 }
 
@@ -461,41 +461,41 @@ func singlePositional(fs *flag.FlagSet, args []string) (string, bool) {
 // still ask about any single row it did not receive.
 func explainFingerprint(id, reportPath string, streams Streams, errOut *printer) int {
 	if reportPath == "" {
-		errOut.line("unknown rule %q", id)
+		errOut.linef("unknown rule %q", id)
 		if suggestions := suggestRules(id); len(suggestions) > 0 {
-			errOut.line("did you mean: %s", strings.Join(suggestions, ", "))
-			errOut.line("try: goharness explain %s", suggestions[0])
+			errOut.linef("did you mean: %s", strings.Join(suggestions, ", "))
+			errOut.linef("try: goharness explain %s", suggestions[0])
 			return ExitInconclusive
 		}
-		errOut.line("if this is an evidence fingerprint, name the report it came from:")
-		errOut.line("try: goharness explain %s --report report.json", id)
+		errOut.linef("if this is an evidence fingerprint, name the report it came from:")
+		errOut.linef("try: goharness explain %s --report report.json", id)
 		return ExitInconclusive
 	}
 	finding, err := findingInReport(reportPath, id)
 	if err != nil {
-		errOut.line("goharness explain: %v", err)
+		errOut.linef("goharness explain: %v", err)
 		return ExitInconclusive
 	}
 
 	out := newPrinter(streams.Out)
-	out.line("%s  %s", finding.Fingerprint, finding.RuleID)
-	out.line("location:       %s", locationOf(finding))
-	out.line("message:        %s", finding.Message)
-	out.line("consequence:    %s", orNone(finding.Consequence))
+	out.linef("%s  %s", finding.Fingerprint, finding.RuleID)
+	out.linef("location:       %s", locationOf(finding))
+	out.linef("message:        %s", finding.Message)
+	out.linef("consequence:    %s", orNone(finding.Consequence))
 	if finding.RemedyClass != "" {
-		out.line("remedy class:   %s", finding.RemedyClass)
+		out.linef("remedy class:   %s", finding.RemedyClass)
 	}
-	out.line("state:          %s", orNone(string(finding.State)))
-	out.line("blocking:       %t", finding.Blocking)
+	out.linef("state:          %s", orNone(string(finding.State)))
+	out.linef("blocking:       %t", finding.Blocking)
 	if finding.Fix != nil {
-		out.line("fix:            %s", finding.Fix.Command)
+		out.linef("fix:            %s", finding.Fix.Command)
 	}
 	rule, ok := policy.Lookup(finding.RuleID)
 	if !ok {
-		out.line("\nthis finding's rule %q is not in the registry, so it is advisory", finding.RuleID)
+		out.linef("\nthis finding's rule %q is not in the registry, so it is advisory", finding.RuleID)
 		return exitFor(out, ExitAdmitted)
 	}
-	out.line("")
+	out.linef("")
 	return explainRule(rule, out)
 }
 
@@ -546,36 +546,36 @@ func findingInReport(path, fingerprint string) (report.Finding, error) {
 }
 
 func explainRule(rule policy.Rule, out *printer) int {
-	out.line("%s  %s", rule.ID, rule.Title)
-	out.line("pack:           %s", rule.Pack)
+	out.linef("%s  %s", rule.ID, rule.Title)
+	out.linef("pack:           %s", rule.Pack)
 	if dim, found := admission.DimensionOf(rule.ID); found {
-		out.line("dimension:      %s", dim)
+		out.linef("dimension:      %s", dim)
 	}
-	out.line("classification: %s", rule.Classification)
-	out.line("consequence:    %s", rule.Consequence)
-	out.line("lifecycle:      %s", rule.Lifecycle)
-	out.line("enforcement:    %s", rule.Enforcement)
+	out.linef("classification: %s", rule.Classification)
+	out.linef("consequence:    %s", rule.Consequence)
+	out.linef("lifecycle:      %s", rule.Lifecycle)
+	out.linef("enforcement:    %s", rule.Enforcement)
 	if rule.GoVersionConstraint != "" {
-		out.line("go constraint:  %s", rule.GoVersionConstraint)
+		out.linef("go constraint:  %s", rule.GoVersionConstraint)
 	}
 	if rule.PinnedCommit != "" {
-		out.line("pinned commit:  %s", rule.PinnedCommit)
+		out.linef("pinned commit:  %s", rule.PinnedCommit)
 	}
-	out.line("documentation:  %s", rule.DocURL)
-	out.line("\nrationale:\n%s", indent(rule.Rationale, "  "))
+	out.linef("documentation:  %s", rule.DocURL)
+	out.linef("\nrationale:\n%s", indent(rule.Rationale, "  "))
 	if fixer, ok := analyze.FixerFor(rule.ID); ok {
-		out.line("mechanical fix:\n%s", indent("goharness fix --rule "+fixer.RuleID+
+		out.linef("mechanical fix:\n%s", indent("goharness fix --rule "+fixer.RuleID+
 			"\n"+fixer.Summary, "  "))
 	}
 	// A rule that tells an operator only why it fired leaves every reader to
 	// design the target idiom from scratch, and they will do it differently.
 	if rule.Pattern != "" {
-		out.line("compliant pattern:\n%s", indent(rule.Pattern, "  "))
+		out.linef("compliant pattern:\n%s", indent(rule.Pattern, "  "))
 	}
 	if enforced := policy.UberRulesEnforcedBy(rule.ID); len(enforced) > 0 {
-		out.line("enforces these Uber Go Style Guide rules:")
+		out.linef("enforces these Uber Go Style Guide rules:")
 		for _, u := range enforced {
-			out.line("  %s  %s", u.ID, u.Title)
+			out.linef("  %s  %s", u.ID, u.Title)
 		}
 	}
 	return exitFor(out, ExitAdmitted)
@@ -601,14 +601,14 @@ func suggestRules(id string) []string {
 
 func runVersion(streams Streams) int {
 	out := newPrinter(streams.Out)
-	out.line("goharness %s", Version)
-	out.line("go:              %s", tool.GoVersion())
-	out.line("golangci-lint:   %s (exact pin)", tool.GolangciLintPin)
-	out.line("x/vuln:          %s (embedded)", tool.XVulnVersion())
-	out.line("leak check:      %s, from the toolchain above", leakcheck.Method)
-	out.line("go fix:          %d analyzers, from the toolchain above", len(policy.GoFixAnalyzers()))
-	out.line("uber guide:      %s", policy.UberGuideCommit)
-	out.line("report schema:   %s", report.SchemaID)
+	out.linef("goharness %s", Version)
+	out.linef("go:              %s", tool.GoVersion())
+	out.linef("golangci-lint:   %s (exact pin)", tool.GolangciLintPin)
+	out.linef("x/vuln:          %s (embedded)", tool.XVulnVersion())
+	out.linef("leak check:      %s, from the toolchain above", leakcheck.Method)
+	out.linef("go fix:          %d analyzers, from the toolchain above", len(policy.GoFixAnalyzers()))
+	out.linef("uber guide:      %s", policy.UberGuideCommit)
+	out.linef("report schema:   %s", report.SchemaID)
 	return exitFor(out, ExitAdmitted)
 }
 

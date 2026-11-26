@@ -8,15 +8,14 @@ import (
 	"testing"
 )
 
-// TestAHarnessFaultIsNeverAttributedToTheRepositoryOrItsTools holds the
-// taxonomy line a production audit crossed.
+// TestAHarnessFaultIsNeverAttributedToTheRepositoryOrItsTools holds the line
+// between a tool fault and a fact about the code.
 //
-// The run reported "1 changed Go file was compiled by nothing", an assertion
-// about the repository that was false; the true statement was that the harness
-// had failed to resolve a path. An agent told its file is compiled by nothing
-// goes hunting for a build-constraint problem that does not exist, and this
-// run's operator did exactly that. A fault inside goharness leaves through a
-// channel that says so and names goharness as its owner.
+// "1 changed Go file was compiled by nothing" is an assertion about the
+// repository, and it is false when the truth is that the harness failed to
+// resolve a path. An agent told its file is compiled by nothing goes hunting
+// for a build-constraint problem that does not exist. A fault inside goharness
+// leaves through a channel that says so and names goharness as its owner.
 func TestAHarnessFaultIsNeverAttributedToTheRepositoryOrItsTools(t *testing.T) {
 	t.Parallel()
 	fault := harnessError{err: errors.New("could not resolve backend/lib.go")}

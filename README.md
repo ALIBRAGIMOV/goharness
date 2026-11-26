@@ -168,7 +168,8 @@ report records which applied.
   policy guard.
 - **The Uber Go Style Guide** as a versioned registry pinned to an upstream
   commit, each rule classified honestly: required only where analysis is
-  reliable.
+  reliable, and every citation checked against a section the pinned guide
+  actually has.
 
 ## For coding agents
 
@@ -178,8 +179,10 @@ agent skill. `goharness setup` installs it for Claude Code
 (`~/.agents/skills/goharness/SKILL.md`); `goharness skill install --project`
 writes the same two files into a repository so a commit carries the protocol
 to every checkout and cloud session. The skill holds the completion
-protocol, the order to read the report in, what each INCONCLUSIVE remedy
-means, and the routes an agent must never take.
+protocol; the Go engineering standard the gate enforces, drawn from Effective
+Go, Go Code Review Comments, Go Test Comments, the Google Go Style Guide and
+the pinned Uber guide, with each line tied to the rule that checks it; the order to read the report in;
+what each INCONCLUSIVE remedy means; and the routes an agent must never take.
 
 If your agent reads none of those locations, one line in its instruction
 file is enough:
@@ -227,7 +230,7 @@ takes nothing in the tree at its word:
 
 Each route has a case in `internal/verify/bypass_test.go` asserting it stays
 closed, paired with a guard that the legitimate shape still passes. A bypass
-found in the field becomes a test before it becomes a fix.
+found in use becomes a test before it becomes a fix.
 [docs/threat-model.md](docs/threat-model.md) has the reasoning, route by
 route, with its residual risk.
 

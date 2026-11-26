@@ -217,7 +217,7 @@ func ParseContract(src []byte, source ContractSource) (TaskContract, error) {
 				}
 				continue
 			}
-			if err := c.setScalar(key, value, lineNo+1); err != nil {
+			if err := setContractScalar(&c, key, value, lineNo+1); err != nil {
 				return TaskContract{}, err
 			}
 			section = ""
@@ -225,7 +225,7 @@ func ParseContract(src []byte, source ContractSource) (TaskContract, error) {
 		}
 
 		if item, ok := strings.CutPrefix(trimmed, "- "); ok {
-			if err := c.appendItem(section, strings.TrimSpace(item), lineNo+1); err != nil {
+			if err := appendContractItem(&c, section, strings.TrimSpace(item), lineNo+1); err != nil {
 				return TaskContract{}, err
 			}
 			continue
@@ -242,7 +242,7 @@ func ParseContract(src []byte, source ContractSource) (TaskContract, error) {
 			c.Budgets[benchmark] = DefaultBudget()
 			continue
 		}
-		if err := c.setBudgetField(benchmark, key, value, lineNo+1); err != nil {
+		if err := setContractBudget(&c, benchmark, key, value, lineNo+1); err != nil {
 			return TaskContract{}, err
 		}
 	}
@@ -270,7 +270,10 @@ func splitKeyValue(body string, lineNo int) (key, value string, err error) {
 	return key, value, nil
 }
 
-func (c *TaskContract) setScalar(key, value string, lineNo int) error {
+// setContractScalar, appendContractItem and setContractBudget fill a contract
+// while it is parsed. They are functions rather than methods so that
+// TaskContract keeps one receiver kind: callers hold it by value.
+func setContractScalar(c *TaskContract, key, value string, lineNo int) error {
 	switch key {
 	case "goal":
 		c.Goal = value
@@ -292,7 +295,7 @@ func (c *TaskContract) setScalar(key, value string, lineNo int) error {
 	return nil
 }
 
-func (c *TaskContract) appendItem(section, item string, lineNo int) error {
+func appendContractItem(c *TaskContract, section, item string, lineNo int) error {
 	if unquoted, err := strconv.Unquote(item); err == nil {
 		item = unquoted
 	}
@@ -311,7 +314,7 @@ func (c *TaskContract) appendItem(section, item string, lineNo int) error {
 	return nil
 }
 
-func (c *TaskContract) setBudgetField(benchmark, key, value string, lineNo int) error {
+func setContractBudget(c *TaskContract, benchmark, key, value string, lineNo int) error {
 	if benchmark == "" {
 		return fmt.Errorf("%s line %d: budget field %q has no benchmark", ContractFileName, lineNo, key)
 	}

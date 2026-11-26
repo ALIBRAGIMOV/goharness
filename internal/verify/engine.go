@@ -233,9 +233,8 @@ const maxNamedPaths = 3
 // A path that escaped its tree, an absolute one above all, spells a fingerprint
 // the other revision can never equal. Every finding the producer made then reads
 // as introduced by the change, and the change is rejected for debt it did not
-// write: a production monorepo lost go vet and go fix to exactly this, 81 rows
-// blamed on lines that predated the branch. It is a fault in goharness and not a
-// fact about the repository, so it leaves through the channel that says so and
+// write, on lines that predate it. It is a fault in goharness and not a fact
+// about the repository, so it leaves through the channel that says so and
 // the obligations this check was carrying go unproducible rather than passing on
 // evidence nobody should trust.
 func pathHygiene(checkID string, items []evidence.Evidence) error {
@@ -432,8 +431,8 @@ func hintFor(checkID string) string {
 // pre-existing finding too, but only on a line this change wrote: one it
 // leaves as it found it, in a file it edits, is the repository's debt,
 // reported beside the change and rejected by an audit, where no ledger may
-// acknowledge it. Enforcing the core across every file a change opens made
-// a legacy monorepo unable to admit anything, and the author of a change
+// acknowledge it. Enforcing the core across every file a change opens makes
+// a repository with legacy debt unable to admit anything, and the author of a change
 // could neither fix a directive they did not write nor except it, because
 // the exception is a policy edit no change may grant itself.
 //

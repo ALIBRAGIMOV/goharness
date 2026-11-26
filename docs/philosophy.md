@@ -83,7 +83,8 @@ worth trusting when the author is a model.
 
 Reasons travel with findings. Every rule carries its rationale and its
 remedy; every exception carries an owner and a reason; every closed bypass
-carries the test that keeps it closed and the field report that found it.
+carries the test that keeps it closed and the reasoning in
+`docs/threat-model.md`.
 The repository's own history of what it decided and why lives in reviewed
 files, not in the heads of the people who were there. An agent that reads
 the report reads the reasons too.
@@ -97,6 +98,48 @@ standard library comes first; adding a dependency is an architecture
 decision recorded in `docs/architecture.md`, and the module carries three.
 The Go toolchain is the semantic authority: where it can answer, no other
 tool is asked.
+
+## The standard, and where it comes from
+
+goharness does not invent a style. Every rule in the registry comes from one
+of three places:
+
+1. **A published Go standard.** The Go project's own documents first:
+   [Effective Go](https://go.dev/doc/effective_go),
+   [Go Code Review Comments](https://go.dev/wiki/CodeReviewComments),
+   [Go Test Comments](https://go.dev/wiki/TestComments),
+   [Go Doc Comments](https://go.dev/doc/comment), the documentation of the
+   standard library, and Rob Pike's
+   [Go Proverbs](https://go-proverbs.github.io). Then the two published
+   style guides that build on them: the
+   [Google Go Style Guide](https://google.github.io/styleguide/go/), whose
+   order of clarity, simplicity, concision, maintainability and consistency,
+   and whose rule of least mechanism, the skill adopts; and the
+   [Uber Go Style Guide](https://github.com/uber-go/guide), pinned to one
+   commit. Each `UBER-*` rule cites a section of that commit, and a test holds
+   every citation to a heading the pinned guide actually has.
+2. **An analyzer the Go ecosystem already trusts.** The toolchain (`go vet`,
+   `go fix`, `go mod tidy`, the race detector, the runtime's goroutine-leak
+   profile, `golang.org/x/vuln`) and the strict golangci-lint pack. A linter
+   enters the pack only if it reports a defect, a security hazard, or a
+   departure from one of the standards above; a linter that reports taste
+   does not enter, however popular.
+3. **The evidence itself.** The suppression ban, the policy guards and the
+   test-integrity rules exist because the author of a change may be the agent
+   being judged. They protect the verdict rather than the style.
+
+A rule that fits none of the three does not belong in the registry. The agent
+skill carries the same standard as working instructions, each line tied to
+the rule that enforces it, and a test refuses a skill that names a rule the
+registry does not hold or links a source other than the Go project's
+documents, the Go Proverbs and the two style guides.
+
+The standard is the one experienced Go engineers already hold each other to
+in review: clear before clever, errors handled once and with context, every
+goroutine with a visible end, small interfaces defined where they are used,
+no hidden state, tests that can fail, comments that say what the code cannot.
+The gate makes that review mechanical where analysis is reliable and names it
+as a review item where it is not.
 
 ## The ideology the code holds to
 

@@ -8,9 +8,9 @@ package policy
 // what a reader should write in their own repository, in their own types. The
 // harness never generates them and never checks that a fix matches one.
 
-// errcheckPattern answers the question the field data forced: one rule produced
-// four unrelated remedies, and grouping by the discarded callee turns hundreds
-// of rows into a handful of decisions.
+// errcheckPattern exists because one rule covers four unrelated remedies, and
+// grouping by the discarded callee turns hundreds of rows into a handful of
+// decisions.
 //
 // The encode case is the harness's position on a pack that would otherwise
 // contradict itself. A linter that proves a json.Marshal cannot fail then
@@ -39,18 +39,19 @@ one helper, rather than at every call site:
 cleanup: a rollback after a commit is expected to fail; anything else is not.
     defer func() {
         if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-            log.Error("rollback failed", "err", rbErr)
+            slog.Error("rollback failed", "err", rbErr)
         }
     }()
 
-encode: prove it once in a typed helper, and let the type carry the proof.
-    // mustEncodeJSON marshals a value whose type contains no channel, function,
-    // or cyclic pointer, so json.Marshal has no failure mode left to report.
-    // The type parameter is what keeps that argument checkable by a reader.
-    func encodeJSON[T Serializable](v T) []byte {
+encode: prove it once in a helper named for what it does on failure.
+    // mustEncodeJSON marshals a value whose type holds no channel, function,
+    // or cyclic pointer, so json.Marshal has no failure left to report. A
+    // failure here is a programming error, which is what the Must prefix says,
+    // as it does for regexp.MustCompile and template.Must.
+    func mustEncodeJSON(v Record) []byte {
         out, err := json.Marshal(v)
         if err != nil {
-            panic(fmt.Sprintf("unserializable %T reached encodeJSON: %v", v, err))
+            panic(fmt.Sprintf("encoding %T: %v", v, err))
         }
         return out
     }
@@ -79,39 +80,42 @@ A discard with no observer means nobody will ever learn the trail has holes.`
 const goroutineInLoopPattern = `Bound the number of goroutines by something the reader can see.
 
 A fixed-size pool, where the bound is a constant or a validated config field:
-    const transcriptionWorkers = 4
+    const workers = 4
 
-    for range transcriptionWorkers {
-        go w.run(ctx)
+    var wg sync.WaitGroup
+    for range workers {
+        wg.Go(func() { w.run(ctx) })
     }
+    wg.Wait()
 The iteration count is the bound, so no semaphore is needed and adding one would
-only be decoration.
+only be decoration. wg.Wait is the termination path, visible where the
+goroutines start.
 
 Work that scales with input belongs behind a limit rather than behind a
 goroutine each:
-    sem := semaphore.NewWeighted(int64(runtime.GOMAXPROCS(0)))
     group, ctx := errgroup.WithContext(ctx)
+    group.SetLimit(runtime.GOMAXPROCS(0))
     for _, item := range items {
-        if err := sem.Acquire(ctx, 1); err != nil {
-            return err
-        }
-        group.Go(func() error {
-            defer sem.Release(1)
-            return handle(ctx, item)
-        })
+        group.Go(func() error { return handle(ctx, item) })
     }
     return group.Wait()
 
 Or feed a fixed pool through a channel, so the work is unbounded and the
 concurrency is not:
     jobs := make(chan Item)
+    var wg sync.WaitGroup
     for range workerCount {
-        go func() {
+        wg.Go(func() {
             for item := range jobs {
                 handle(ctx, item)
             }
-        }()
-    }`
+        })
+    }
+    for _, item := range items {
+        jobs <- item
+    }
+    close(jobs)
+    wg.Wait()`
 
 // testNoAssertionPattern separates executing code from observing it, which is
 // the distinction the rule is built on and the one an agent-written test most

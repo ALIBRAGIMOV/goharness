@@ -10,9 +10,8 @@ import (
 	"github.com/ALIBRAGIMOV/goharness/internal/verify"
 )
 
-// The cases in this file hold the property a production monorepo run found
-// broken: a finding must carry the same identity at both revisions, and identity
-// starts with the path.
+// The cases in this file hold one property: a finding must carry the same
+// identity at both revisions, and identity starts with the path.
 //
 // The base revision is verified in a temporary worktree. When a tool there
 // reports a file by a path that escapes that worktree, the string differs from

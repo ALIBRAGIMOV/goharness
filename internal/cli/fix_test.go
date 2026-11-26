@@ -17,8 +17,8 @@ import (
 const cliEmDash = "\u2014"
 
 // emDashRepoSource carries the rune in a comment and in a string literal, so a
-// fixer that cannot tell them apart fails this test rather than a real
-// repository's client-facing copy.
+// fixer that cannot tell them apart fails this test rather than rewriting the
+// user-facing text of a real repository.
 func emDashRepoSource() string {
 	return "package lib\n" +
 		"\n" +
@@ -27,7 +27,7 @@ func emDashRepoSource() string {
 		"\treturn 42\n" +
 		"}\n" +
 		"\n" +
-		"// Motto is copy that ships to a customer.\n" +
+		"// Motto is text that ships to users.\n" +
 		"const Motto = \"we ship " + cliEmDash + " carefully\"\n" +
 		"\n" +
 		"// Second observes nothing " + cliEmDash + " it is here to make two findings.\n" +

@@ -108,11 +108,58 @@ func TestUberRulesCitePinnedCommit(t *testing.T) {
 
 func TestUberEnforcementReferencesRealRules(t *testing.T) {
 	for _, r := range policy.UberRules() {
-		if r.Enforcement == "manual" || !strings.Contains(r.Enforcement, "-") {
+		enforcer, _ := policy.EnforcementParts(r.Enforcement)
+		if r.Enforcement == "manual" || !strings.Contains(enforcer, "-") {
 			continue
 		}
-		if _, ok := policy.Lookup(r.Enforcement); !ok {
+		rule, ok := policy.Lookup(enforcer)
+		if !ok {
 			t.Fatalf("rule %q claims enforcement by unknown rule %q", r.ID, r.Enforcement)
+		}
+		// A guide rule cannot be stricter or looser than the rule that enforces
+		// it; the registry would then say two different things about one finding.
+		if r.Classification != rule.Classification {
+			t.Errorf("%s is %s but its enforcement %s is %s", r.ID, r.Classification, rule.ID, rule.Classification)
+		}
+	}
+}
+
+// TestUberAnchorsNameSectionsOfThePinnedGuide keeps every UBER-* rule pointing at
+// a section the pinned guide actually has. The anchors below are the headings of
+// style.md at UberGuideCommit, in GitHub's slug form; the commit is pinned, so
+// this list cannot drift from the document it describes. A rule citing a
+// section that is not on it is citing a standard that does not exist.
+func TestUberAnchorsNameSectionsOfThePinnedGuide(t *testing.T) {
+	sections := []string{
+		"uber-go-style-guide", "introduction", "guidelines", "pointers-to-interfaces",
+		"verify-interface-compliance", "receivers-and-interfaces", "zero-value-mutexes-are-valid",
+		"copy-slices-and-maps-at-boundaries", "receiving-slices-and-maps", "returning-slices-and-maps",
+		"defer-to-clean-up", "channel-size-is-one-or-none", "start-enums-at-one",
+		"use-time-to-handle-time", "use-timetime-for-instants-of-time",
+		"use-timeduration-for-periods-of-time", "use-timetime-and-timeduration-with-external-systems",
+		"errors", "error-types", "error-wrapping", "error-naming", "handle-errors-once",
+		"handle-type-assertion-failures", "dont-panic", "use-gouberorgatomic", "avoid-mutable-globals",
+		"avoid-embedding-types-in-public-structs", "avoid-using-built-in-names", "avoid-init",
+		"exit-in-main", "exit-once", "use-field-tags-in-marshaled-structs",
+		"dont-fire-and-forget-goroutines", "wait-for-goroutines-to-exit", "no-goroutines-in-init",
+		"performance", "prefer-strconv-over-fmt", "avoid-repeated-string-to-byte-conversions",
+		"prefer-specifying-container-capacity", "specifying-map-capacity-hints",
+		"specifying-slice-capacity", "style", "avoid-overly-long-lines", "be-consistent",
+		"group-similar-declarations", "import-group-ordering", "package-names", "function-names",
+		"import-aliasing", "function-grouping-and-ordering", "reduce-nesting", "unnecessary-else",
+		"top-level-variable-declarations", "prefix-unexported-globals-with-_", "embedding-in-structs",
+		"local-variable-declarations", "nil-is-a-valid-slice", "reduce-scope-of-variables",
+		"avoid-naked-parameters", "use-raw-string-literals-to-avoid-escaping", "initializing-structs",
+		"use-field-names-to-initialize-structs", "omit-zero-value-fields-in-structs",
+		"use-var-for-zero-value-structs", "initializing-struct-references", "initializing-maps",
+		"format-strings-outside-printf", "naming-printf-style-functions", "patterns", "test-tables",
+		"avoid-unnecessary-complexity-in-table-tests", "parallel-tests", "functional-options",
+		"linting", "lint-runners",
+	}
+	for _, r := range policy.UberRules() {
+		_, anchor, _ := strings.Cut(r.DocURL, "#")
+		if !slices.Contains(sections, anchor) {
+			t.Errorf("%s cites #%s, which is not a section of the guide at %s", r.ID, anchor, policy.UberGuideCommit)
 		}
 	}
 }

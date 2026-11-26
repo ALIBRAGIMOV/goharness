@@ -372,9 +372,10 @@ func TestMutantsRespectTheBudget(t *testing.T) {
 	}
 }
 
-// TestMutantBudgetIsSpreadAcrossTheChangedFiles is the field report's lesson:
-// sixteen mutants taken in path order all landed in one package, so the
-// evidence described that package and nothing else the branch touched.
+// TestMutantBudgetIsSpreadAcrossTheChangedFiles holds the budget to the whole
+// change: sixteen mutants taken in path order all land in the first package of
+// a branch, and the evidence then describes that package and nothing else the
+// branch touched.
 func TestMutantBudgetIsSpreadAcrossTheChangedFiles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -480,9 +481,8 @@ func TestThing(t *testing.T) {
 	}
 }
 
-// TestCanonicalWorkerPoolsAreNotReported covers the two shapes a production
-// audit flagged, both of them fixed-size worker pools and both of them false
-// positives.
+// TestCanonicalWorkerPoolsAreNotReported covers the two shapes of a fixed-size
+// worker pool. Neither is unbounded, so a finding on either is a false positive.
 //
 // The rule defends a property, "concurrency does not scale with input", and
 // `for range workerCount` is the most direct way Go offers to hold it. Firing
@@ -502,14 +502,14 @@ func TestCanonicalWorkerPoolsAreNotReported(t *testing.T) {
 
 import "context"
 
-const transcriptionWorkers = 4
+const workers = 4
 
 type worker struct{}
 
 func (w worker) run(ctx context.Context) {}
 
 func Start(ctx context.Context, w worker) {
-	for range transcriptionWorkers {
+	for range workers {
 		go w.run(ctx)
 	}
 }
@@ -731,20 +731,18 @@ func Start(ctx context.Context, n int, table map[string]int) {
 	}
 }
 
-// TestGeneratedCodeProducesNoMaintainabilityDelta holds the lesson a production
-// monorepo taught.
-//
-// easyjson numbers the functions it writes. Deleting one marshalled type
-// renumbers every function after it, so DecodeX23 at base and DecodeX23 at head
-// are two different decoders, and the complexity "rise" between them describes
-// the numbering rather than the code. A delta between two functions that are not
-// the same function is not a measurement.
+// TestGeneratedCodeProducesNoMaintainabilityDelta covers generators that number
+// the functions they write. Deleting one marshalled type renumbers every
+// function after it, so DecodeX23 at base and DecodeX23 at head are two
+// different decoders, and the complexity "rise" between them describes the
+// numbering rather than the code. A delta between two functions that are not the
+// same function is not a measurement.
 func TestGeneratedCodeProducesNoMaintainabilityDelta(t *testing.T) {
 	t.Parallel()
 	base := analyze.Metrics{
 		Functions: map[string]analyze.FunctionMetric{
 			"pkg:DecodeRecord23": {
-				Key: "pkg:DecodeRecord23", File: "pkg/easyjson.go",
+				Key: "pkg:DecodeRecord23", File: "pkg/codec_gen.go",
 				Name: "DecodeRecord23", Complexity: 9,
 			},
 		},
@@ -753,13 +751,13 @@ func TestGeneratedCodeProducesNoMaintainabilityDelta(t *testing.T) {
 	head := analyze.Metrics{
 		Functions: map[string]analyze.FunctionMetric{
 			"pkg:DecodeRecord23": {
-				Key: "pkg:DecodeRecord23", File: "pkg/easyjson.go",
+				Key: "pkg:DecodeRecord23", File: "pkg/codec_gen.go",
 				Name: "DecodeRecord23", Complexity: 31,
 			},
 		},
 		Packages: map[string]analyze.PackageMetric{},
 	}
-	generated := map[string]bool{"pkg/easyjson.go": true}
+	generated := map[string]bool{"pkg/codec_gen.go": true}
 	if got := analyze.MaintainabilityFindings(base, head, generated); len(got) != 0 {
 		t.Fatalf("a renumbered generated function produced %d delta finding(s): %v",
 			len(got), ruleIDs(got))

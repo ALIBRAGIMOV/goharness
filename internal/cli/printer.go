@@ -26,11 +26,11 @@ func (p *printer) printf(format string, args ...any) {
 	}
 }
 
-func (p *printer) line(format string, args ...any) {
+func (p *printer) linef(format string, args ...any) {
 	p.printf(format+"\n", args...)
 }
 
-// err returns the first write failure, if any.
+// failure returns the first write failure, if any.
 func (p *printer) failure() error {
 	return p.err
 }

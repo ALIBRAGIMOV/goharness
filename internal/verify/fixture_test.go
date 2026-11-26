@@ -15,9 +15,10 @@ import (
 // fixture is a throwaway git repository containing a single Go module, built
 // per test so that no case can observe another's state.
 //
-// dir and moduleDir are distinct on purpose: a very large share of real Go
-// repositories keep their module in a subdirectory, and every path defect the
-// field report exposed lived in the gap between the two.
+// dir and moduleDir are distinct on purpose: many Go repositories keep their
+// module below the git root, git reports paths relative to the root, and the go
+// command reports them relative to the module. A path carried from one system
+// into the other unconverted is wrong in exactly the layouts where they differ.
 type fixture struct {
 	t         *testing.T
 	dir       string
@@ -68,8 +69,8 @@ func layouts() []layout {
 	}
 }
 
-// subdirLayout is the single cell that reproduces the field report's subject:
-// a module below the git root, driven from the git root with an explicit --dir.
+// subdirLayout is the single cell in which every coordinate system differs: a
+// module below the git root, driven from the git root with an explicit --dir.
 func subdirLayout() layout {
 	return layout{name: "subdir_cwd-gitroot_dir-given", prefix: "backend", cwd: cwdGitRoot}
 }
@@ -138,8 +139,8 @@ func (f *fixture) verifyDir() string {
 }
 
 // eachLayout runs body once per layout cell as a subtest. Every case that
-// reads a path, and every case that guards a bypass, belongs here: the two
-// closures the field report found broken were both green in the first cell and
+// reads a path, and every case that guards a bypass, belongs here: a closure
+// that joins paths from two coordinate systems is green in the first cell and
 // silently absent in the rest.
 func eachLayout(t *testing.T, body func(t *testing.T, lay layout)) {
 	t.Helper()

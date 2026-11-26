@@ -85,6 +85,52 @@ func TestStart(t *testing.T) {
 	}
 }
 
+// TestInjectedTestMainCatchesALeakBeforeItIsScheduled is the leak a single
+// sample misses. On one processor the test returns before the goroutine it
+// started has run, so the goroutine has not parked when the profile is first
+// read; reading it once reports a clean package that leaks.
+func TestInjectedTestMainCatchesALeakBeforeItIsScheduled(t *testing.T) {
+	t.Setenv("GOMAXPROCS", "1")
+	dir := newLeakModule(t, `package lib
+
+import "testing"
+
+func TestStart(t *testing.T) {
+	if Start() == nil {
+		t.Fatal("expected a stop function")
+	}
+}
+`)
+	failures := runInjected(t, dir)
+	if len(failures) != 1 || !leakcheck.IsLeakFailure(failures[0].Output) {
+		t.Fatalf("failures = %v, want exactly the leak", failures)
+	}
+}
+
+// TestInjectedTestMainDoesNotReportAReachableGoroutine is the guard on the
+// sampling above. A goroutine parked on a channel the package still holds can
+// be woken, so it is not a leak however long the detector waits, and the wait
+// ends on its own.
+func TestInjectedTestMainDoesNotReportAReachableGoroutine(t *testing.T) {
+	t.Parallel()
+	dir := newLeakModule(t, `package lib
+
+import "testing"
+
+var parked = make(chan struct{})
+
+func TestParkOnAPackageChannel(t *testing.T) {
+	go func() { <-parked }()
+	if parked == nil {
+		t.Fatal("the package channel was not made")
+	}
+}
+`)
+	if failures := runInjected(t, dir); len(failures) != 0 {
+		t.Fatalf("a goroutine the package can still wake was reported: %v", failures)
+	}
+}
+
 func TestInjectedTestMainPassesWhenGoroutinesAreStopped(t *testing.T) {
 	t.Parallel()
 	dir := newLeakModule(t, `package lib

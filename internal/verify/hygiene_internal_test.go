@@ -14,7 +14,7 @@ import (
 func TestPathHygieneRefusesEvidenceOutsideTheTree(t *testing.T) {
 	t.Parallel()
 	for _, file := range []string{
-		"/private/var/folders/x/T/goharness-base-1844525834/tree/internal/search/index.go",
+		"/private/var/folders/x/T/goharness-base-123456789/tree/internal/search/index.go",
 		"../outside/lib.go",
 		"..",
 	} {
@@ -51,20 +51,20 @@ func TestPathHygieneAcceptsEveryShapeTheHarnessProduces(t *testing.T) {
 
 // TestOneLeakSiteIsOneFinding pins the collapse.
 //
-// The leak run reports a site once per test package that reached it, so one leaking
-// helper produced thirty-six identical rows on a production run and the report
-// told its reader to fix each of them. The site is the unit of repair.
+// The leak run reports a site once per test package that reached it, so one
+// leaking helper becomes one identical row per package and the report tells its
+// reader to fix each of them. The site is the unit of repair.
 func TestOneLeakSiteIsOneFinding(t *testing.T) {
 	t.Parallel()
 	site := &leakSite{
 		file: "internal/metrics/sender.go", line: 182, pkg: "example.com/x/httpserver",
-		funcs:    map[string]bool{"stat.(*Sender).loop": true, "database/sql.(*DB).opener": true},
+		funcs:    map[string]bool{"metrics.(*Sender).loop": true, "database/sql.(*DB).opener": true},
 		packages: map[string]bool{"a": true, "b": true, "c": true},
 	}
 	msg := site.message()
 	// Sorted, because the order the profile prints them in is the order the runtime
 	// produced them and it moves between runs.
-	if !strings.Contains(msg, "database/sql.(*DB).opener, stat.(*Sender).loop") {
+	if !strings.Contains(msg, "database/sql.(*DB).opener, metrics.(*Sender).loop") {
 		t.Fatalf("the leaked functions are not in a stable order: %q", msg)
 	}
 	if !strings.Contains(msg, "observed in 3 test packages") {

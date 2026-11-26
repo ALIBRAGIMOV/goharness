@@ -170,9 +170,9 @@ func dirSet(dirs []string) map[string]bool {
 // a temporary worktree, and a tool that reports a file there by an absolute path
 // hands back a string the head side can never equal, so the same finding at both
 // revisions gets two fingerprints and a whole producer's output reads as
-// introduced by the change. This is exactly what happened to go vet and go fix
-// on a production monorepo, while golangci-lint escaped only because it happened
-// to report relative paths.
+// introduced by the change. go vet and go fix report absolute paths there;
+// golangci-lint reports relative ones, which is the only reason it was never
+// affected.
 //
 // The in-scope file list is the authority of last resort: a reported path that
 // ends with one of its entries names that file whatever prefix it arrived with.
@@ -859,9 +859,9 @@ func (t *target) runLeakRaceTests(ctx context.Context) (_ checkResult, err error
 	t.leakBlocked = blocked
 	// Only a package the change touched leaves an obligation this change can
 	// discharge. A TestMain anywhere else in the reverse-dependency closure is a
-	// gap in the repository's coverage, and telling the author of a merge request
-	// to go and edit three packages they never opened is an instruction nobody
-	// will follow: it is reported in coverage instead.
+	// gap in the repository's coverage, and telling the author of a change to go
+	// and edit packages they never opened is an instruction nobody will follow:
+	// it is reported in coverage instead.
 	if inChange := t.changedAmong(blocked); len(inChange) > 0 {
 		res.unproducible = append(res.unproducible, admission.Unproducible{
 			Kind: admission.KindLeakClean,
@@ -962,9 +962,8 @@ func (t *target) interpretLeakRun(ctx context.Context, failures []tool.TestFailu
 // observed about it.
 //
 // The site is the unit because it is the unit of repair. One leaking helper
-// reached from thirty test packages is one defect and thirty rows: a production
-// run produced forty rows for four sites and told its reader to "fix every
-// GH-LEAK-001 finding above" forty times.
+// reached from thirty test packages is one defect; reported per package it is
+// thirty rows, and the reader is told to fix each of them.
 type leakSite struct {
 	file     string
 	line     int

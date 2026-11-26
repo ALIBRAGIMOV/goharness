@@ -34,7 +34,7 @@ What this run costs, and how to spend it:
 
 ## Self-admissibility: this code must pass its own gate
 
-goharness enforces rules on other codebases, so its own code holds to every one of them:
+goharness enforces rules on other codebases, so its own code holds to every one of them, and to the standard in the "Write to the standard" section of `internal/skill/SKILL.md` (Effective Go, Go Code Review Comments, Go Test Comments, the Google Go Style Guide, the pinned Uber guide):
 
 - Never write `//nolint`, `//lint:ignore`, `//lint:file-ignore`, `#nosec`, `//revive:disable`, or any other inline suppression. If a linter finding is wrong, fix the code or record a scoped, expiring exception in `goharness.yaml` with an owner and a written reason. There are currently zero exceptions; keep it that way.
 - Never put the em dash character U+2014 in Go source. Use a plain hyphen. In test fixtures that need the character, write it inside a string literal as a backslash-u escape (backslash, the letter u, then 2014), never as the raw character.

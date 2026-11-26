@@ -126,9 +126,9 @@ func (c *comparison) runAntiWeakening(ctx context.Context) (checkResult, error) 
 //
 // The scope is the changed packages and not the reverse-dependency closure,
 // because the closure is what made this the most expensive check in the harness
-// while measuring almost nothing: on a production monorepo 272 seconds of a 395
-// second run went to benchmarks in a package whose measured functions call
-// nothing the change touched. The obligation was activated by "a benchmark in a
+// while measuring almost nothing: on a large module most of a run can go to
+// benchmarks in a package whose measured functions call nothing the change
+// touched. The obligation was activated by "a benchmark in a
 // changed directory" in the first place, so answering it over exactly those
 // directories is what was asked.
 func (c *comparison) runBenchmarks(ctx context.Context) (checkResult, error) {
@@ -185,10 +185,9 @@ func (c *comparison) runBenchmarks(ctx context.Context) (checkResult, error) {
 //
 // Interleaving is the whole point. A machine's load drifts over the minutes a
 // comparison takes, and measuring one revision to completion and then the other
-// turns that drift into a regression report for every benchmark at once, which
-// is exactly what a run against a real repository produced. Alternating gives
-// both sides the same conditions, so what survives the comparison is the change
-// rather than the weather.
+// turns that drift into a regression report for every benchmark at once.
+// Alternating gives both sides the same conditions, so what survives the
+// comparison is the change rather than the weather.
 func (c *comparison) sampleBenchmarks(
 	ctx context.Context, basePatterns, headPatterns []string,
 ) (base, head tool.BenchRun, err error) {

@@ -30,9 +30,9 @@ func runSkill(ctx context.Context, args []string, streams Streams) int {
 		return runSkillInstall(ctx, args[1:], streams)
 	default:
 		p := newPrinter(streams.Err)
-		p.line("unknown skill subcommand %q", args[0])
+		p.linef("unknown skill subcommand %q", args[0])
 		if suggestions := nearest(args[0], []string{"print", "install"}, 2); len(suggestions) > 0 {
-			p.line("did you mean: %s", strings.Join(suggestions, ", "))
+			p.linef("did you mean: %s", strings.Join(suggestions, ", "))
 		}
 		p.printf("\n%s", commandUsage("skill"))
 		return ExitInconclusive
@@ -55,14 +55,14 @@ func runSkillInstall(ctx context.Context, args []string, streams Streams) int {
 	if *project {
 		root, err := projectRoot(ctx, *dir)
 		if err != nil {
-			errOut.line("goharness skill install: %v", err)
+			errOut.linef("goharness skill install: %v", err)
 			return ExitInconclusive
 		}
 		targets = skill.ProjectTargets(root)
 	} else {
 		var err error
 		if targets, err = userSkillTargets(); err != nil {
-			errOut.line("goharness skill install: %v", err)
+			errOut.linef("goharness skill install: %v", err)
 			return ExitInconclusive
 		}
 	}
@@ -104,14 +104,14 @@ func installSkill(out, errOut *printer, targets []skill.Target, force bool) bool
 		outcome, err := skill.Install(target, force)
 		switch {
 		case errors.Is(err, skill.ErrForeignFile):
-			errOut.line("agent skill: %s: left alone, %s is a skill goharness did not write; "+
+			errOut.linef("agent skill: %s: left alone, %s is a skill goharness did not write; "+
 				"`goharness skill install --force` replaces it", target.Agent, target.Path)
 			ok = false
 		case err != nil:
-			errOut.line("agent skill: %s: %v", target.Agent, err)
+			errOut.linef("agent skill: %s: %v", target.Agent, err)
 			ok = false
 		default:
-			out.line("agent skill: %s: %s at %s", target.Agent, outcome, target.Path)
+			out.linef("agent skill: %s: %s at %s", target.Agent, outcome, target.Path)
 		}
 	}
 	return ok
@@ -124,21 +124,21 @@ func installSkill(out, errOut *printer, targets []skill.Target, force bool) bool
 func reportSkill(out *printer) {
 	targets, err := userSkillTargets()
 	if err != nil {
-		out.line("%s agent skill    %v", mark(false), err)
+		out.linef("%s agent skill    %v", mark(false), err)
 		return
 	}
 	for _, target := range targets {
 		status, err := skill.Inspect(target)
 		if err != nil {
-			out.line("%s agent skill    %s: %v", mark(false), target.Agent, err)
+			out.linef("%s agent skill    %s: %v", mark(false), target.Agent, err)
 			continue
 		}
-		out.line("%s agent skill    %s: %s (%s)", mark(status == skill.Current), target.Agent, status, target.Path)
+		out.linef("%s agent skill    %s: %s (%s)", mark(status == skill.Current), target.Agent, status, target.Path)
 		switch status {
 		case skill.Missing, skill.Outdated:
-			out.line("      fix: goharness skill install")
+			out.linef("      fix: goharness skill install")
 		case skill.Foreign:
-			out.line("      note: goharness skill install --force replaces it")
+			out.linef("      note: goharness skill install --force replaces it")
 		case skill.Current:
 		}
 	}

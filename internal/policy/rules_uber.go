@@ -1,5 +1,7 @@
 package policy
 
+import "strings"
+
 type uberSpec struct {
 	id             string
 	title          string
@@ -40,11 +42,21 @@ func UberRules() []Rule {
 func UberRulesEnforcedBy(ruleID string) []Rule {
 	var out []Rule
 	for _, r := range UberRules() {
-		if r.Enforcement == ruleID {
+		if id, _ := EnforcementParts(r.Enforcement); id == ruleID {
 			out = append(out, r)
 		}
 	}
 	return out
+}
+
+// EnforcementParts splits an enforcement into the harness rule that produces the
+// evidence and, for a rule that reports several checks under one ID (go vet,
+// revive), the check inside it. A qualified enforcement still lists the guide
+// rule under that ID, but it never labels the ID's evidence: most of what go vet
+// reports is not a copied lock.
+func EnforcementParts(enforcement string) (ruleID, check string) {
+	ruleID, check, _ = strings.Cut(enforcement, " ")
+	return ruleID, check
 }
 
 func uberSpecs() []uberSpec {
@@ -55,8 +67,8 @@ func uberEnforcedSpecs() []uberSpec {
 	return []uberSpec{
 		{
 			id: "UBER-ERR-001", title: "Handle every returned error", consequence: ConsequenceSilentLoss,
-			anchor: "handle-errors", classification: ClassRequired, lifecycle: LifecycleRequired,
-			rationale:   "Ignoring an error discards the only signal that an operation failed; the guide permits discarding only with an explicit, justified decision.",
+			anchor: "linting", classification: ClassRequired, lifecycle: LifecycleRequired,
+			rationale:   "The guide's minimum linter set includes errcheck, to ensure that errors are handled. An ignored error discards the only signal that an operation failed.",
 			enforcement: "GCL-errcheck",
 		},
 		{
@@ -86,8 +98,8 @@ func uberEnforcedSpecs() []uberSpec {
 		{
 			id: "UBER-TAG-001", title: "Use field tags in marshaled structs", consequence: ConsequenceStructural,
 			anchor: "use-field-tags-in-marshaled-structs", classification: ClassRequired, lifecycle: LifecycleRequired,
-			rationale:   "Without tags the serialized form follows Go field names, so an internal rename silently breaks the wire format. Tag validity is checked by go vet's structtag pass, which the harness runs directly.",
-			enforcement: RuleVet,
+			rationale:   "Without tags the serialized form follows Go field names, so an internal rename silently breaks the wire format. musttag reports a marshaled field without a tag; go vet's structtag pass checks that the tags present are well formed.",
+			enforcement: "GCL-musttag",
 		},
 		{
 			id: "UBER-ERR-002", title: "Wrap errors with context", consequence: ConsequenceSilentLoss,
@@ -103,8 +115,8 @@ func uberEnforcedSpecs() []uberSpec {
 		},
 		{
 			id: "UBER-ERR-004", title: "Do not log and return the same error", consequence: ConsequenceStructural,
-			anchor: "handle-errors", classification: ClassManual, lifecycle: LifecycleAdvisory,
-			rationale:   "Logging and returning produces one incident reported many times; the guide asks callers to handle an error exactly once.",
+			anchor: "handle-errors-once", classification: ClassManual, lifecycle: LifecycleAdvisory,
+			rationale:   "Logging an error and returning it reports one incident many times. The guide asks a caller to handle each error once: match it, degrade and log it, or return it, and not two of these.",
 			enforcement: "manual",
 		},
 		{
@@ -115,20 +127,56 @@ func uberEnforcedSpecs() []uberSpec {
 		},
 		{
 			id: "UBER-EXI-001", title: "Call os.Exit or log.Fatal only from main", consequence: ConsequenceUnsafeBehavior,
-			anchor: "exit-in-main", classification: ClassManual, lifecycle: LifecycleAdvisory,
-			rationale:   "Exiting outside main skips deferred cleanup and denies callers any recovery path. The pinned golangci-lint set offers no dedicated analyzer for this, so v0.1 records it as a manual review item rather than approximating it.",
-			enforcement: "manual",
+			anchor: "exit-in-main", classification: ClassRequired, lifecycle: LifecycleRequired,
+			rationale:   "Exiting outside main skips deferred cleanup and denies callers any recovery path. revive's deep-exit rule, enabled in the strict pack, reports os.Exit and log.Fatal outside main and init under the GCL-revive rule ID.",
+			enforcement: "GCL-revive deep-exit",
 		},
 		{
-			id: "UBER-STY-002", title: "Prefer typed sync/atomic over go.uber.org/atomic", consequence: ConsequenceHygiene,
+			id: "UBER-STY-002", title: "Use typed atomic values", consequence: ConsequenceHygiene,
 			anchor: "use-gouberorgatomic", classification: ClassAdvisory, lifecycle: LifecycleAdvisory,
-			rationale:   "Since Go 1.19 the standard library provides typed atomic values, so the guide's recommendation of an external package is satisfied by sync/atomic. The harness never requires adding a third-party dependency.",
-			enforcement: "manual", goConstraint: ">=1.19",
+			rationale:   "The guide recommends go.uber.org/atomic because sync/atomic's functions on plain integers make it easy to forget the atomic operation on one access. Since Go 1.19 sync/atomic has typed values (atomic.Int64, atomic.Bool, atomic.Pointer) with the same guarantee and no dependency, and go fix's atomictypes analyzer reports the plain-integer form.",
+			enforcement: GoFixRuleID("atomictypes"), goConstraint: ">=1.19",
+		},
+		{
+			id: "UBER-GOR-001", title: "Don't fire-and-forget goroutines", consequence: ConsequenceUnsafeBehavior,
+			anchor: "dont-fire-and-forget-goroutines", classification: ClassRequired, lifecycle: LifecycleRequired,
+			rationale:   "Every goroutine needs a predictable time to stop and a way to wait for it. The guide recommends testing for leaks with goleak; the harness reads the runtime's own goroutineleak profile in the race run instead, and GH-CONC-001 reports a spawn whose termination path is not visible where it starts.",
+			enforcement: RuleGoroutineLeak,
+		},
+		{
+			id: "UBER-PKG-001", title: "Package names carry meaning", consequence: ConsequenceStructural,
+			anchor: "package-names", classification: ClassRequired, lifecycle: LifecycleRequired,
+			rationale:   "The guide rejects common, util, shared and lib as bad, uninformative package names. GH-ARCH-001 refuses common, shared and util among its names; lib, the guide's fourth example, is not on its list.",
+			enforcement: RuleBannedPackageName,
+		},
+		{
+			id: "UBER-NST-001", title: "Reduce nesting", consequence: ConsequenceStructural,
+			anchor: "reduce-nesting", classification: ClassRequired, lifecycle: LifecycleRequired,
+			rationale:   "Handling errors and special cases first and returning early keeps the main path at the left margin. GH-CX-002 holds each function to a nesting budget.",
+			enforcement: RuleNesting,
+		},
+		{
+			id: "UBER-IMP-001", title: "Two import groups: standard library, then everything else", consequence: ConsequenceHygiene,
+			anchor: "import-group-ordering", classification: ClassRequired, lifecycle: LifecycleRequired,
+			rationale:   "The guide's grouping is the one goimports applies by default, and GH-FMT-002 reports any file goimports would rewrite.",
+			enforcement: RuleFormatGoimports,
+		},
+		{
+			id: "UBER-PRF-001", title: "Prefer strconv over fmt", consequence: ConsequenceHygiene,
+			anchor: "prefer-strconv-over-fmt", classification: ClassAdvisory, lifecycle: LifecycleExperimental,
+			rationale:   "When converting primitives to and from strings, the guide measures strconv as faster than fmt, which formats through reflection and allocates.",
+			enforcement: "GCL-perfsprint",
+		},
+		{
+			id: "UBER-PRT-001", title: "Name printf-style functions with a trailing f", consequence: ConsequenceHygiene,
+			anchor: "naming-printf-style-functions", classification: ClassAdvisory, lifecycle: LifecycleExperimental,
+			rationale:   "The guide asks for a predefined Printf name where possible and otherwise a name ending in f, so go vet can be told to check the format string by name.",
+			enforcement: "GCL-goprintffuncname",
 		},
 		{
 			id: "UBER-LOO-001", title: "Loop variable capture in closures and goroutines", consequence: ConsequenceHygiene,
-			anchor: "dont-fire-and-forget-goroutines", classification: ClassSuperseded, lifecycle: LifecycleDeprecated,
-			rationale:   "Go 1.22 gives each iteration its own loop variable, so the historical capture hazard no longer exists at the module's pinned language version.",
+			anchor: "parallel-tests", classification: ClassSuperseded, lifecycle: LifecycleDeprecated,
+			rationale:   "The guide asks parallel tests and goroutine-spawning loops to copy the loop variable. Go 1.22 gives each iteration its own variable, so the hazard no longer exists at the module's language version, and go fix's forvar analyzer reports the redundant copy.",
 			enforcement: "language semantics, Go 1.22 and later", goConstraint: ">=1.22",
 		},
 	}
@@ -136,12 +184,6 @@ func uberEnforcedSpecs() []uberSpec {
 
 func uberManualSpecs() []uberSpec {
 	return []uberSpec{
-		{
-			id: "UBER-GOR-001", title: "Goroutine lifetimes must be discoverable", consequence: ConsequenceUnsafeBehavior,
-			anchor: "dont-fire-and-forget-goroutines", classification: ClassManual, lifecycle: LifecycleAdvisory,
-			rationale:   "Every goroutine needs a known stop condition and a way to wait for it; whether one exists is a design question no static analyzer answers.",
-			enforcement: "manual",
-		},
 		{
 			id: "UBER-CPY-001", title: "Copy slices and maps at boundaries", consequence: ConsequenceUnsafeBehavior,
 			anchor: "copy-slices-and-maps-at-boundaries", classification: ClassManual, lifecycle: LifecycleAdvisory,
@@ -164,7 +206,7 @@ func uberManualSpecs() []uberSpec {
 			id: "UBER-MTX-001", title: "Zero-value mutexes are valid; never copy them", consequence: ConsequenceUnsafeBehavior,
 			anchor: "zero-value-mutexes-are-valid", classification: ClassRequired, lifecycle: LifecycleRequired,
 			rationale:   "A copied lock protects nothing. go vet's copylocks pass detects this exactly, and the harness runs vet directly.",
-			enforcement: RuleVet,
+			enforcement: RuleVet + " copylocks",
 		},
 		{
 			id: "UBER-IFC-001", title: "Verify interface compliance at compile time", consequence: ConsequenceStructural,
@@ -185,10 +227,10 @@ func uberManualSpecs() []uberSpec {
 			enforcement: "manual",
 		},
 		{
-			id: "UBER-STY-001", title: "Keep lines under 99 columns", consequence: ConsequenceHygiene,
-			anchor: "avoid-line-length", classification: ClassAdvisory, lifecycle: LifecycleAdvisory,
-			rationale:   "The guide calls this a soft limit and explicitly declines to make it mechanical, so the harness never blocks on it.",
-			enforcement: "advisory, not mechanically enforced in v0.1",
+			id: "UBER-STY-001", title: "Avoid overly long lines", consequence: ConsequenceHygiene,
+			anchor: "avoid-overly-long-lines", classification: ClassManual, lifecycle: LifecycleAdvisory,
+			rationale:   "The guide recommends a soft limit of 99 characters and says code is allowed to exceed it, so the harness never blocks on line length.",
+			enforcement: "manual",
 		},
 		{
 			id: "UBER-TST-001", title: "Prefer table-driven tests", consequence: ConsequenceHygiene,

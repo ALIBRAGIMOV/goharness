@@ -195,8 +195,10 @@ dependencies (compile precedes vet, lint and tests). The scheduler:
   told apart from a test that failed. `-race` runs where the change touches
   concurrency, and repository-wide in `audit`.
 - Goroutine-leak evidence comes from the runtime. The injected `TestMain`
-  runs the package's tests, then looks up the `goroutineleak` profile; a
-  goroutine blocked on a primitive nothing can ever unblock is a leak, and
+  runs the package's tests, then reads the `goroutineleak` profile, again
+  while other goroutines remain, for at most a quarter of a second, so a
+  goroutine that had not parked yet is still seen; a goroutine blocked on a
+  primitive nothing can ever unblock is a leak, and
   the package fails naming the site that started it and the functions it is
   parked in. A package that declares its own `TestMain` cannot be injected:
   in the change it makes the leak obligation INCONCLUSIVE with the remedy
@@ -297,8 +299,8 @@ Two suites exist for properties that only hold while someone keeps checking:
 - `internal/verify/bypass_test.go` holds one case per route by which a
   change could once have been admitted without the evidence to justify it.
   Every case asserts a verdict that is not ADMITTED, or that a grant had no
-  effect, and is paired with a false-positive guard. A bypass found in the
-  field becomes a case here before it is fixed.
+  effect, and is paired with a false-positive guard. A bypass found in use
+  becomes a case here before it is fixed.
 - `internal/verify/corpus_test.go` runs the harness over published
   repositories at pinned commits, gated behind `GOHARNESS_CORPUS=1`. It
   asserts only what must always hold and prints what every rule fired on,

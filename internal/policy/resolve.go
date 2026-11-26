@@ -93,7 +93,7 @@ func (p ResolvedPolicy) Decorate(e evidence.Evidence) evidence.Evidence {
 	if e.DocURL == "" {
 		e.DocURL = rule.DocURL
 	}
-	if guide := UberRulesEnforcedBy(rule.ID); len(guide) == 1 {
+	if guide := UberRulesEnforcedBy(rule.ID); len(guide) == 1 && guide[0].Enforcement == rule.ID {
 		e.PolicySource = rule.Pack + "+" + guide[0].ID
 	}
 	if p.excepted(e) {

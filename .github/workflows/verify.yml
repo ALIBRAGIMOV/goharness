@@ -21,13 +21,15 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to the commit their release tag named when it was
+      # chosen, for the reason the harness pins its own tools: a tag can move.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The admission gate compares against a base revision, so the run needs
           # more than the single commit a default checkout fetches.
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           check-latest: true
@@ -61,39 +63,42 @@ jobs:
         # Plain first, for readable failures. The gate below runs the same suite
         # under the race detector, so a separate -race step would be a third run
         # of an eight-minute suite for nothing the gate does not already report.
-        run: go test ./...
+        # A hosted macOS runner takes close to ten minutes for internal/verify
+        # alone, which is go test's default limit, so the limit is stated.
+        run: go test -timeout 30m ./...
 
       - name: admission gate against itself
         # On a pull request the base is the merge-base with main. On a push to
         # main it is the commit the push started from, so every commit of the
         # push is judged rather than the last one alone; the parent fallback
-        # would judge only HEAD.
+        # would judge only HEAD. A forced push started from a commit the new
+        # history no longer contains, so it falls back to the parent.
         env:
-          BASE_REV: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || '' }}
+          BASE_REV: ${{ github.event_name == 'push' && !github.event.forced && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || '' }}
         run: |
           go build -o "${RUNNER_TEMP}/goharness" ./cmd/goharness
-          "${RUNNER_TEMP}/goharness" verify --agent ${BASE_REV:+--base "$BASE_REV"} > "${RUNNER_TEMP}/first.json"
+          "${RUNNER_TEMP}/goharness" verify --agent --timeout 45m ${BASE_REV:+--base "$BASE_REV"} > "${RUNNER_TEMP}/first.json"
 
       - name: determinism of the report
         # Two runs over one unchanged tree must produce identical documents once
         # the timing block, the only non-deterministic part, is removed.
         env:
-          BASE_REV: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || '' }}
+          BASE_REV: ${{ github.event_name == 'push' && !github.event.forced && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || '' }}
         run: |
-          "${RUNNER_TEMP}/goharness" verify --agent ${BASE_REV:+--base "$BASE_REV"} > "${RUNNER_TEMP}/second.json"
+          "${RUNNER_TEMP}/goharness" verify --agent --timeout 45m ${BASE_REV:+--base "$BASE_REV"} > "${RUNNER_TEMP}/second.json"
           python3 -c 'import json,sys; a,b=[json.load(open(p)) for p in sys.argv[1:3]]; [d.pop("timing",None) for d in (a,b)]; sys.exit(0 if a==b else "two runs over one tree produced different reports")' "${RUNNER_TEMP}/first.json" "${RUNNER_TEMP}/second.json"
 
   bypasses:
     name: bypass corpus
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           check-latest: true
       - run: go run ./cmd/goharness setup
       - name: every known bypass stays closed
-        run: go test ./internal/verify -run 'TestBypass' -count=1 -v
+        run: go test ./internal/verify -run 'TestBypass' -count=1 -timeout 30m -v

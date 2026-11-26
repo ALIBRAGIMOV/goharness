@@ -138,10 +138,10 @@ func TestExportSurfaceReportsALoaderThatCouldNotRun(t *testing.T) {
 	}
 }
 
-// TestAPIBreakFindingsPlaceEachRowWhereItCanBeOpened holds the property the
-// field report asked for: a removal is located at the declaration the base tree
-// carried, a re-signature where the symbol lives now, and neither identity
-// mentions a line, so a declaration that only moves keeps its finding.
+// TestAPIBreakFindingsPlaceEachRowWhereItCanBeOpened holds the placement
+// property: a removal is located at the declaration the base tree carried, a
+// re-signature where the symbol lives now, and neither identity mentions a line,
+// so a declaration that only moves keeps its finding.
 func TestAPIBreakFindingsPlaceEachRowWhereItCanBeOpened(t *testing.T) {
 	t.Parallel()
 	base := map[string]analyze.Exported{

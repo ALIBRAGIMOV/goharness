@@ -16,9 +16,9 @@ import (
 const emDash = "\u2014"
 
 // emDashFixture puts the forbidden rune in three comments and in one string
-// literal. The literal is the whole point: the subject repository that produced
-// this requirement carries client-facing copy in its literals, and a fixer that
-// rewrites those is worse than no fixer at all.
+// literal. The literal is the whole point: string literals carry user-facing
+// text and wire formats, and a fixer that rewrites those is worse than no fixer
+// at all.
 func emDashFixture() string {
 	return "package lib\n" +
 		"\n" +
@@ -28,7 +28,7 @@ func emDashFixture() string {
 		"\treturn 42\n" +
 		"}\n" +
 		"\n" +
-		"/* Motto is client-facing copy " + emDash + " it is prose. */\n" +
+		"/* Motto is user-facing text " + emDash + " it is prose. */\n" +
 		"const Motto = \"we ship " + emDash + " carefully\"\n"
 }
 
@@ -57,7 +57,7 @@ func TestEmDashFixerRewritesCommentsAndNotLiterals(t *testing.T) {
 		!strings.Contains(fixed, "// Answer returns 42 - the canonical answer.") {
 		t.Fatalf("a line comment was not rewritten:\n%s", fixed)
 	}
-	if !strings.Contains(fixed, "/* Motto is client-facing copy - it is prose. */") {
+	if !strings.Contains(fixed, "/* Motto is user-facing text - it is prose. */") {
 		t.Fatalf("a block comment was not rewritten:\n%s", fixed)
 	}
 

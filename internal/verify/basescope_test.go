@@ -111,8 +111,8 @@ func TestBaseTestsRunOnlyWhereHeadTestsSaidSomething(t *testing.T) {
 
 // TestLeakPresentAtBaseAndHeadIsPreexisting is the base side of goroutine-leak
 // evidence. Until the base ran the detector, every leak in the closure was new
-// and blocked, including one in a helper the change never opened: a production
-// run rejected a merge request for four leaks in a package it did not touch.
+// and blocked, including one in a helper the change never opened, so a change
+// was rejected for leaks in a package it did not touch.
 // The guard that a leak the change introduces still blocks is
 // TestLeakedGoroutineRejectsTheChange.
 func TestLeakPresentAtBaseAndHeadIsPreexisting(t *testing.T) {

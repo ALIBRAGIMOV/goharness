@@ -158,7 +158,7 @@ formatters:
 
 // TestExclusionWithoutLinterListShadowsEverything covers the shape that silences
 // the most and says the least: a test-file rule naming no linters excludes them
-// all, which is exactly what the field report's subject had.
+// all, which is the widest shadow a configuration can cast.
 func TestExclusionWithoutLinterListShadowsEverything(t *testing.T) {
 	src := `linters:
   enable:

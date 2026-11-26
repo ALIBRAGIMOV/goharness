@@ -21,6 +21,23 @@ func Start() func() {
 }
 `
 
+// lateParkingWorker leaks like leakyWorker, but its goroutine parks only after
+// a pause, so it has not parked yet when the tests return.
+const lateParkingWorker = `package worker
+
+import "time"
+
+// Start launches a worker goroutine and returns the function that stops it.
+func Start() func() {
+	stop := make(chan struct{})
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		<-stop
+	}()
+	return func() { close(stop) }
+}
+`
+
 const leakingWorkerTest = `package worker
 
 import "testing"

@@ -52,7 +52,10 @@ func (p RiskProfile) HasAny(domains ...RiskDomain) bool {
 	return slices.ContainsFunc(domains, p.Has)
 }
 
-func (p *RiskProfile) activate(domain RiskDomain, reason string) {
+// activateRisk records that a domain is active and why. It is a function rather
+// than a method so that RiskProfile keeps one receiver kind: callers hold it
+// by value, and only detection builds it.
+func activateRisk(p *RiskProfile, domain RiskDomain, reason string) {
 	if p.Reasons == nil {
 		p.Reasons = map[RiskDomain][]string{}
 	}
@@ -64,7 +67,9 @@ func (p *RiskProfile) activate(domain RiskDomain, reason string) {
 	}
 }
 
-func (p *RiskProfile) normalize() {
+// normalizeRisks puts the active domains in registry order and every reason list
+// in sorted order, so a profile does not depend on the order files were read.
+func normalizeRisks(p *RiskProfile) {
 	order := RiskDomains()
 	slices.SortStableFunc(p.Active, func(a, b RiskDomain) int {
 		return slices.Index(order, a) - slices.Index(order, b)
@@ -91,13 +96,13 @@ func DetectRisks(ctx context.Context, in DetectionInput) (RiskProfile, error) {
 	var profile RiskProfile
 	if in.AllActive {
 		for _, domain := range RiskDomains() {
-			profile.activate(domain, "repository audit treats every risk domain as active")
+			activateRisk(&profile, domain, "repository audit treats every risk domain as active")
 		}
-		profile.normalize()
+		normalizeRisks(&profile)
 		return profile, nil
 	}
 	for _, domain := range in.Contract.DeclaredRisks {
-		profile.activate(domain, "declared by the task contract")
+		activateRisk(&profile, domain, "declared by the task contract")
 	}
 
 	for _, rel := range in.ChangedFiles {
@@ -105,13 +110,13 @@ func DetectRisks(ctx context.Context, in DetectionInput) (RiskProfile, error) {
 			return RiskProfile{}, err
 		}
 		if strings.HasSuffix(rel, "_test.go") {
-			profile.activate(RiskTests, "test file changed: "+rel)
+			activateRisk(&profile, RiskTests, "test file changed: "+rel)
 		}
 		if isMigrationPath(rel) {
-			profile.activate(RiskPersistence, "migration file changed: "+rel)
+			activateRisk(&profile, RiskPersistence, "migration file changed: "+rel)
 		}
 		if isDependencyFile(rel) {
-			profile.activate(RiskDependency, "dependency file changed: "+rel)
+			activateRisk(&profile, RiskDependency, "dependency file changed: "+rel)
 		}
 		if !strings.HasSuffix(rel, ".go") {
 			continue
@@ -123,7 +128,7 @@ func DetectRisks(ctx context.Context, in DetectionInput) (RiskProfile, error) {
 	if err := detectBenchmarks(ctx, in, &profile); err != nil {
 		return RiskProfile{}, err
 	}
-	profile.normalize()
+	normalizeRisks(&profile)
 	return profile, nil
 }
 
@@ -167,19 +172,19 @@ func detectInFile(tree fs.FS, rel string, profile *RiskProfile) error {
 		importPath := strings.Trim(spec.Path.Value, `"`)
 		switch {
 		case isConcurrencyImport(importPath):
-			profile.activate(RiskConcurrency, "changed file imports "+importPath+": "+rel)
+			activateRisk(profile, RiskConcurrency, "changed file imports "+importPath+": "+rel)
 		case isNetworkImport(importPath):
-			profile.activate(RiskNetwork, "changed file imports "+importPath+": "+rel)
+			activateRisk(profile, RiskNetwork, "changed file imports "+importPath+": "+rel)
 		case isPersistenceImport(importPath):
-			profile.activate(RiskPersistence, "changed file imports "+importPath+": "+rel)
+			activateRisk(profile, RiskPersistence, "changed file imports "+importPath+": "+rel)
 		}
 	}
 
 	if hasConcurrencySyntax(file) {
-		profile.activate(RiskConcurrency, "changed file uses goroutines or channels: "+rel)
+		activateRisk(profile, RiskConcurrency, "changed file uses goroutines or channels: "+rel)
 	}
 	if isPublicPackagePath(rel) && hasExportedDecl(file) {
-		profile.activate(RiskPublicAPI, "changed file declares exported API: "+rel)
+		activateRisk(profile, RiskPublicAPI, "changed file declares exported API: "+rel)
 	}
 	return nil
 }
@@ -305,7 +310,7 @@ func detectBenchmarks(ctx context.Context, in DetectionInput, profile *RiskProfi
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Benchmark") {
-				profile.activate(RiskHotPath, "benchmark in an affected package: "+rel)
+				activateRisk(profile, RiskHotPath, "benchmark in an affected package: "+rel)
 				break
 			}
 		}

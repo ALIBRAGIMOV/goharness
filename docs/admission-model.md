@@ -212,9 +212,12 @@ carrying a race detector report is exempt: a race seen once is a race.
 
 Where the change touches concurrency, every affected test package that does
 not declare a `TestMain` receives one through a build overlay. It runs the
-package's tests and, when they pass, looks up the Go runtime's
+package's tests and, when they pass, reads the Go runtime's
 `goroutineleak` profile: a goroutine blocked on a channel, lock or select
-that nothing reachable can ever wake. A non-empty profile fails the package,
+that nothing reachable can ever wake. It reads it again while other
+goroutines remain, with pauses doubling up to 128 milliseconds, because a
+goroutine that has not run yet has not parked yet. A non-empty profile fails
+the package,
 and the finding (`GH-LEAK-001`) is identified by the site that started the
 goroutine and carries the functions it is parked in. One site is one finding
 however many packages reached it.

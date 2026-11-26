@@ -2,6 +2,8 @@ package tool
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"slices"
@@ -124,6 +126,13 @@ func TestSplitPosition(t *testing.T) {
 	}
 	if file, line, col := splitPosition("plain.go"); file != "plain.go" || line != 0 || col != 0 {
 		t.Fatalf("got %q %d %d", file, line, col)
+	}
+}
+
+func TestStrictConfigDigestNamesTheEmbeddedBytes(t *testing.T) {
+	sum := sha256.Sum256(StrictConfig())
+	if got, want := StrictConfigDigest(), hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("StrictConfigDigest() = %s, want the digest of the embedded bytes %s", got, want)
 	}
 }
 
@@ -323,10 +332,11 @@ func TestCompareGoVersionsOrdersNumerically(t *testing.T) {
 	}
 }
 
-// TestResolveGoVersionRunsSanitisedInTheModule holds the invariant the field
-// report's second blocker broke: the version that decides which standard
-// library is judged is read from the module, under the same sanitised
-// environment as every other check, and never from wherever the operator stood.
+// TestResolveGoVersionRunsSanitisedInTheModule holds the invariant that keeps
+// vulnerability evidence independent of the invocation directory: the version
+// that decides which standard library is judged is read from the module, under
+// the same sanitised environment as every other check, and never from wherever
+// the operator stood.
 func TestResolveGoVersionRunsSanitisedInTheModule(t *testing.T) {
 	t.Parallel()
 	runner := &stubRunner{result: Result{Stdout: "go1.26.6\n"}}

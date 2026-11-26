@@ -27,7 +27,7 @@ func runDiff(args []string, streams Streams) int {
 		return report.DiffExitError
 	}
 	if fs.NArg() != 2 {
-		errOut.line("goharness diff takes exactly two reports, got %d", fs.NArg())
+		errOut.linef("goharness diff takes exactly two reports, got %d", fs.NArg())
 		errOut.printf("\n%s", commandUsage("diff"))
 		return report.DiffExitError
 	}
@@ -35,30 +35,29 @@ func runDiff(args []string, streams Streams) int {
 	oldPath, newPath := fs.Arg(0), fs.Arg(1)
 	oldDoc, err := readDocument(oldPath)
 	if err != nil {
-		errOut.line("goharness diff: %v", err)
+		errOut.linef("goharness diff: %v", err)
 		return report.DiffExitError
 	}
 	newDoc, err := readDocument(newPath)
 	if err != nil {
-		errOut.line("goharness diff: %v", err)
+		errOut.linef("goharness diff: %v", err)
 		return report.DiffExitError
 	}
 
 	d := report.CompareDocuments(oldDoc, newDoc)
 	if err := writeDiff(streams.Out, d, *asJSON, *noColor, oldPath, newPath); err != nil {
-		errOut.line("goharness diff: %v", err)
+		errOut.linef("goharness diff: %v", err)
 		return report.DiffExitError
 	}
 	// A comparison of two different views of the evidence is arithmetic, not a
-	// burn-down: rows the narrower report never carried come out as repairs, and
-	// on one production pair that was 4795 of a reported 5535 "fixed". Warning
-	// and returning a clean exit code hands a number nobody should act on to
-	// whatever automated the comparison.
+	// burn-down: rows the narrower report never carried come out as repairs.
+	// Warning and returning a clean exit code hands a number nobody should act on
+	// to whatever automated the comparison.
 	if d.Old.Scope != d.New.Scope && !*allowMismatch {
-		errOut.line("goharness diff: %s was written with --evidence %s and %s with %s, "+
+		errOut.linef("goharness diff: %s was written with --evidence %s and %s with %s, "+
 			"so what one carries the other never did", oldPath, orNone(d.Old.Scope),
 			newPath, orNone(d.New.Scope))
-		errOut.line("rerun both with the same --evidence, or pass --allow-scope-mismatch " +
+		errOut.linef("rerun both with the same --evidence, or pass --allow-scope-mismatch " +
 			"to read the counts as the mechanical comparison they are")
 		return report.DiffExitError
 	}

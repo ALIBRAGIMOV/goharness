@@ -287,9 +287,9 @@ func SimplicityFindings(m Metrics) []Finding {
 // generated names the files whose contents a tool wrote, and no delta is
 // computed across them. A function in generated code is identified by a name the
 // generator chose, and regenerating after a type is deleted renumbers every name
-// after it: a production run was told that easyjson...Record23 rose from
-// complexity 9 to 31, when what actually happened is that the name now belongs to
-// a different decoder. A delta between two functions that are not the same
+// after it: a decoder numbered 23 at base and one numbered 23 at head can be two
+// different decoders, and a complexity rise between them describes the numbering
+// rather than the code. A delta between two functions that are not the same
 // function is not a measurement, and declining to make it is not leniency.
 func MaintainabilityFindings(base, head Metrics, generated map[string]bool) []Finding {
 	var out []Finding

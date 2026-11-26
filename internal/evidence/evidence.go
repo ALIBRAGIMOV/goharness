@@ -45,10 +45,9 @@ const (
 // debt older than the change.
 //
 // The values are ordered from the change outward, and the distance matters. A
-// two-valued axis proved too coarse in the field: it put a whole package's debt
-// in the same bucket as the lines the author typed, which is 846 rows of noise on
-// one merge request, and it gave a reviewer no way to ask the question they
-// actually have, which is what this change wrote.
+// two-valued axis is too coarse: it puts a whole package's debt in the same
+// bucket as the lines the author typed, and it gives a reviewer no way to ask
+// the question they actually have, which is what this change wrote.
 type Origin string
 
 // Finding origins relative to the change under verification, nearest first.

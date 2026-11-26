@@ -11,9 +11,10 @@ import (
 	"github.com/ALIBRAGIMOV/goharness/internal/verify"
 )
 
-// localConfig is an incumbent golangci-lint configuration of the shape the
-// field report's subject had: a wholesale test-file exclusion, and errcheck
-// running without check-blank.
+// localConfig is an incumbent golangci-lint configuration with two permissive
+// choices: a wholesale test-file exclusion, and errcheck running without
+// check-blank. Each is defensible alone; together they hide every discarded
+// error in a test.
 const localConfig = `version: "2"
 linters:
   default: none
@@ -55,10 +56,10 @@ func entryByID(t *testing.T, shadow *verify.PolicyShadow, id string) verify.Shad
 	return verify.ShadowEntry{}
 }
 
-// TestPolicyShadowIsReportedFromTheRepositoryOwnConfig is the output the field
-// report called the single most valuable sentence of the audit, generated from
-// the customer's own file: your configuration excludes errcheck from test
-// files, and this many of this run's findings live there.
+// TestPolicyShadowIsReportedFromTheRepositoryOwnConfig asserts the sentence an
+// audit owes a repository that runs its own linter configuration, generated
+// from that file: your configuration excludes errcheck from test files, and
+// this many of this run's findings live there.
 func TestPolicyShadowIsReportedFromTheRepositoryOwnConfig(t *testing.T) {
 	f := shadowFixture(t, true)
 	result := run(t, f, verify.ModeAudit)

@@ -58,7 +58,7 @@ const plainHyphen = "-"
 // The spans come from the parser, so a string literal that contains the same
 // rune is untouched by construction rather than by a pattern that tries to
 // recognise one. That property is what makes the fixer safe to run over a
-// repository whose literals carry client-facing copy. The edit is spliced into
+// repository whose literals carry user-facing text. The edit is spliced into
 // the original bytes rather than printed from the syntax tree, because printing
 // would rewrite formatting the author chose and the fix would stop being one.
 func rewriteEmDashComments(relPath string, src []byte) ([]byte, int, bool) {

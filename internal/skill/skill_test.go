@@ -4,9 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/ALIBRAGIMOV/goharness/internal/policy"
 	"github.com/ALIBRAGIMOV/goharness/internal/skill"
 )
 
@@ -33,6 +36,38 @@ func TestSourceIsAnAgentSkill(t *testing.T) {
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("the skill does not mention %q", want)
+		}
+	}
+}
+
+// TestSkillCitesOnlyRegisteredRulesAndPrimarySources keeps the skill honest. An
+// agent acts on every rule ID the skill names and follows every link it gives,
+// so a rule the registry does not hold, or a source other than the Go project's
+// documents and the two published style guides (Uber's at the pinned commit
+// only), would teach a standard nobody published.
+func TestSkillCitesOnlyRegisteredRulesAndPrimarySources(t *testing.T) {
+	t.Parallel()
+	src := skill.Source()
+	ids := regexp.MustCompile(`\b(?:GH|GCL|UBER|GO)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*`).FindAllString(src, -1)
+	if len(ids) < 40 {
+		t.Fatalf("the skill names %d rules; the standard section should tie each line to one", len(ids))
+	}
+	for _, id := range ids {
+		if _, ok := policy.Lookup(id); !ok {
+			t.Errorf("the skill names %s, which is not a registered rule", id)
+		}
+	}
+	primary := []string{
+		"https://go.dev/", "https://pkg.go.dev/", "https://go-proverbs.github.io",
+		"https://google.github.io/styleguide/go/", policy.UberGuideBaseURL,
+	}
+	links := regexp.MustCompile(`https?://[^\s)>]+`).FindAllString(src, -1)
+	if len(links) == 0 {
+		t.Fatal("the skill links no source for the standard it asks for")
+	}
+	for _, link := range links {
+		if !slices.ContainsFunc(primary, func(prefix string) bool { return strings.HasPrefix(link, prefix) }) {
+			t.Errorf("the skill links %s, which is not a primary Go source", link)
 		}
 	}
 }

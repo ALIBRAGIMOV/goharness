@@ -81,9 +81,9 @@ func TestOriginDistinguishesEveryDistanceFromTheChange(t *testing.T) {
 	}
 }
 
-// TestTheDiffViewDropsWhatTheAuthorNeverOpened is the consequence the field
-// report asked for: 846 rows in sibling files came back labelled as the
-// change's, and a reviewer had to compute the diff by hand to see otherwise.
+// TestTheDiffViewDropsWhatTheAuthorNeverOpened keeps debt in sibling files out
+// of the change's view. Labelled as the change's, those rows outnumber what the
+// author wrote, and a reviewer has to compute the diff by hand to see otherwise.
 func TestTheDiffViewDropsWhatTheAuthorNeverOpened(t *testing.T) {
 	useGolangci(t)
 	f := originFixture(t)

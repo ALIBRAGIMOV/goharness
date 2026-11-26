@@ -48,9 +48,9 @@ const (
 // else, and no consequence class makes a required rule advisory or the reverse.
 //
 // It exists because consequence is wildly uneven inside a single rule set. A
-// discarded write to a compliance audit trail and a typographic em dash are
-// both "required", and a consumer that allocates effort by count starts with
-// whichever is cheapest to emit. The class is the document's own answer to
+// discarded database write and a typographic em dash are both "required", and a
+// consumer that allocates effort by count starts with whichever is cheapest to
+// emit. The class is the document's own answer to
 // "what should I fix first".
 type Consequence string
 

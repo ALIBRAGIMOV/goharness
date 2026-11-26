@@ -226,10 +226,10 @@ func TestDebtLedgerBurnDownCountsWhatWasFixed(t *testing.T) {
 	}
 }
 
-// TestDebtLedgerWorksWhereTheModuleIsNotTheGitRoot runs the whole loop in the
-// layout the field report's subject had. The ledger is read and written at the
-// module root, and every path defect this project has shipped lived in the gap
-// between that and the repository root.
+// TestDebtLedgerWorksWhereTheModuleIsNotTheGitRoot runs the whole loop with the
+// module below the git root. The ledger is read and written at the module root,
+// and every path defect this project has shipped lived in the gap between that
+// and the repository root.
 func TestDebtLedgerWorksWhereTheModuleIsNotTheGitRoot(t *testing.T) {
 	f := debtFixture(t, subdirLayout())
 	requireVerdict(t, run(t, f, verify.ModeAudit), admission.VerdictRejected)

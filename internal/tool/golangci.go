@@ -2,7 +2,9 @@ package tool
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -33,6 +35,15 @@ func StrictConfig() []byte {
 	out := make([]byte, len(strictConfig))
 	copy(out, strictConfig)
 	return out
+}
+
+// StrictConfigDigest is the hex SHA-256 of the embedded strict configuration.
+// Lint evidence describes the linters that produced it, and the version string
+// does not move when the configuration does, so anything that caches lint
+// evidence has to key on this as well.
+func StrictConfigDigest() string {
+	sum := sha256.Sum256(strictConfig)
+	return hex.EncodeToString(sum[:])
 }
 
 // Golangci is a discovered golangci-lint executable.

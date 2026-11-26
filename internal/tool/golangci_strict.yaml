@@ -6,14 +6,20 @@ run:
 linters:
   default: none
   enable:
+    - asasalint
+    - bidichk
     - bodyclose
+    - containedctx
+    - durationcheck
     - errcheck
     - errname
     - errorlint
     - fatcontext
     - forcetypeassert
+    - gocheckcompilerdirectives
     - gochecknoglobals
     - gochecknoinits
+    - goprintffuncname
     - gosec
     - ineffassign
     - makezero
@@ -23,18 +29,29 @@ linters:
     - nilnesserr
     - nilnil
     - noctx
+    - perfsprint
     - predeclared
+    - reassign
+    - recvcheck
     - revive
     - rowserrcheck
     - sqlclosecheck
     - staticcheck
+    - testableexamples
     - testifylint
     - unused
     - usestdlibvars
+    - usetesting
   settings:
     errcheck:
       check-type-assertions: true
       check-blank: true
+    # perfsprint is held to the one claim the Uber guide makes: strconv over fmt
+    # for conversions. Rewriting concatenations or error construction is a
+    # matter of taste, and taste is not evidence.
+    perfsprint:
+      errorf: false
+      strconcat: false
     # Only revive's defect-oriented rules are enabled. The stylistic ones would
     # force rewrites of correct code to please a linter, which is exactly the
     # behavior this harness exists to prevent.

@@ -111,33 +111,44 @@ func gofixDimensions() map[string]Dimension {
 
 func linterDimensions() map[string]Dimension {
 	return map[string]Dimension{
-		"bodyclose":        DimOperability,
-		"dupl":             DimReuse,
-		"errcheck":         DimReliability,
-		"errname":          DimMaintainability,
-		"errorlint":        DimReliability,
-		"fatcontext":       DimReliability,
-		"forcetypeassert":  DimReliability,
-		"gochecknoglobals": DimArchitecture,
-		"gochecknoinits":   DimArchitecture,
-		"gosec":            DimSecurity,
-		"revive":           DimCorrectness,
-		"ineffassign":      DimCorrectness,
-		"makezero":         DimCorrectness,
-		"modernize":        DimSimplicity,
-		"musttag":          DimReliability,
-		"nilerr":           DimReliability,
-		"nilnesserr":       DimReliability,
-		"nilnil":           DimReliability,
-		"noctx":            DimOperability,
-		"predeclared":      DimMaintainability,
-		"rowserrcheck":     DimOperability,
-		"sqlclosecheck":    DimOperability,
-		"staticcheck":      DimCorrectness,
-		"testifylint":      DimTestEffectiveness,
-		"typecheck":        DimCorrectness,
-		"unused":           DimSimplicity,
-		"usestdlibvars":    DimSimplicity,
+		"asasalint":                 DimCorrectness,
+		"bidichk":                   DimSecurity,
+		"bodyclose":                 DimOperability,
+		"containedctx":              DimReliability,
+		"dupl":                      DimReuse,
+		"durationcheck":             DimCorrectness,
+		"errcheck":                  DimReliability,
+		"errname":                   DimMaintainability,
+		"errorlint":                 DimReliability,
+		"fatcontext":                DimReliability,
+		"forcetypeassert":           DimReliability,
+		"gocheckcompilerdirectives": DimCorrectness,
+		"gochecknoglobals":          DimArchitecture,
+		"gochecknoinits":            DimArchitecture,
+		"goprintffuncname":          DimMaintainability,
+		"gosec":                     DimSecurity,
+		"revive":                    DimCorrectness,
+		"ineffassign":               DimCorrectness,
+		"makezero":                  DimCorrectness,
+		"modernize":                 DimSimplicity,
+		"musttag":                   DimReliability,
+		"nilerr":                    DimReliability,
+		"nilnesserr":                DimReliability,
+		"nilnil":                    DimReliability,
+		"noctx":                     DimOperability,
+		"perfsprint":                DimPerformance,
+		"predeclared":               DimMaintainability,
+		"reassign":                  DimCorrectness,
+		"recvcheck":                 DimMaintainability,
+		"rowserrcheck":              DimOperability,
+		"sqlclosecheck":             DimOperability,
+		"staticcheck":               DimCorrectness,
+		"testableexamples":          DimTestEffectiveness,
+		"testifylint":               DimTestEffectiveness,
+		"typecheck":                 DimCorrectness,
+		"unused":                    DimSimplicity,
+		"usestdlibvars":             DimSimplicity,
+		"usetesting":                DimTestEffectiveness,
 	}
 }
 
@@ -148,7 +159,8 @@ func uberDimension(ruleID string) (Dimension, bool) {
 	if !ok {
 		return "", false
 	}
-	if dim, found := DimensionOf(rule.Enforcement); found {
+	enforcer, _ := policy.EnforcementParts(rule.Enforcement)
+	if dim, found := DimensionOf(enforcer); found {
 		return dim, true
 	}
 	return uberManualDimensions()[ruleID], true
@@ -158,10 +170,7 @@ func uberManualDimensions() map[string]Dimension {
 	return map[string]Dimension{
 		"UBER-ERR-004": DimReliability,
 		"UBER-PAN-001": DimReliability,
-		"UBER-EXI-001": DimOperability,
-		"UBER-STY-002": DimConcurrencySafety,
 		"UBER-LOO-001": DimConcurrencySafety,
-		"UBER-GOR-001": DimConcurrencySafety,
 		"UBER-CPY-001": DimReliability,
 		"UBER-EMB-001": DimArchitecture,
 		"UBER-CHN-001": DimBoundedResources,

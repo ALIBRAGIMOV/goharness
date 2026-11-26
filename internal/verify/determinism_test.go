@@ -43,13 +43,11 @@ func TestReportsAreByteIdenticalAcrossRuns(t *testing.T) {
 // invariance property: evidence is a function of the repository, the revision,
 // the policy and the database, and of nothing else.
 //
-// It exists because a production audit of one commit produced two different
-// security verdicts minutes apart, and the only difference between the runs was
-// the directory the operator happened to be standing in. The scanner was
-// resolving the Go version it judges the standard library against by shelling
-// out with neither a directory nor an environment, so it read the harness's own
-// working directory. Nothing in either report said so, which is what made the
-// disagreement so expensive: both looked equally authoritative.
+// A scanner that resolves the Go version it judges the standard library
+// against by shelling out with neither a directory nor an environment reads the
+// harness's own working directory, so two audits of one commit can reach two
+// different security verdicts depending on where the operator stood. Nothing in
+// either report would say so, and both would look equally authoritative.
 func TestReportsAreByteIdenticalAcrossWorkingDirectories(t *testing.T) {
 	useGolangci(t)
 	t.Setenv(toolcache.EnvCacheRoot, t.TempDir())
@@ -68,9 +66,8 @@ func TestReportsAreByteIdenticalAcrossWorkingDirectories(t *testing.T) {
 	// Cells are grouped by repository shape before they are compared. Two
 	// layouts with different module prefixes are different repositories, down to
 	// the commit hashes, so requiring their reports to match would be asserting
-	// something untrue. The property under test is narrower and is the one that
-	// failed in the field: one repository, one revision, more than one place to
-	// stand.
+	// something untrue. The property under test is narrower: one repository,
+	// one revision, more than one place to stand.
 	byShape := map[string][]string{}
 	for _, lay := range layouts() {
 		t.Run(lay.name, func(t *testing.T) {

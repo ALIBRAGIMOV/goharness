@@ -905,7 +905,7 @@ func TestReportFileTakesTheDocumentOffTheStream(t *testing.T) {
 
 // TestDiffRefusesTwoDifferentViewsOfTheEvidence keeps a burn-down from being
 // arithmetic. Rows the narrower report never carried come out as repairs nobody
-// made: on one production pair that was 4795 of a reported 5535 "fixed".
+// made, and on a large repository they are most of the number.
 func TestDiffRefusesTwoDifferentViewsOfTheEvidence(t *testing.T) {
 	dir := newFixtureRepo(t)
 	tmp := t.TempDir()

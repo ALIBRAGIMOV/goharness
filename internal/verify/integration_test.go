@@ -911,9 +911,9 @@ func TestScopeViolationFailsRequirementsCompliance(t *testing.T) {
 	}
 }
 
-// brokenBenchmarkSource is a test file whose benchmark cannot run: a real
-// repository carried one for years, and one run of it took every measurement
-// of its package down with it.
+// brokenBenchmarkSource is a test file whose benchmark cannot run. Unless it is
+// skipped by name, one run of it takes every measurement of its package down
+// with it.
 const brokenBenchmarkSource = benchmarkSource + `
 func BenchmarkBroken(b *testing.B) {
 	panic("this benchmark has been broken since before the change")

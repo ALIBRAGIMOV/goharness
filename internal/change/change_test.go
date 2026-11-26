@@ -153,8 +153,8 @@ func TestHasBase(t *testing.T) {
 	}
 }
 
-// TestUnexaminedSeparatesToolFaultsFromCodeFacts holds the taxonomy line that a
-// production audit crossed.
+// TestUnexaminedSeparatesToolFaultsFromCodeFacts holds the line between a tool
+// fault and a fact about the code.
 //
 // "N changed Go files were compiled by nothing in this run" is a claim about the
 // repository. When the harness has merely failed to find a file, that claim is
