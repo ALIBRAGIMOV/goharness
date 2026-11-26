@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALIBRAGIMOV/goharness/internal/toolcache"
 )
@@ -101,6 +102,27 @@ func TestRunGolangciKeepsARealTypeErrorAsAFinding(t *testing.T) {
 	}
 	if len(issues) != 1 || issues[0].FromLinter != "typecheck" {
 		t.Fatalf("issues = %+v", issues)
+	}
+}
+
+// TestRunTestsLeavesTheTimeLimitToTheRun keeps go test's default ten minutes
+// per binary from failing a package that is only slow. Under a run deadline
+// the deadline is the limit; without one, go test keeps its own.
+func TestRunTestsLeavesTheTimeLimitToTheRun(t *testing.T) {
+	bounded, cancel := context.WithTimeout(t.Context(), time.Hour)
+	defer cancel()
+	runner := &stubRunner{result: Result{Stdout: `{"Action":"pass","Package":"example.com/x"}`}}
+	if _, err := RunTests(bounded, runner, ".", []string{"./..."}, []string{"-race"}); err != nil {
+		t.Fatalf("RunTests: %v", err)
+	}
+	if !slices.Contains(runner.last.Args, "-timeout=0") {
+		t.Errorf("under a run deadline go test was left its own limit: %v", runner.last.Args)
+	}
+	if _, err := RunTests(t.Context(), runner, ".", []string{"./..."}, nil); err != nil {
+		t.Fatalf("RunTests: %v", err)
+	}
+	if slices.ContainsFunc(runner.last.Args, func(arg string) bool { return strings.HasPrefix(arg, "-timeout") }) {
+		t.Errorf("without a run deadline go test lost its own limit: %v", runner.last.Args)
 	}
 }
 

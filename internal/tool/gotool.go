@@ -191,6 +191,15 @@ func RunTests(ctx context.Context, runner Runner, dir string, patterns, extraArg
 	// re-run its subset would surface vet findings as test failures and would
 	// refuse overlay-injected virtual packages it cannot chdir into.
 	args := []string{"test", "-json", "-count=1", "-vet=off"}
+	// go test stops each test binary after ten minutes unless told otherwise,
+	// and a large package under the race detector can need longer. The binary
+	// then panics as if a test had failed: a limit of the tool reported as a
+	// fact about the code. A run with a deadline already stops everything it
+	// started when that deadline passes, and says the budget was the cause, so
+	// the deadline is the only limit it should have.
+	if _, bounded := ctx.Deadline(); bounded {
+		args = append(args, "-timeout=0")
+	}
 	args = append(args, extraArgs...)
 	args = append(args, patterns...)
 

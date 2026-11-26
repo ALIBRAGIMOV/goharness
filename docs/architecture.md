@@ -193,7 +193,10 @@ dependencies (compile precedes vet, lint and tests). The scheduler:
 - `go mod tidy -diff` runs check-only. `go test` uses `-json`, including the
   overlaid runs that judge mutants, so a package that failed to build is
   told apart from a test that failed. `-race` runs where the change touches
-  concurrency, and repository-wide in `audit`.
+  concurrency, and repository-wide in `audit`. Test binaries run under the
+  run's own deadline rather than go test's ten minutes per binary, so a long
+  suite is never reported as a failing one; a run that outlives `--timeout`
+  says the budget was the cause.
 - Goroutine-leak evidence comes from the runtime. The injected `TestMain`
   runs the package's tests, then reads the `goroutineleak` profile, again
   while other goroutines remain, for at most a quarter of a second, so a
