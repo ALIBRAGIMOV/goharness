@@ -135,7 +135,7 @@ func reportGoFix(ctx context.Context, out *printer, runner tool.Runner, dir stri
 func reportScanner(out *printer) {
 	out.linef("%s vuln scanner   embedded golang.org/x/vuln %s", mark(true),
 		orUnknown(tool.XVulnVersion()))
-	out.linef("%s leak check     %s profile, read by a TestMain injected into race runs (needs %s or later on PATH)",
+	out.linef("%s leak check     %s, read by a TestMain injected into race runs (needs %s or later on PATH)",
 		mark(true), leakcheck.Method, leakcheck.MinimumGoVersion)
 }
 

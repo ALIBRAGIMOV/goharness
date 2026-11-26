@@ -252,7 +252,26 @@ func RunGolangci(ctx context.Context, runner Runner, g Golangci, dir, configPath
 	if err := json.Unmarshal([]byte(payload), &report); err != nil {
 		return nil, fmt.Errorf("decoding golangci-lint JSON report: %w", err)
 	}
+	if fault, ok := exportDataFault(report.Issues); ok {
+		return nil, fmt.Errorf("golangci-lint %s cannot read the export data the go command on PATH writes, "+
+			"so it judged no code; run the gate under the Go release `golangci-lint version` says it was built with: %s",
+			g.Version, firstLines(fault.Text, 1))
+	}
 	return report.Issues, nil
+}
+
+// exportDataFault finds a typecheck issue that is the linter failing to decode
+// what the go command compiled rather than a fact about the code. A linter built
+// with one Go release cannot read export data whose format a later patch release
+// changed, and then every package it loads reports the same import failure: a
+// tool fault that, taken as findings, would reject any change on any code.
+func exportDataFault(issues []GolangciIssue) (GolangciIssue, bool) {
+	for _, issue := range issues {
+		if issue.FromLinter == "typecheck" && strings.Contains(issue.Text, "could not load export data") {
+			return issue, true
+		}
+	}
+	return GolangciIssue{}, false
 }
 
 func firstLines(s string, n int) string {

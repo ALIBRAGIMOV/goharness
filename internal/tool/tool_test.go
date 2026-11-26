@@ -68,6 +68,42 @@ func TestRunGolangciTreatsExitOneAsFindings(t *testing.T) {
 	}
 }
 
+// TestRunGolangciTreatsUnreadableExportDataAsAToolFailure covers a linter built
+// with an older Go than the toolchain that compiled the packages. Its typecheck
+// rows say nothing about the code, so they must leave as a failure of the tool.
+func TestRunGolangciTreatsUnreadableExportDataAsAToolFailure(t *testing.T) {
+	runner := &stubRunner{result: Result{
+		ExitCode: 1,
+		Stdout: `{"Issues":[{"FromLinter":"typecheck","Text":"could not import os (could not import internal/cpu ` +
+			`(-: could not load export data: internal error in importing \"internal/cpu\" (cannot decode ` +
+			`\"internal/cpu\", export data version 5 is greater than maximum supported version 4)))",` +
+			`"Pos":{"Filename":"lib/lib.go","Line":3,"Column":8}}]}`,
+	}}
+	issues, err := RunGolangci(t.Context(), runner, Golangci{Path: "x", Version: GolangciLintPin}, ".", "cfg", []string{"./..."})
+	if err == nil {
+		t.Fatalf("an unreadable export format was reported as %d finding(s) about the code", len(issues))
+	}
+	if !strings.Contains(err.Error(), "export data") || !strings.Contains(err.Error(), GolangciLintPin) {
+		t.Fatalf("the failure does not say what the tool could not read: %v", err)
+	}
+}
+
+// TestRunGolangciKeepsARealTypeErrorAsAFinding is the guard: code that does not
+// type-check is a fact about the code, and it stays a finding.
+func TestRunGolangciKeepsARealTypeErrorAsAFinding(t *testing.T) {
+	runner := &stubRunner{result: Result{
+		ExitCode: 1,
+		Stdout:   `{"Issues":[{"FromLinter":"typecheck","Text":"undefined: missing","Pos":{"Filename":"a.go","Line":5,"Column":2}}]}`,
+	}}
+	issues, err := RunGolangci(t.Context(), runner, Golangci{Path: "x", Version: GolangciLintPin}, ".", "cfg", []string{"./..."})
+	if err != nil {
+		t.Fatalf("a real type error became a tool failure: %v", err)
+	}
+	if len(issues) != 1 || issues[0].FromLinter != "typecheck" {
+		t.Fatalf("issues = %+v", issues)
+	}
+}
+
 func TestRunGolangciTreatsOtherExitCodesAsToolFailures(t *testing.T) {
 	runner := &stubRunner{result: Result{ExitCode: 3, Stderr: "internal error"}}
 	if _, err := RunGolangci(t.Context(), runner, Golangci{Path: "x"}, ".", "cfg", []string{"./..."}); err == nil {

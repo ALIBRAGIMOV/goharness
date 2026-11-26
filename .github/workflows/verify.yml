@@ -29,10 +29,17 @@ jobs:
           # more than the single commit a default checkout fetches.
           fetch-depth: 0
 
+      # setup-go reads only the go directive, a language version that resolves
+      # to the newest patch release. The gate runs under the toolchain line
+      # instead: the release the pinned golangci-lint can read the export data
+      # of, which a later patch release is free to change.
+      - name: the toolchain go.mod pins
+        id: toolchain
+        run: echo "version=$(sed -n 's/^toolchain go//p' go.mod)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
-          check-latest: true
+          go-version: ${{ steps.toolchain.outputs.version }}
 
       - name: build
         run: go build ./...
@@ -95,10 +102,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+      - name: the toolchain go.mod pins
+        id: toolchain
+        run: echo "version=$(sed -n 's/^toolchain go//p' go.mod)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
-          check-latest: true
+          go-version: ${{ steps.toolchain.outputs.version }}
       - run: go run ./cmd/goharness setup
       - name: every known bypass stays closed
         run: go test ./internal/verify -run 'TestBypass' -count=1 -timeout 30m -v

@@ -77,6 +77,16 @@ version, hashes to something else, and is refused.
 The sha256 of the binary that produced a verdict is recorded in the report's
 `versions` block.
 
+A trusted binary still has to be able to read what the host toolchain
+compiles. golangci-lint type-checks against the export data the go command
+writes, and a Go patch release may change that format: go1.27.4 writes a
+version that golangci-lint 2.13.2, built with go1.27.0, cannot decode, so every
+package it loads fails to import. That is a fault of the pairing, never a fact
+about the code, and the harness reports it as a failure of golangci-lint,
+INCONCLUSIVE, quoting the import it could not decode. Run the gate under the module's `toolchain`
+line; this repository's CI installs exactly that release rather than the
+newest patch of the `go` line.
+
 ## Subprocess environment
 
 Every process the harness starts inherits a sanitised environment:
